@@ -1,0 +1,117 @@
+<ResourceDictionary
+    x:Class="PsfGuard.Nina.Plugin.Options"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <DataTemplate x:Key="PSF Guard Sync_Options">
+        <Grid MaxWidth="760">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <CheckBox
+                Grid.Row="0"
+                Grid.ColumnSpan="2"
+                Margin="0,0,0,10"
+                Content="Enable PSF Guard sync"
+                IsChecked="{Binding Enabled}" />
+
+            <TextBlock Grid.Row="1" Margin="0,4,12,4" VerticalAlignment="Center" Text="Server URL" />
+            <TextBox
+                Grid.Row="1"
+                Grid.Column="1"
+                MinWidth="420"
+                Margin="0,4"
+                Text="{Binding ServerUrl, UpdateSourceTrigger=LostFocus}" />
+
+            <TextBlock Grid.Row="2" Margin="0,4,12,4" VerticalAlignment="Center" Text="Catalog ID" />
+            <TextBox
+                Grid.Row="2"
+                Grid.Column="1"
+                Margin="0,4"
+                Text="{Binding CatalogId, UpdateSourceTrigger=LostFocus}" />
+
+            <TextBlock Grid.Row="3" Margin="0,4,12,4" VerticalAlignment="Center" Text="API token" />
+            <TextBox
+                Grid.Row="3"
+                Grid.Column="1"
+                Margin="0,4"
+                Text="{Binding ApiToken, UpdateSourceTrigger=LostFocus}" />
+
+            <TextBlock Grid.Row="4" Margin="0,4,12,4" VerticalAlignment="Center" Text="Scheduler database" />
+            <TextBox
+                Grid.Row="4"
+                Grid.Column="1"
+                Margin="0,4"
+                Text="{Binding TargetSchedulerDatabase, UpdateSourceTrigger=LostFocus}" />
+
+            <StackPanel Grid.Row="5" Grid.ColumnSpan="2" Margin="0,10,0,0">
+                <CheckBox Content="Push each saved light frame" IsChecked="{Binding AutoPushCaptures}" />
+                <CheckBox
+                    Margin="0,5,0,0"
+                    Content="Apply remote previews automatically"
+                    IsChecked="{Binding AutoApplyPushes}" />
+                <CheckBox
+                    Margin="0,5,0,0"
+                    Content="Include Target Scheduler thumbnails"
+                    IsChecked="{Binding IncludeThumbnails}" />
+            </StackPanel>
+
+            <StackPanel Grid.Row="6" Grid.ColumnSpan="2" Margin="0,14,0,0" Orientation="Horizontal">
+                <Button
+                    MinWidth="120"
+                    Margin="0,0,8,0"
+                    Command="{Binding TestConnectionCommand}"
+                    Content="Test connection" />
+                <Button
+                    MinWidth="120"
+                    Margin="0,0,8,0"
+                    Command="{Binding PushAllCommand}"
+                    Content="Push all" />
+                <Button
+                    MinWidth="120"
+                    Command="{Binding PullPlanningCommand}"
+                    Content="Pull planning" />
+            </StackPanel>
+
+            <StackPanel Grid.Row="7" Grid.ColumnSpan="2" Margin="0,8,0,0" Orientation="Horizontal">
+                <Button
+                    MinWidth="120"
+                    Margin="0,0,8,0"
+                    Command="{Binding PushPlanningCommand}"
+                    Content="Push planning" />
+                <Button
+                    MinWidth="120"
+                    Margin="0,0,8,0"
+                    Command="{Binding PushGradesCommand}"
+                    Content="Push grades" />
+                <Button
+                    MinWidth="120"
+                    Command="{Binding PullGradesCommand}"
+                    Content="Pull grades" />
+            </StackPanel>
+
+            <Border
+                Grid.Row="8"
+                Grid.ColumnSpan="2"
+                Margin="0,14,0,0"
+                Padding="10"
+                BorderBrush="{DynamicResource ControlBorderBrush}"
+                BorderThickness="1">
+                <TextBlock Text="{Binding LastStatus}" TextWrapping="Wrap" />
+            </Border>
+        </Grid>
+    </DataTemplate>
+</ResourceDictionary>

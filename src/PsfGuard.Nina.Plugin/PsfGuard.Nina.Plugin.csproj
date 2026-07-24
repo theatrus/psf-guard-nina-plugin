@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows7.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>PSF Guard Sync</AssemblyName>
+    <RootNamespace>PsfGuard.Nina.Plugin</RootNamespace>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <UseWPF>true</UseWPF>
+    <ImportWindowsDesktopTargets>true</ImportWindowsDesktopTargets>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <PlatformTarget>x64</PlatformTarget>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <NoWarn>$(NoWarn);NU1701</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PsfGuard.Nina.Sync\PsfGuard.Nina.Sync.csproj" />
+    <PackageReference Include="NINA.Plugin" Version="3.2.0.9001" />
+  </ItemGroup>
+
+  <Target Name="CopyPluginForLocalDevelopment" AfterTargets="Build" Condition="'$(CopyToNina)' == 'true'">
+    <PropertyGroup>
+      <NinaPluginDir>$(LOCALAPPDATA)\NINA\Plugins\3.0.0\PSF Guard Sync</NinaPluginDir>
+    </PropertyGroup>
+    <MakeDir Directories="$(NinaPluginDir)" />
+    <ItemGroup>
+      <PluginFiles Include="$(TargetDir)*.dll" />
+    </ItemGroup>
+    <Copy SourceFiles="@(PluginFiles)" DestinationFolder="$(NinaPluginDir)" SkipUnchangedFiles="true" />
+  </Target>
+</Project>
