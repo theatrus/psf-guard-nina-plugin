@@ -140,6 +140,26 @@ tests/                     protocol and Target Scheduler fixture tests
 docs/PROTOCOL.md           PSF Guard remote contract expected by the client
 ```
 
+## Releases
+
+Release tags use the four-part N.I.N.A. plugin version format, such as
+`0.1.0.0`. Pushing a matching tag builds the plugin, packages only its runtime
+dependencies, generates a registry-compatible manifest, and publishes both
+files on the GitHub release.
+
+`PLUGIN_IS_BETA` in the release workflow controls both the GitHub prerelease
+flag and the manifest's N.I.N.A. channel. It remains enabled while the remote
+sync API is under active integration.
+
+The workflow can also be dispatched manually to build and validate a release
+candidate without creating a tag or GitHub release.
+
+The generated manifest belongs at
+`manifests/p/PSF Guard Sync/3.2.0.9001/manifest.json` in a fork of
+[`isbeorn/nina.plugin.manifests`](https://github.com/isbeorn/nina.plugin.manifests).
+Run `npm install` and `node gather.js` in that repository before proposing the
+manifest upstream.
+
 ## License
 
 Mozilla Public License 2.0. See [LICENSE](LICENSE).

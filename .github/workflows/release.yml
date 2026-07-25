@@ -1,0 +1,106 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Four-part plugin version to validate without publishing
+        required: true
+        default: 0.1.0.0
+
+permissions:
+  contents: write
+
+env:
+  PLUGIN_NAME: "PSF Guard Sync"
+  PLUGIN_DLL_NAME: "PSF Guard Sync"
+  PLUGIN_PROJECT: "src/PsfGuard.Nina.Plugin/PsfGuard.Nina.Plugin.csproj"
+  RELEASE_PREFIX: "PsfGuard.Nina.Plugin"
+  PLUGIN_IS_BETA: true
+  RELEASE_VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_NOLOGO: true
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: |
+            src/PsfGuard.Nina.Plugin/packages.lock.json
+            src/PsfGuard.Nina.Sync/packages.lock.json
+
+      - name: Restore locked dependencies
+        run: dotnet restore "${{ env.PLUGIN_PROJECT }}" --locked-mode
+
+      - name: Build tagged version
+        run: >-
+          dotnet build "${{ env.PLUGIN_PROJECT }}"
+          --configuration Release
+          --no-restore
+          --output artifacts/plugin
+          -p:Version=${{ env.RELEASE_VERSION }}
+          -p:AssemblyVersion=${{ env.RELEASE_VERSION }}
+          -p:FileVersion=${{ env.RELEASE_VERSION }}
+
+      - name: Prepare plugin package
+        shell: pwsh
+        run: |
+          $package = "artifacts/package/${{ env.PLUGIN_NAME }}"
+          New-Item -ItemType Directory -Force -Path "$package/dll/x64" | Out-Null
+          Copy-Item "artifacts/plugin/${{ env.PLUGIN_DLL_NAME }}.dll" $package
+          Copy-Item "artifacts/plugin/${{ env.PLUGIN_DLL_NAME }}.pdb" $package
+          Copy-Item "artifacts/plugin/PsfGuard.Nina.Sync.dll" $package
+          Copy-Item "artifacts/plugin/PsfGuard.Nina.Sync.pdb" $package
+          Copy-Item "artifacts/plugin/System.Data.SQLite.dll" $package
+          Copy-Item "artifacts/plugin/runtimes/win-x64/native/SQLite.Interop.dll" "$package/dll/x64"
+
+      - name: Generate archive and manifest
+        shell: pwsh
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://raw.githubusercontent.com/isbeorn/nina.plugin.manifests/main/tools/CreateManifest.ps1" `
+            -OutFile "CreateManifest.ps1"
+          $archiveUrl = "https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_VERSION }}/${{ env.RELEASE_PREFIX }}.${{ env.RELEASE_VERSION }}.zip"
+          $manifestArgs = @{
+            file = "artifacts/package/${{ env.PLUGIN_NAME }}/${{ env.PLUGIN_DLL_NAME }}.dll"
+            installerUrl = $archiveUrl
+            createArchive = $true
+            includeAll = $true
+          }
+          if ($env:PLUGIN_IS_BETA -eq "true") {
+            $manifestArgs.beta = $true
+          }
+          ./CreateManifest.ps1 @manifestArgs
+          Move-Item "${{ env.PLUGIN_DLL_NAME }}.zip" "${{ env.RELEASE_PREFIX }}.${{ env.RELEASE_VERSION }}.zip"
+          Move-Item "manifest.json" "${{ env.RELEASE_PREFIX }}.${{ env.RELEASE_VERSION }}.manifest.json"
+
+      - name: Create GitHub release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "PSF Guard Sync ${{ env.RELEASE_VERSION }}"
+          generate_release_notes: true
+          prerelease: ${{ env.PLUGIN_IS_BETA == 'true' }}
+          files: |
+            ${{ env.RELEASE_PREFIX }}.${{ env.RELEASE_VERSION }}.zip
+            ${{ env.RELEASE_PREFIX }}.${{ env.RELEASE_VERSION }}.manifest.json
+
+      - name: Upload release candidate
+        uses: actions/upload-artifact@v7
+        with:
+          name: plugin-release-${{ env.RELEASE_VERSION }}
+          path: |
+            ${{ env.RELEASE_PREFIX }}.${{ env.RELEASE_VERSION }}.zip
+            ${{ env.RELEASE_PREFIX }}.${{ env.RELEASE_VERSION }}.manifest.json
