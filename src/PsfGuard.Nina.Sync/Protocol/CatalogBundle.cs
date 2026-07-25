@@ -57,6 +57,7 @@ public sealed record CatalogBundle
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? PayloadSha256 { get; set; }
 
+    [JsonIgnore]
     public int RowCount => Tables.Values.Sum(table => table.Rows.Count);
 
     public void Seal()
