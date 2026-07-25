@@ -27,6 +27,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
     private readonly PluginSettings settings;
     private readonly CancellationTokenSource lifetime = new();
     private readonly DurablePushQueue queue;
+    private readonly DurableImageUploadQueue imageUploadQueue;
     private string lastStatus = "Not connected";
 
     [ImportingConstructor]
@@ -43,6 +44,14 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                 "NINA",
                 "PsfGuardSync",
                 "queue"),
+            CreateClient,
+            SetStatus);
+        imageUploadQueue = new DurableImageUploadQueue(
+            Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "NINA",
+                "PsfGuardSync",
+                "image-upload-queue"),
             CreateClient,
             SetStatus);
 
@@ -163,6 +172,16 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
         }
     }
 
+    public bool UploadCapturedImages
+    {
+        get => settings.UploadCapturedImages;
+        set
+        {
+            settings.UploadCapturedImages = value;
+            RaisePropertyChanged();
+        }
+    }
+
     public bool AutoApplyPushes
     {
         get => settings.AutoApplyPushes;
@@ -198,6 +217,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
         profileService.ProfileChanged += ProfileServiceProfileChanged;
         imageSaveMediator.ImageSaved += ImageSaved;
         queue.Start();
+        imageUploadQueue.Start();
         SetStatus(Enabled ? "Capture sync is active." : "Sync is disabled.");
         return base.Initialize();
     }
@@ -207,6 +227,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
         profileService.ProfileChanged -= ProfileServiceProfileChanged;
         imageSaveMediator.ImageSaved -= ImageSaved;
         lifetime.Cancel();
+        await imageUploadQueue.DisposeAsync().ConfigureAwait(false);
         await queue.DisposeAsync().ConfigureAwait(false);
         lifetime.Dispose();
         await base.Teardown().ConfigureAwait(false);
@@ -215,7 +236,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
     private void ImageSaved(object? sender, ImageSavedEventArgs args)
     {
         if (!Enabled
-            || !AutoPushCaptures
+            || (!AutoPushCaptures && !UploadCapturedImages)
             || !string.Equals(
                 args.MetaData.Image.ImageType,
                 "LIGHT",
@@ -232,10 +253,30 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                 {
                     try
                     {
-                        SetStatus($"Waiting for Target Scheduler to record {Path.GetFileName(imagePath)}...");
-                        await CreateOrchestrator()
-                            .QueueCapturedImageAsync(imagePath, exposureStart, lifetime.Token)
-                            .ConfigureAwait(false);
+                        RequireRemoteConfigured();
+                        if (UploadCapturedImages && IsFitsPath(imagePath))
+                        {
+                            await imageUploadQueue.EnqueueAsync(
+                                    CatalogId,
+                                    imagePath,
+                                    lifetime.Token)
+                                .ConfigureAwait(false);
+                        }
+                        else if (UploadCapturedImages)
+                        {
+                            SetStatus(
+                                $"Skipped direct upload for {Path.GetFileName(imagePath)}; PSF Guard ingest accepts FITS files.");
+                        }
+
+                        if (AutoPushCaptures && HasTargetSchedulerDatabase())
+                        {
+                            SetStatus(
+                                $"Waiting for Target Scheduler to record {Path.GetFileName(imagePath)}...");
+                            await CreateOrchestrator()
+                                .QueueCapturedImageAsync(imagePath, exposureStart, lifetime.Token)
+                                .ConfigureAwait(false);
+                        }
+
                         SetStatus($"Queued {Path.GetFileName(imagePath)} for PSF Guard.");
                     }
                     catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
@@ -252,7 +293,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
 
     private SyncOrchestrator CreateOrchestrator()
     {
-        RequireConfigured();
+        RequireRemoteConfigured();
+        RequireSchedulerConfigured();
         var reader = new TargetSchedulerCatalogReader(
             TargetSchedulerDatabase,
             TargetSchedulerVersion());
@@ -279,7 +321,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
 
     private async Task<string> TestConnectionAsync(CancellationToken cancellationToken)
     {
-        RequireConfigured();
+        RequireRemoteConfigured();
         using var client = CreateClient();
         var capabilities = await client.GetCapabilitiesAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -316,7 +358,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
         }
     }
 
-    private void RequireConfigured()
+    private void RequireRemoteConfigured()
     {
         if (string.IsNullOrWhiteSpace(ServerUrl))
         {
@@ -328,11 +370,24 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
             throw new InvalidOperationException("Destination catalog ID is required.");
         }
 
-        if (string.IsNullOrWhiteSpace(TargetSchedulerDatabase))
+        if (string.IsNullOrWhiteSpace(ApiToken))
         {
-            throw new InvalidOperationException("Target Scheduler database path is required.");
+            throw new InvalidOperationException("Remote API key is required.");
         }
     }
+
+    private void RequireSchedulerConfigured()
+    {
+        if (!HasTargetSchedulerDatabase())
+        {
+            throw new InvalidOperationException(
+                "A Target Scheduler database is required for catalog sync actions.");
+        }
+    }
+
+    private bool HasTargetSchedulerDatabase() =>
+        !string.IsNullOrWhiteSpace(TargetSchedulerDatabase)
+        && File.Exists(TargetSchedulerDatabase);
 
     private void ProfileServiceProfileChanged(object? sender, EventArgs args)
     {
@@ -344,6 +399,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
             nameof(ApiToken),
             nameof(Enabled),
             nameof(AutoPushCaptures),
+            nameof(UploadCapturedImages),
             nameof(AutoApplyPushes),
             nameof(IncludeThumbnails),
         })
@@ -376,6 +432,11 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
             ?? assembly?.GetName().Version?.ToString()
             ?? "unknown";
     }
+
+    private static bool IsFitsPath(string path) =>
+        new[] { ".fit", ".fits", ".fts" }.Contains(
+            Path.GetExtension(path),
+            StringComparer.OrdinalIgnoreCase);
 
     private static string FormatApplyResult(string label, ApplyResult result) =>
         $"{label}: {result.Inserted} inserted, {result.Updated} updated, "

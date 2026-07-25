@@ -7,15 +7,16 @@ logical rows, never a live SQLite file.
 ## Transport
 
 - Base path: `/api/sync/v1`
-- Authentication: `Authorization: Bearer <token>`
+- Authentication: `Authorization: Bearer <per-database remote API key>`
 - Production transport: HTTPS
 - Plain HTTP is permitted only for loopback development.
 - Request and response media type: `application/json`
 - Responses may be direct resources or PSF Guard's standard
   `{"success":true,"data":...}` envelope.
 
-Tokens should be scoped to a catalog and the smallest required set of
-`read`, `merge`, `planning_write`, and `grade_write` capabilities.
+Each key identifies exactly one configured database. The same key can
+authenticate database sync and image ingest; image ingest remains separately
+disabled until the database setting enables it.
 
 ## Capabilities
 
@@ -28,7 +29,7 @@ GET /api/sync/v1/capabilities
   "protocol_version": 1,
   "product": "psf-guard",
   "product_version": "0.6.0",
-  "capabilities": ["read", "merge", "planning_write", "grade_write"],
+  "capabilities": ["merge", "push_planning", "push_grades", "preview_apply", "exports", "image_upload"],
   "catalogs": [
     {
       "id": "review",
@@ -159,6 +160,23 @@ is explicit:
 Integer and real values use invariant strings to avoid JSON number precision
 loss. Blob values are base64. The digest is SHA-256 over the compact canonical
 JSON with `payload_sha256` omitted.
+
+## Direct FITS Upload
+
+```http
+POST /api/db/{catalog_id}/images/upload
+Authorization: Bearer <per-database remote API key>
+X-PSF-Guard-Database-ID: <catalog_id>
+X-Content-SHA256: <lowercase SHA-256>
+Content-Type: multipart/form-data
+
+image=@capture.fits
+```
+
+The plugin hashes and streams the file from its durable background queue.
+PSF Guard accepts only readable FITS light frames, publishes without
+overwriting a different file, and imports through its normal target and
+exposure-plan resolver. Repeating the same basename and digest is idempotent.
 
 ## Merge Rules
 

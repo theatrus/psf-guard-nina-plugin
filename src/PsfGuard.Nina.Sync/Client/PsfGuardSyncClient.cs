@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text.Json;
 using PsfGuard.Nina.Sync.Protocol;
 
@@ -14,7 +15,7 @@ public sealed class PsfGuardSyncClient : IDisposable
     {
         this.httpClient = httpClient;
         this.httpClient.BaseAddress = NormalizeBaseUri(baseUri);
-        this.httpClient.Timeout = TimeSpan.FromSeconds(30);
+        this.httpClient.Timeout = TimeSpan.FromMinutes(10);
 
         if (!string.IsNullOrWhiteSpace(apiToken))
         {
@@ -29,6 +30,48 @@ public sealed class PsfGuardSyncClient : IDisposable
     }
 
     public void Dispose() => httpClient.Dispose();
+
+    public async Task UploadImageAsync(
+        string catalogId,
+        string imagePath,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(catalogId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(imagePath);
+
+        var fullPath = Path.GetFullPath(imagePath);
+        await using var hashInput = new FileStream(
+            fullPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 1024 * 1024,
+            useAsync: true);
+        var digest = Convert.ToHexString(
+            await SHA256.HashDataAsync(hashInput, cancellationToken).ConfigureAwait(false))
+            .ToLowerInvariant();
+
+        await using var uploadInput = new FileStream(
+            fullPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 1024 * 1024,
+            useAsync: true);
+        using var image = new StreamContent(uploadInput);
+        image.Headers.ContentType = new MediaTypeHeaderValue("application/fits");
+        using var form = new MultipartFormDataContent();
+        form.Add(image, "image", Path.GetFileName(fullPath));
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"api/db/{Uri.EscapeDataString(catalogId)}/images/upload")
+        {
+            Content = form,
+        };
+        request.Headers.Add("X-PSF-Guard-Database-ID", catalogId);
+        request.Headers.Add("X-Content-SHA256", digest);
+        await SendAsync<JsonElement>(request, cancellationToken).ConfigureAwait(false);
+    }
 
     public async Task<SyncPreview> CreatePreviewAsync(
         string catalogId,

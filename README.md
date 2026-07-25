@@ -3,29 +3,30 @@
 [![CI](https://github.com/theatrus/psf-guard-nina-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/theatrus/psf-guard-nina-plugin/actions/workflows/ci.yml)
 
 A N.I.N.A. 3.2 plugin that synchronizes a live Target Scheduler catalog with a
-remote PSF Guard catalog.
+remote PSF Guard catalog and can upload captured FITS lights directly.
 
 The plugin subscribes to N.I.N.A.'s `IImageSaveMediator.ImageSaved` event. For
-each saved light frame it waits briefly for Target Scheduler to commit the
-matching `acquiredimage` row, builds a schema-preserving bundle containing that
-capture and its project/target/plan dependencies, and places the bundle in a
-durable retry queue. Network work never blocks N.I.N.A.'s image-save pipeline.
+each saved light frame it can durably queue the FITS file for direct upload. If
+Target Scheduler is installed, it can also wait briefly for the matching
+`acquiredimage` row, build a schema-preserving bundle with its dependencies,
+and queue that bundle. Network work never blocks N.I.N.A.'s image-save
+pipeline.
 
 ## Status
 
 The N.I.N.A. side is implemented and tested against the versioned remote
 protocol in [PROTOCOL.md](docs/PROTOCOL.md).
 
-The PSF Guard checkout used to build this plugin documents the same
-`/api/sync/v1/*` protocol in `DATA_TRANSFER_DESIGN.md`, but its `main` branch
-does not serve those routes yet. The plugin will receive `404 Not Found` until
-the server-side protocol is implemented. It deliberately does not fall back to
-copying a live SQLite file or exposing arbitrary SQL.
+PSF Guard serves the matching `/api/sync/v1/*` protocol and the per-database
+FITS ingest route. The plugin deliberately does not copy a live SQLite file or
+expose arbitrary SQL.
 
 ## Features
 
 - Push each captured light frame after Target Scheduler commits it.
-- Durable, idempotent retry queue below `%LOCALAPPDATA%\NINA\PsfGuardSync`.
+- Upload saved FITS lights without requiring Target Scheduler.
+- Durable, idempotent sync and image queues below
+  `%LOCALAPPDATA%\NINA\PsfGuardSync`.
 - Manual full merge, planning push, and reviewed-grade push.
 - Manual planning and reviewed-grade pull.
 - GUID-based identity and Target Scheduler schema 22+ checks.
@@ -39,8 +40,10 @@ copying a live SQLite file or exposing arbitrary SQL.
 
 - Windows x64
 - N.I.N.A. `3.2.0.9001` or newer in the 3.2 line
-- Target Scheduler schema 22 or newer
 - A PSF Guard server implementing sync protocol v1
+
+Target Scheduler schema 22 or newer is required only for catalog sync. Direct
+FITS upload works without Target Scheduler.
 
 Target Scheduler's default database is:
 
@@ -69,11 +72,11 @@ Restart N.I.N.A., open **Plugins > Installed > PSF Guard Sync**, and configure:
 
 1. PSF Guard server URL.
 2. Destination PSF Guard catalog ID.
-3. API token.
-4. Target Scheduler database path.
-5. Capture push and preview-apply policy.
+3. Remote API key generated for that PSF Guard database.
+4. Optional Target Scheduler database path.
+5. FITS upload, catalog push, and preview-apply policy.
 
-Use **Test connection** before enabling automatic capture pushes.
+Use **Test connection** before enabling automatic work.
 
 ## Sequencer Instructions
 
@@ -107,6 +110,17 @@ case-insensitively. It refuses ambiguous Target Scheduler target names instead
 of guessing.
 
 ## Capture Flow
+
+Direct image mode:
+
+1. N.I.N.A. saves a FITS light.
+2. The plugin persists an image-upload job and returns immediately.
+3. Its background worker hashes and streams the file to the selected PSF Guard
+   database.
+4. PSF Guard verifies the digest, resolves or creates the target and exposure
+   plan, and imports the image.
+
+Target Scheduler catalog mode:
 
 1. N.I.N.A. saves the image.
 2. Target Scheduler's own image-save watcher writes its database transaction.
