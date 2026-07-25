@@ -9,7 +9,7 @@ using System.Runtime.Versioning;
 [assembly: AssemblyMetadata("Repository", "https://github.com/theatrus/psf-guard-nina-plugin")]
 [assembly: AssemblyMetadata("Homepage", "https://github.com/theatrus/psf-guard-nina-plugin")]
 [assembly: AssemblyMetadata("ChangelogURL", "https://github.com/theatrus/psf-guard-nina-plugin/releases")]
-[assembly: AssemblyMetadata("Tags", "psf guard;target scheduler;image grading;sync")]
+[assembly: AssemblyMetadata("Tags", "psf guard,target scheduler,image grading,sync")]
 [assembly: AssemblyMetadata("LongDescription", "Pushes Target Scheduler capture records to PSF Guard after image saves and supports explicit planning and grade synchronization in both directions.")]
 [assembly: ComVisible(false)]
 [assembly: SupportedOSPlatform("windows7.0")]
