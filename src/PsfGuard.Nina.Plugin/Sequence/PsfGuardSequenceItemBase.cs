@@ -70,6 +70,12 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
             throw new InvalidOperationException(
                 $"PSF Guard did not advertise catalog '{settings.CatalogId}'.");
         }
+        if (settings.UploadCapturedImages
+            && !capabilities.Capabilities.Contains("image_upload", StringComparer.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"Remote image upload is disabled for PSF Guard catalog '{settings.CatalogId}'.");
+        }
 
         return $"Connected to {capabilities.Product} {capabilities.ProductVersion}; "
             + $"catalog {catalog.Name} is {(catalog.Writable ? "writable" : "read-only")}.";
