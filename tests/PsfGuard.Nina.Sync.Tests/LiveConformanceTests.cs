@@ -7,7 +7,7 @@ public sealed class LiveConformanceTests
 {
     [Fact]
     [Trait("Category", "LiveConformance")]
-    public async Task ConfiguredServerSupportsScopedExportsAndANonMutatingPreview()
+    public async Task ConfiguredServerSupportsScopedExportsAndNonMutatingPreviews()
     {
         var baseUrl = Environment.GetEnvironmentVariable("PSF_GUARD_LIVE_URL");
         var token = Environment.GetEnvironmentVariable("PSF_GUARD_LIVE_API_KEY");
@@ -55,6 +55,12 @@ public sealed class LiveConformanceTests
         Assert.NotNull(preview.Summary);
         Assert.Equal(0, preview.Summary["total_inserted"]);
         Assert.Equal(0, preview.Summary["total_updated"]);
+
+        var gradePreview = await client.CreatePreviewAsync(catalog.Id, grades, timeout.Token);
+        Assert.Equal("ready", gradePreview.State, ignoreCase: true);
+        Assert.NotNull(gradePreview.Summary);
+        Assert.Equal(0, gradePreview.Summary["total_inserted"]);
+        Assert.Equal(0, gradePreview.Summary["total_updated"]);
 
         if (capabilities.Capabilities.Contains("image_upload", StringComparer.Ordinal))
         {
