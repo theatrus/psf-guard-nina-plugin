@@ -1,6 +1,9 @@
 namespace PsfGuard.Nina.Sync;
 
-public sealed record SavedCapture(string ImagePath, CaptureImageKind Kind);
+public sealed record SavedCapture(
+    string ImagePath,
+    CaptureImageKind Kind,
+    DateTime ExposureStart = default);
 
 public sealed class SavedCaptureInbox
 {

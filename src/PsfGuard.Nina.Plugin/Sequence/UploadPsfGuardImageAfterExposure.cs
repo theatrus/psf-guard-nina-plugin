@@ -13,7 +13,7 @@ using PsfGuard.Nina.Sync;
 
 namespace PsfGuard.Nina.Plugin.Sequence;
 
-[ExportMetadata("Name", "Upload image to PSF Guard after exposure")]
+[ExportMetadata("Name", "PSF Guard image upload")]
 [ExportMetadata("Description", "Upload the saved image after each selected light or calibration exposure")]
 [ExportMetadata("Icon", "SaveSVG")]
 [ExportMetadata("Category", "PSF Guard Sync")]
@@ -160,7 +160,10 @@ public sealed class UploadPsfGuardImageAfterExposure : PsfGuardSequenceTriggerBa
             UploadLights,
             UploadCalibrationFrames))
         {
-            inbox.Add(new SavedCapture(args.PathToImage.LocalPath, kind));
+            inbox.Add(new SavedCapture(
+                args.PathToImage.LocalPath,
+                kind,
+                args.MetaData?.Image?.ExposureStart ?? default));
         }
     }
 

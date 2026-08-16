@@ -92,7 +92,7 @@ optional thumbnails, never image bytes.
 
 All profile-wide capture automation defaults off, including scheduler-row
 pushes and both image-upload switches. For sequence-local control, leave them
-off and add **Upload image to PSF Guard after exposure** to the applicable
+off and add **PSF Guard image upload** to the applicable
 Advanced Sequencer trigger set. The trigger can include lights, calibration
 frames, or both and waits for N.I.N.A. to finish saving before it uploads. When
 a matching global policy is also enabled, the trigger recognizes that the
@@ -121,11 +121,15 @@ advanced sequencer:
 - **Reconcile current target with PSF Guard** pushes only the enclosing target's
   project, plans, captures, and optional thumbnails. Put it inside a target
   container near that target's end.
-- **Reconcile PSF Guard target after exposures** is an Advanced Sequencer
+- **PSF Guard target sync** is an Advanced Sequencer
   trigger. Add it to a target or an ancestor trigger set and choose how many
   successfully completed light exposures occur between target-scoped
   reconciliations. Its counter resets when the active target changes.
-- **Upload image to PSF Guard after exposure** waits for N.I.N.A.'s completed
+- **PSF Guard exposure sync** waits for the completed save and Target Scheduler
+  commit, then pushes only that acquired-image row and its required parent
+  records. Use it when each exposure should sync without reconciling the whole
+  target.
+- **PSF Guard image upload** waits for N.I.N.A.'s completed
   save and uploads the resulting FITS or XISF file. Its own light and
   calibration switches are serialized with the sequence, so it works without
   enabling profile-wide automatic uploads or installing Target Scheduler.

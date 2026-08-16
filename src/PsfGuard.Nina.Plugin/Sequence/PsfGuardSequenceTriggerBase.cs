@@ -44,6 +44,9 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
     protected bool AutoApplyPushes => settings.AutoApplyPushes;
     protected virtual bool RequiresTargetScheduler => true;
 
+    protected bool IsGlobalCapturePushEnabled =>
+        settings.Enabled && settings.AutoPushCaptures;
+
     protected bool IsGlobalUploadEnabledFor(CaptureImageKind kind) =>
         settings.Enabled
         && settings.UploadCapturedImages

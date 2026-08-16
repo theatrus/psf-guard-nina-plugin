@@ -89,6 +89,14 @@
         </nina:SequenceBlockView>
     </DataTemplate>
 
+    <DataTemplate DataType="{x:Type local:SyncPsfGuardExposureAfterExposure}">
+        <nina:SequenceBlockView>
+            <nina:SequenceBlockView.SequenceItemContent>
+                <TextBlock Text="Push only the newly saved exposure" />
+            </nina:SequenceBlockView.SequenceItemContent>
+        </nina:SequenceBlockView>
+    </DataTemplate>
+
     <DataTemplate x:Key="PsfGuard.Nina.Plugin.Sequence.CheckPsfGuardConnection_Mini">
         <mini:MiniSequenceItem>
             <mini:MiniSequenceItem.SequenceItemContent>
@@ -146,6 +154,14 @@
         <mini:MiniTrigger>
             <mini:MiniTrigger.TriggerProgressContent>
                 <TextBlock Text="Upload saved image" />
+            </mini:MiniTrigger.TriggerProgressContent>
+        </mini:MiniTrigger>
+    </DataTemplate>
+
+    <DataTemplate x:Key="PsfGuard.Nina.Plugin.Sequence.SyncPsfGuardExposureAfterExposure_Mini">
+        <mini:MiniTrigger>
+            <mini:MiniTrigger.TriggerProgressContent>
+                <TextBlock Text="Sync saved exposure" />
             </mini:MiniTrigger.TriggerProgressContent>
         </mini:MiniTrigger>
     </DataTemplate>

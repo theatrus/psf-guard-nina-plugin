@@ -48,6 +48,24 @@ public sealed class SavedCaptureInboxTests
     }
 
     [Fact]
+    public async Task WaitPreservesTheExposureStartForSchedulerMatching()
+    {
+        var inbox = new SavedCaptureInbox();
+        var exposureStart = new DateTime(2026, 8, 16, 1, 2, 3, DateTimeKind.Utc);
+        inbox.Add(new SavedCapture(
+            "light.fits",
+            CaptureImageKind.Light,
+            exposureStart));
+
+        var capture = await inbox.WaitForNextAsync(
+            CaptureImageKind.Light,
+            TimeSpan.FromSeconds(1),
+            CancellationToken.None);
+
+        Assert.Equal(exposureStart, capture.ExposureStart);
+    }
+
+    [Fact]
     public async Task ResetDropsCapturesFromBeforeTheSequenceBlock()
     {
         var inbox = new SavedCaptureInbox();

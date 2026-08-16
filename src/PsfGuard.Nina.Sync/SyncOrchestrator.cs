@@ -62,15 +62,9 @@ public sealed class SyncOrchestrator
         DateTime exposureStart,
         CancellationToken cancellationToken)
     {
-        var acquiredImageId = await reader.WaitForCaptureAsync(
+        var bundle = await BuildCapturedImageBundleAsync(
                 imagePath,
                 exposureStart,
-                TimeSpan.FromSeconds(20),
-                cancellationToken)
-            .ConfigureAwait(false);
-        var bundle = await reader.BuildCaptureBundleAsync(
-                acquiredImageId,
-                includeThumbnails,
                 cancellationToken)
             .ConfigureAwait(false);
         await RequireQueue().EnqueueAsync(
@@ -79,6 +73,20 @@ public sealed class SyncOrchestrator
                 autoApplyPushes,
                 cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    public async Task<PushReceipt> PushCapturedImageAsync(
+        string imagePath,
+        DateTime exposureStart,
+        bool apply,
+        CancellationToken cancellationToken)
+    {
+        var bundle = await BuildCapturedImageBundleAsync(
+                imagePath,
+                exposureStart,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return await PushNowAsync(bundle, apply, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task QueueFullMergeAsync(CancellationToken cancellationToken)
@@ -195,6 +203,24 @@ public sealed class SyncOrchestrator
                         Applied = apply,
                     };
                 })
+            .ConfigureAwait(false);
+    }
+
+    private async Task<CatalogBundle> BuildCapturedImageBundleAsync(
+        string imagePath,
+        DateTime exposureStart,
+        CancellationToken cancellationToken)
+    {
+        var acquiredImageId = await reader.WaitForCaptureAsync(
+                imagePath,
+                exposureStart,
+                TimeSpan.FromSeconds(20),
+                cancellationToken)
+            .ConfigureAwait(false);
+        return await reader.BuildCaptureBundleAsync(
+                acquiredImageId,
+                includeThumbnails,
+                cancellationToken)
             .ConfigureAwait(false);
     }
 

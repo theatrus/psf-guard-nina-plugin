@@ -10,7 +10,7 @@ using NINA.Sequencer.Trigger;
 
 namespace PsfGuard.Nina.Plugin.Sequence;
 
-[ExportMetadata("Name", "Reconcile PSF Guard target after exposures")]
+[ExportMetadata("Name", "PSF Guard target sync")]
 [ExportMetadata("Description", "Push the current target to PSF Guard after a configurable number of completed light exposures")]
 [ExportMetadata("Icon", "LoopSVG")]
 [ExportMetadata("Category", "PSF Guard Sync")]
