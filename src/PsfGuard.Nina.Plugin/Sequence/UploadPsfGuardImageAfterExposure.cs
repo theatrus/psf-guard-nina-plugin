@@ -101,8 +101,9 @@ public sealed class UploadPsfGuardImageAfterExposure : PsfGuardSequenceTriggerBa
         IProgress<ApplicationStatus> progress,
         CancellationToken token)
     {
+        using var status = BeginStatus(progress);
         var kind = pendingKind;
-        Report(progress, "Waiting for N.I.N.A. to finish saving the image...");
+        Report(progress, "Waiting for image save...");
         var capture = await inbox.WaitForNextAsync(kind, ImageSaveTimeout, token)
             .ConfigureAwait(false);
         if (!CaptureImageTypes.IsSupportedImagePath(capture.ImagePath))
@@ -113,15 +114,11 @@ public sealed class UploadPsfGuardImageAfterExposure : PsfGuardSequenceTriggerBa
 
         if (IsGlobalUploadEnabledFor(capture.Kind))
         {
-            Report(
-                progress,
-                $"{Path.GetFileName(capture.ImagePath)} is already owned by the global upload queue.");
             return;
         }
 
-        Report(progress, $"Uploading {Path.GetFileName(capture.ImagePath)} to PSF Guard...");
+        Report(progress, "Uploading image...");
         await UploadImageAsync(capture.ImagePath, token).ConfigureAwait(false);
-        Report(progress, $"Uploaded {Path.GetFileName(capture.ImagePath)} to PSF Guard.");
     }
 
     public override object Clone() => new UploadPsfGuardImageAfterExposure(this);

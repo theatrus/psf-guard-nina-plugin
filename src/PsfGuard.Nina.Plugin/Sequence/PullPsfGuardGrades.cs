@@ -29,11 +29,11 @@ public sealed class PullPsfGuardGrades : PsfGuardSequenceItemBase
         IProgress<ApplicationStatus> progress,
         CancellationToken token)
     {
-        Report(progress, "Pulling reviewed grades...");
-        var result = await CreateOrchestrator()
+        using var status = BeginStatus(progress);
+        Report(progress, "Pulling grades...");
+        await CreateOrchestrator()
             .PullGradesAsync(token)
             .ConfigureAwait(false);
-        Report(progress, FormatApplyResult("Grade pull", result));
     }
 
     public override object Clone() => new PullPsfGuardGrades(this);

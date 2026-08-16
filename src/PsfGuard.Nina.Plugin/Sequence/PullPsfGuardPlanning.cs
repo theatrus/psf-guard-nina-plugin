@@ -29,11 +29,11 @@ public sealed class PullPsfGuardPlanning : PsfGuardSequenceItemBase
         IProgress<ApplicationStatus> progress,
         CancellationToken token)
     {
-        Report(progress, "Pulling planning changes...");
-        var result = await CreateOrchestrator()
+        using var status = BeginStatus(progress);
+        Report(progress, "Pulling planning...");
+        await CreateOrchestrator()
             .PullPlanningAsync(token)
             .ConfigureAwait(false);
-        Report(progress, FormatApplyResult("Planning pull", result));
     }
 
     public override object Clone() => new PullPsfGuardPlanning(this);

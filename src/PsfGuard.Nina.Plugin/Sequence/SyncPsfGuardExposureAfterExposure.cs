@@ -68,16 +68,16 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
         IProgress<ApplicationStatus> progress,
         CancellationToken token)
     {
+        using var status = BeginStatus(progress);
         var globalSync = IsGlobalCapturePushEnabled;
         var globalUpload = UploadImage
             && IsGlobalUploadEnabledFor(CaptureImageKind.Light);
         if (globalSync && (!UploadImage || globalUpload))
         {
-            Report(progress, "The global queues own this exposure sync.");
             return;
         }
 
-        Report(progress, "Waiting for N.I.N.A. to finish saving the light...");
+        Report(progress, "Waiting for image save...");
         var capture = await inbox.WaitForNextAsync(
                 CaptureImageKind.Light,
                 ImageSaveTimeout,
@@ -85,22 +85,20 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
             .ConfigureAwait(false);
         if (!globalSync)
         {
-            Report(progress, "Waiting for Target Scheduler to commit the exposure...");
-            var receipt = await CreateOrchestrator()
+            Report(progress, "Waiting for scheduler...");
+            await CreateOrchestrator()
                 .PushCapturedImageAsync(
                     capture.ImagePath,
                     capture.ExposureStart,
                     AutoApplyPushes,
                     token)
                 .ConfigureAwait(false);
-            Report(progress, FormatPushReceipt("Exposure sync", receipt));
         }
 
         if (UploadImage && !globalUpload)
         {
-            Report(progress, "Uploading the exposure image to PSF Guard...");
+            Report(progress, "Uploading image...");
             await UploadImageAsync(capture.ImagePath, token).ConfigureAwait(false);
-            Report(progress, "Uploaded the exposure image to PSF Guard.");
         }
     }
 
