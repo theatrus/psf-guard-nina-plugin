@@ -113,8 +113,12 @@ advanced sequencer:
 - **Pull PSF Guard planning** applies remote projects, targets, templates, and
   plans to Target Scheduler. Run it before a Target Scheduler container starts;
   an already-running container may retain its in-memory plan.
+- **Push PSF Guard planning** sends Target Scheduler projects, targets,
+  templates, and plans to PSF Guard and waits for the preview or apply.
 - **Pull PSF Guard grades** applies reviewed grades and rejection reasons by
   unambiguous acquired-image GUID.
+- **Push PSF Guard grades** sends reviewed Target Scheduler grades and rejection
+  reasons to PSF Guard and waits for the preview or apply.
 - **Reconcile PSF Guard catalog** pushes a fresh full scheduler snapshot and
   waits until PSF Guard creates, and optionally applies, its preview. It is
   suitable for session-end instructions.
@@ -127,8 +131,9 @@ advanced sequencer:
   reconciliations. Its counter resets when the active target changes.
 - **PSF Guard exposure sync** waits for the completed save and Target Scheduler
   commit, then pushes only that acquired-image row and its required parent
-  records. Use it when each exposure should sync without reconciling the whole
-  target.
+  records. Its optional **Upload image** switch sends the same saved file after
+  the capture sync. Use it when each exposure should sync without reconciling
+  the whole target.
 - **PSF Guard image upload** waits for N.I.N.A.'s completed
   save and uploads the resulting FITS or XISF file. Its own light and
   calibration switches are serialized with the sequence, so it works without

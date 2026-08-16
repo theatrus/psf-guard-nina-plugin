@@ -22,10 +22,26 @@
         </nina:SequenceBlockView>
     </DataTemplate>
 
+    <DataTemplate DataType="{x:Type local:PushPsfGuardPlanning}">
+        <nina:SequenceBlockView>
+            <nina:SequenceBlockView.SequenceItemContent>
+                <TextBlock Text="Target Scheduler to PSF Guard" />
+            </nina:SequenceBlockView.SequenceItemContent>
+        </nina:SequenceBlockView>
+    </DataTemplate>
+
     <DataTemplate DataType="{x:Type local:PullPsfGuardGrades}">
         <nina:SequenceBlockView>
             <nina:SequenceBlockView.SequenceItemContent>
                 <TextBlock Text="Reviewed grades to Target Scheduler" />
+            </nina:SequenceBlockView.SequenceItemContent>
+        </nina:SequenceBlockView>
+    </DataTemplate>
+
+    <DataTemplate DataType="{x:Type local:PushPsfGuardGrades}">
+        <nina:SequenceBlockView>
+            <nina:SequenceBlockView.SequenceItemContent>
+                <TextBlock Text="Reviewed grades to PSF Guard" />
             </nina:SequenceBlockView.SequenceItemContent>
         </nina:SequenceBlockView>
     </DataTemplate>
@@ -92,7 +108,14 @@
     <DataTemplate DataType="{x:Type local:SyncPsfGuardExposureAfterExposure}">
         <nina:SequenceBlockView>
             <nina:SequenceBlockView.SequenceItemContent>
-                <TextBlock Text="Push only the newly saved exposure" />
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock VerticalAlignment="Center" Text="Push only the newly saved exposure" />
+                    <TextBlock Margin="16,0,0,0" VerticalAlignment="Center" Text="Upload image" />
+                    <CheckBox
+                        Margin="6,0,0,0"
+                        VerticalAlignment="Center"
+                        IsChecked="{Binding UploadImage}" />
+                </StackPanel>
             </nina:SequenceBlockView.SequenceItemContent>
         </nina:SequenceBlockView>
     </DataTemplate>
@@ -113,10 +136,26 @@
         </mini:MiniSequenceItem>
     </DataTemplate>
 
+    <DataTemplate x:Key="PsfGuard.Nina.Plugin.Sequence.PushPsfGuardPlanning_Mini">
+        <mini:MiniSequenceItem>
+            <mini:MiniSequenceItem.SequenceItemContent>
+                <TextBlock Text="Push planning" />
+            </mini:MiniSequenceItem.SequenceItemContent>
+        </mini:MiniSequenceItem>
+    </DataTemplate>
+
     <DataTemplate x:Key="PsfGuard.Nina.Plugin.Sequence.PullPsfGuardGrades_Mini">
         <mini:MiniSequenceItem>
             <mini:MiniSequenceItem.SequenceItemContent>
                 <TextBlock Text="Pull grades" />
+            </mini:MiniSequenceItem.SequenceItemContent>
+        </mini:MiniSequenceItem>
+    </DataTemplate>
+
+    <DataTemplate x:Key="PsfGuard.Nina.Plugin.Sequence.PushPsfGuardGrades_Mini">
+        <mini:MiniSequenceItem>
+            <mini:MiniSequenceItem.SequenceItemContent>
+                <TextBlock Text="Push grades" />
             </mini:MiniSequenceItem.SequenceItemContent>
         </mini:MiniSequenceItem>
     </DataTemplate>

@@ -13,7 +13,7 @@ using PsfGuard.Nina.Sync;
 namespace PsfGuard.Nina.Plugin.Sequence;
 
 [ExportMetadata("Name", "PSF Guard exposure sync")]
-[ExportMetadata("Description", "Push only the newly saved Target Scheduler capture after each completed light exposure")]
+[ExportMetadata("Description", "Push only the newly saved Target Scheduler capture and optionally upload its image")]
 [ExportMetadata("Icon", "LoopSVG")]
 [ExportMetadata("Category", "PSF Guard Sync")]
 [Export(typeof(ISequenceTrigger))]
@@ -24,6 +24,7 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
     private readonly IImageSaveMediator imageSaveMediator;
     private readonly SavedCaptureInbox inbox = new();
     private bool subscribed;
+    private bool uploadImage;
 
     [ImportingConstructor]
     public SyncPsfGuardExposureAfterExposure(
@@ -38,6 +39,18 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
         : base(copy)
     {
         imageSaveMediator = copy.imageSaveMediator;
+        UploadImage = copy.UploadImage;
+    }
+
+    [JsonProperty]
+    public bool UploadImage
+    {
+        get => uploadImage;
+        set
+        {
+            uploadImage = value;
+            RaisePropertyChanged();
+        }
     }
 
     public override bool ShouldTrigger(ISequenceItem previousItem, ISequenceItem nextItem) =>
@@ -55,9 +68,12 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
         IProgress<ApplicationStatus> progress,
         CancellationToken token)
     {
-        if (IsGlobalCapturePushEnabled)
+        var globalSync = IsGlobalCapturePushEnabled;
+        var globalUpload = UploadImage
+            && IsGlobalUploadEnabledFor(CaptureImageKind.Light);
+        if (globalSync && (!UploadImage || globalUpload))
         {
-            Report(progress, "The global capture queue owns this exposure sync.");
+            Report(progress, "The global queues own this exposure sync.");
             return;
         }
 
@@ -67,15 +83,25 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
                 ImageSaveTimeout,
                 token)
             .ConfigureAwait(false);
-        Report(progress, "Waiting for Target Scheduler to commit the exposure...");
-        var receipt = await CreateOrchestrator()
-            .PushCapturedImageAsync(
-                capture.ImagePath,
-                capture.ExposureStart,
-                AutoApplyPushes,
-                token)
-            .ConfigureAwait(false);
-        Report(progress, FormatPushReceipt("Exposure sync", receipt));
+        if (!globalSync)
+        {
+            Report(progress, "Waiting for Target Scheduler to commit the exposure...");
+            var receipt = await CreateOrchestrator()
+                .PushCapturedImageAsync(
+                    capture.ImagePath,
+                    capture.ExposureStart,
+                    AutoApplyPushes,
+                    token)
+                .ConfigureAwait(false);
+            Report(progress, FormatPushReceipt("Exposure sync", receipt));
+        }
+
+        if (UploadImage && !globalUpload)
+        {
+            Report(progress, "Uploading the exposure image to PSF Guard...");
+            await UploadImageAsync(capture.ImagePath, token).ConfigureAwait(false);
+            Report(progress, "Uploaded the exposure image to PSF Guard.");
+        }
     }
 
     public override object Clone() => new SyncPsfGuardExposureAfterExposure(this);
@@ -91,7 +117,7 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
     public override void Teardown() => Unsubscribe();
 
     public override string ToString() =>
-        $"Trigger: {nameof(SyncPsfGuardExposureAfterExposure)}";
+        $"Trigger: {nameof(SyncPsfGuardExposureAfterExposure)}, UploadImage: {UploadImage}";
 
     private void ImageSaved(object? sender, ImageSavedEventArgs args)
     {

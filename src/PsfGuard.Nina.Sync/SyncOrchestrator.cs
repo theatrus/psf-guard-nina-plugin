@@ -129,6 +129,26 @@ public sealed class SyncOrchestrator
             .ConfigureAwait(false);
     }
 
+    public async Task<PushReceipt> PushPlanningAsync(
+        bool apply,
+        CancellationToken cancellationToken)
+    {
+        var bundle = await reader.BuildPlanningBundleAsync(cancellationToken)
+            .ConfigureAwait(false);
+        return await PushNowAsync(bundle, apply, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<PushReceipt> PushGradesAsync(
+        bool apply,
+        CancellationToken cancellationToken)
+    {
+        var bundle = await reader.BuildGradesBundleAsync(
+                reviewedOnly: true,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return await PushNowAsync(bundle, apply, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<ApplyResult> PullGradesAsync(CancellationToken cancellationToken)
     {
         var bundle = await WithClientAsync(
