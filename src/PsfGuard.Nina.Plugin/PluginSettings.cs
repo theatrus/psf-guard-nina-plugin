@@ -79,10 +79,10 @@ internal sealed class PluginSettings
 
     public string ApiToken
     {
-        get => WindowsCredentialStore.Read(CredentialTarget) ?? string.Empty;
-        set => WindowsCredentialStore.Write(CredentialTarget, value);
+        get => WindowsCredentialStore.Read(CredentialReference) ?? string.Empty;
+        set => WindowsCredentialStore.Write(CredentialReference, value);
     }
 
-    private string CredentialTarget =>
+    public string CredentialReference =>
         $"PSFGuard.Nina.Plugin/{profileService.ActiveProfile.Id:D}";
 }

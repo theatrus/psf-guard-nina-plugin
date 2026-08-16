@@ -28,7 +28,7 @@ expose arbitrary SQL.
 - Push each captured light frame after Target Scheduler commits it.
 - Upload saved FITS or XISF lights and calibration frames without requiring
   Target Scheduler.
-- Durable, idempotent sync and image queues below
+- Destination-bound, durable, idempotent sync and image queues below
   `%LOCALAPPDATA%\NINA\PsfGuardSync`.
 - Manual full merge, planning push, and reviewed-grade push.
 - Manual planning and reviewed-grade pull.
@@ -101,6 +101,13 @@ durable global queue owns the file and does not send it twice.
 Use **Test connection** before enabling automatic work. When direct image
 upload is selected, the check also verifies that the chosen PSF Guard database
 has enabled its separate upload gate.
+
+Queue records retain their original server, catalog, and profile-specific
+Credential Manager reference. They never store the API key itself and never
+follow a later profile or server change. Authentication, catalog, and payload
+errors become blocked jobs instead of retrying forever. After correcting the
+original destination's configuration, select **Retry blocked** to resume them.
+Transient network and server failures retry with bounded exponential backoff.
 
 ## Sequencer Instructions
 
@@ -175,16 +182,18 @@ durable background queue.
 Target Scheduler catalog mode:
 
 1. N.I.N.A. saves the image.
-2. Target Scheduler's own image-save watcher writes its database transaction.
-3. PSF Guard Sync retries an exact metadata filename match for up to 20 seconds.
-4. The plugin reads the capture, thumbnail, and required scheduler parents in a
+2. The plugin persists a destination-bound pending-capture job.
+3. Target Scheduler's own image-save watcher writes its database transaction.
+4. PSF Guard Sync retries an exact metadata filename match in durable worker
+   attempts, including after N.I.N.A. restarts.
+5. The plugin reads the capture, thumbnail, and required scheduler parents in a
    read-only connection.
-5. It hashes and durably queues the immutable bundle.
-6. It creates a PSF Guard preview using the bundle ID as the idempotency key.
-7. When automatic apply is enabled, it applies that exact preview.
+6. It replaces the pending record with the immutable bundle.
+7. It creates a PSF Guard preview using the bundle ID as the idempotency key.
+8. When automatic apply is enabled, it applies that exact preview.
 
-If N.I.N.A. or the network stops after step 5, the queue resumes after the next
-plugin start.
+If N.I.N.A., Target Scheduler, or the network stops after step 2, the queue
+resumes after the next plugin start.
 
 ## Pull Safety
 

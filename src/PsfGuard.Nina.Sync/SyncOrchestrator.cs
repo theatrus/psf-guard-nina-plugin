@@ -14,6 +14,7 @@ public sealed class SyncOrchestrator
     private readonly TargetSchedulerCatalogReader reader;
     private readonly TargetSchedulerCatalogWriter writer;
     private readonly DurablePushQueue? queue;
+    private readonly RemoteQueueDestination? queueDestination;
 
     public SyncOrchestrator(
         string destinationCatalogId,
@@ -22,7 +23,8 @@ public sealed class SyncOrchestrator
         Func<PsfGuardSyncClient> clientFactory,
         TargetSchedulerCatalogReader reader,
         TargetSchedulerCatalogWriter writer,
-        DurablePushQueue? queue)
+        DurablePushQueue? queue,
+        RemoteQueueDestination? queueDestination = null)
     {
         this.destinationCatalogId = destinationCatalogId;
         this.autoApplyPushes = autoApplyPushes;
@@ -31,6 +33,7 @@ public sealed class SyncOrchestrator
         this.reader = reader;
         this.writer = writer;
         this.queue = queue;
+        this.queueDestination = queueDestination;
     }
 
     public SyncOrchestrator(
@@ -47,7 +50,8 @@ public sealed class SyncOrchestrator
             clientFactory,
             reader,
             writer,
-            queue: null)
+            queue: null,
+            queueDestination: null)
     {
     }
 
@@ -62,14 +66,13 @@ public sealed class SyncOrchestrator
         DateTime exposureStart,
         CancellationToken cancellationToken)
     {
-        var bundle = await BuildCapturedImageBundleAsync(
+        await RequireQueue().EnqueueCaptureAsync(
+                RequireQueueDestination(),
+                reader.DatabasePath,
+                reader.ProductVersion,
                 imagePath,
                 exposureStart,
-                cancellationToken)
-            .ConfigureAwait(false);
-        await RequireQueue().EnqueueAsync(
-                destinationCatalogId,
-                bundle,
+                includeThumbnails,
                 autoApplyPushes,
                 cancellationToken)
             .ConfigureAwait(false);
@@ -96,7 +99,7 @@ public sealed class SyncOrchestrator
                 cancellationToken)
             .ConfigureAwait(false);
         await RequireQueue().EnqueueAsync(
-                destinationCatalogId,
+                RequireQueueDestination(),
                 bundle,
                 autoApplyPushes,
                 cancellationToken)
@@ -108,7 +111,7 @@ public sealed class SyncOrchestrator
         var bundle = await reader.BuildPlanningBundleAsync(cancellationToken)
             .ConfigureAwait(false);
         await RequireQueue().EnqueueAsync(
-                destinationCatalogId,
+                RequireQueueDestination(),
                 bundle,
                 autoApplyPushes,
                 cancellationToken)
@@ -122,7 +125,7 @@ public sealed class SyncOrchestrator
                 cancellationToken)
             .ConfigureAwait(false);
         await RequireQueue().EnqueueAsync(
-                destinationCatalogId,
+                RequireQueueDestination(),
                 bundle,
                 autoApplyPushes,
                 cancellationToken)
@@ -247,6 +250,10 @@ public sealed class SyncOrchestrator
     private DurablePushQueue RequireQueue() =>
         queue ?? throw new InvalidOperationException(
             "This sync orchestrator was created without a durable push queue.");
+
+    private RemoteQueueDestination RequireQueueDestination() =>
+        queueDestination ?? throw new InvalidOperationException(
+            "This sync orchestrator was created without a durable queue destination.");
 
     private async Task<T> WithClientAsync<T>(Func<PsfGuardSyncClient, Task<T>> action)
     {

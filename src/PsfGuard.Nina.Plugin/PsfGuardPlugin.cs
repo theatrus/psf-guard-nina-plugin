@@ -4,6 +4,7 @@ using System.IO;
 using System.Net.Http;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Threading.Channels;
 using System.Windows;
 using System.Windows.Input;
 using NINA.Core.Utility;
@@ -28,6 +29,14 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
     private readonly CancellationTokenSource lifetime = new();
     private readonly DurablePushQueue queue;
     private readonly DurableImageUploadQueue imageUploadQueue;
+    private readonly Channel<PendingCaptureWork> captureWork =
+        Channel.CreateUnbounded<PendingCaptureWork>(
+            new UnboundedChannelOptions
+            {
+                SingleReader = true,
+                SingleWriter = false,
+            });
+    private Task? captureWorker;
     private string lastStatus = "Not connected";
 
     [ImportingConstructor]
@@ -44,7 +53,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                 "NINA",
                 "PsfGuardSync",
                 "queue"),
-            CreateClient,
+            CreateQueuedClient,
             SetStatus);
         imageUploadQueue = new DurableImageUploadQueue(
             Path.Combine(
@@ -52,7 +61,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                 "NINA",
                 "PsfGuardSync",
                 "image-upload-queue"),
-            CreateClient,
+            CreateQueuedClient,
             SetStatus);
 
         TestConnectionCommand = new AsyncRelayCommand(
@@ -96,6 +105,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                         .ConfigureAwait(false);
                     return FormatApplyResult("Grade pull", result);
                 }));
+        RetryBlockedCommand = new AsyncRelayCommand(
+            () => RunCommandAsync(RetryBlockedAsync));
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -111,6 +122,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
     public ICommand PullPlanningCommand { get; }
 
     public ICommand PullGradesCommand { get; }
+
+    public ICommand RetryBlockedCommand { get; }
 
     public string ServerUrl
     {
@@ -228,6 +241,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
         imageSaveMediator.ImageSaved += ImageSaved;
         queue.Start();
         imageUploadQueue.Start();
+        captureWorker = Task.Run(ProcessCaptureWorkAsync);
         SetStatus(Enabled ? "Capture sync is active." : "Sync is disabled.");
         return base.Initialize();
     }
@@ -236,74 +250,87 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
     {
         profileService.ProfileChanged -= ProfileServiceProfileChanged;
         imageSaveMediator.ImageSaved -= ImageSaved;
-        lifetime.Cancel();
-        await imageUploadQueue.DisposeAsync().ConfigureAwait(false);
-        await queue.DisposeAsync().ConfigureAwait(false);
-        lifetime.Dispose();
+        captureWork.Writer.TryComplete();
+
+        try
+        {
+            if (captureWorker is not null)
+            {
+                await captureWorker.ConfigureAwait(false);
+            }
+        }
+        catch (Exception exception)
+        {
+            Logger.Error(exception);
+        }
+        finally
+        {
+            lifetime.Cancel();
+            await DisposeQueueAsync(imageUploadQueue).ConfigureAwait(false);
+            await DisposeQueueAsync(queue).ConfigureAwait(false);
+            lifetime.Dispose();
+        }
+
         await base.Teardown().ConfigureAwait(false);
     }
 
     private void ImageSaved(object? sender, ImageSavedEventArgs args)
     {
-        if (!Enabled || args.PathToImage is null)
+        try
         {
-            return;
-        }
+            if (!Enabled || args.PathToImage is null)
+            {
+                return;
+            }
 
-        var imageType = args.MetaData.Image.ImageType;
-        var shouldUpload = UploadCapturedImages
-            && CaptureImageTypes.ShouldDirectUpload(imageType, UploadCalibrationImages);
-        var shouldPushScheduler = AutoPushCaptures
-            && CaptureImageTypes.IsLight(imageType)
-            && HasTargetSchedulerDatabase();
-        if (!shouldUpload && !shouldPushScheduler)
+            var imageType = args.MetaData?.Image?.ImageType;
+            if (string.IsNullOrWhiteSpace(imageType))
+            {
+                SetStatus("Skipped saved image without an image type.");
+                return;
+            }
+
+            var shouldUpload = UploadCapturedImages
+                && CaptureImageTypes.ShouldDirectUpload(imageType, UploadCalibrationImages);
+            var shouldPushScheduler = AutoPushCaptures
+                && CaptureImageTypes.IsLight(imageType)
+                && HasTargetSchedulerDatabase();
+            if (!shouldUpload && !shouldPushScheduler)
+            {
+                return;
+            }
+
+            var imagePath = args.PathToImage.LocalPath;
+            var supportedUpload = shouldUpload
+                && CaptureImageTypes.IsSupportedImagePath(imagePath);
+            if (shouldUpload && !supportedUpload && !shouldPushScheduler)
+            {
+                SetStatus(
+                    $"Skipped {Path.GetFileName(imagePath)}; PSF Guard accepts FITS and XISF files.");
+                return;
+            }
+
+            var work = new PendingCaptureWork(
+                CurrentQueueDestination(),
+                imagePath,
+                args.MetaData?.Image?.ExposureStart ?? default,
+                supportedUpload,
+                shouldUpload && !supportedUpload,
+                shouldPushScheduler,
+                TargetSchedulerDatabase,
+                AutoApplyPushes,
+                IncludeThumbnails,
+                TargetSchedulerVersion());
+            if (!captureWork.Writer.TryWrite(work))
+            {
+                SetStatus("Skipped saved image because PSF Guard sync is stopping.");
+            }
+        }
+        catch (Exception exception)
         {
-            return;
+            Logger.Error(exception);
+            SetStatus($"Could not queue saved image: {exception.Message}");
         }
-
-        var imagePath = args.PathToImage.LocalPath;
-        var exposureStart = args.MetaData.Image.ExposureStart;
-        _ = Task.Run(
-                async () =>
-                {
-                    try
-                    {
-                        RequireRemoteConfigured();
-                        if (shouldUpload && CaptureImageTypes.IsSupportedImagePath(imagePath))
-                        {
-                            await imageUploadQueue.EnqueueAsync(
-                                    CatalogId,
-                                    imagePath,
-                                    lifetime.Token)
-                                .ConfigureAwait(false);
-                        }
-                        else if (shouldUpload)
-                        {
-                            SetStatus(
-                                $"Skipped direct upload for {Path.GetFileName(imagePath)}; PSF Guard ingest accepts FITS and XISF files.");
-                        }
-
-                        if (shouldPushScheduler)
-                        {
-                            SetStatus(
-                                $"Waiting for Target Scheduler to record {Path.GetFileName(imagePath)}...");
-                            await CreateOrchestrator()
-                                .QueueCapturedImageAsync(imagePath, exposureStart, lifetime.Token)
-                                .ConfigureAwait(false);
-                        }
-
-                        SetStatus($"Queued {Path.GetFileName(imagePath)} for PSF Guard.");
-                    }
-                    catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
-                    {
-                    }
-                    catch (Exception exception)
-                    {
-                        Logger.Error(exception);
-                        SetStatus($"Capture sync failed: {exception.Message}");
-                    }
-                },
-                lifetime.Token);
     }
 
     private SyncOrchestrator CreateOrchestrator()
@@ -321,7 +348,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
             CreateClient,
             reader,
             writer,
-            queue);
+            queue,
+            CurrentQueueDestination());
     }
 
     private PsfGuardSyncClient CreateClient()
@@ -332,6 +360,33 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
         }
 
         return new PsfGuardSyncClient(new HttpClient(), uri, ApiToken);
+    }
+
+    private PsfGuardSyncClient CreateQueuedClient(RemoteQueueDestination destination)
+    {
+        destination.Validate();
+        var apiToken = WindowsCredentialStore.Read(destination.CredentialReference);
+        if (string.IsNullOrWhiteSpace(apiToken))
+        {
+            throw new InvalidOperationException(
+                "The API key for this queued job is no longer available.");
+        }
+
+        return new PsfGuardSyncClient(
+            new HttpClient(),
+            new Uri(destination.ServerUrl, UriKind.Absolute),
+            apiToken);
+    }
+
+    private RemoteQueueDestination CurrentQueueDestination()
+    {
+        RequireRemoteConfigured();
+        return new RemoteQueueDestination
+        {
+            ServerUrl = new Uri(ServerUrl, UriKind.Absolute).AbsoluteUri,
+            CatalogId = CatalogId,
+            CredentialReference = settings.CredentialReference,
+        };
     }
 
     private async Task<string> TestConnectionAsync(CancellationToken cancellationToken)
@@ -376,6 +431,91 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
             Logger.Error(exception);
             SetStatus(exception.Message);
             Notification.ShowError(exception.Message);
+        }
+    }
+
+    private async Task<string> RetryBlockedAsync(CancellationToken cancellationToken)
+    {
+        var destination = CurrentQueueDestination();
+        var imageJobs = await imageUploadQueue
+            .RetryBlockedAsync(destination, cancellationToken)
+            .ConfigureAwait(false);
+        var syncJobs = await queue
+            .RetryBlockedAsync(destination, cancellationToken)
+            .ConfigureAwait(false);
+        return $"Retried {imageJobs} image and {syncJobs} scheduler jobs.";
+    }
+
+    private async Task ProcessCaptureWorkAsync()
+    {
+        await foreach (var work in captureWork.Reader.ReadAllAsync())
+        {
+            var queued = new List<string>(2);
+            var errors = new List<string>(2);
+            if (work.UploadImage)
+            {
+                try
+                {
+                    await imageUploadQueue.EnqueueAsync(
+                            work.Destination,
+                            work.ImagePath,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    queued.Add("image upload");
+                }
+                catch (Exception exception)
+                {
+                    Logger.Error(exception);
+                    errors.Add($"image upload: {exception.Message}");
+                }
+            }
+
+            if (work.PushScheduler)
+            {
+                try
+                {
+                    var reader = new TargetSchedulerCatalogReader(
+                        work.TargetSchedulerDatabase,
+                        work.TargetSchedulerVersion);
+                    var writer = new TargetSchedulerCatalogWriter(
+                        work.TargetSchedulerDatabase);
+                    var orchestrator = new SyncOrchestrator(
+                        work.Destination.CatalogId,
+                        work.AutoApplyPushes,
+                        work.IncludeThumbnails,
+                        () => CreateQueuedClient(work.Destination),
+                        reader,
+                        writer,
+                        queue,
+                        work.Destination);
+                    await orchestrator.QueueCapturedImageAsync(
+                            work.ImagePath,
+                            work.ExposureStart,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    queued.Add("scheduler sync");
+                }
+                catch (Exception exception)
+                {
+                    Logger.Error(exception);
+                    errors.Add($"scheduler sync: {exception.Message}");
+                }
+            }
+
+            var result = queued.Count > 0
+                ? $"Queued {string.Join(" and ", queued)}."
+                : string.Empty;
+            if (work.SkippedUnsupportedUpload)
+            {
+                result += " Skipped unsupported image upload.";
+            }
+
+            if (errors.Count > 0)
+            {
+                result += $" Could not queue {string.Join("; ", errors)}.";
+            }
+
+            SetStatus(result.Trim());
         }
     }
 
@@ -463,4 +603,28 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
     {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }
+
+    private static async Task DisposeQueueAsync(IAsyncDisposable queue)
+    {
+        try
+        {
+            await queue.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            Logger.Error(exception);
+        }
+    }
+
+    private sealed record PendingCaptureWork(
+        RemoteQueueDestination Destination,
+        string ImagePath,
+        DateTime ExposureStart,
+        bool UploadImage,
+        bool SkippedUnsupportedUpload,
+        bool PushScheduler,
+        string TargetSchedulerDatabase,
+        bool AutoApplyPushes,
+        bool IncludeThumbnails,
+        string TargetSchedulerVersion);
 }
