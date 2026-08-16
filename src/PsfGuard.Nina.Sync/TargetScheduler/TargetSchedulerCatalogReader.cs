@@ -43,6 +43,8 @@ public sealed class TargetSchedulerCatalogReader
 
     public string DatabasePath => databasePath;
 
+    public string ProductVersion => productVersion;
+
     public async Task<long> WaitForCaptureAsync(
         string imagePath,
         DateTime exposureStart,
