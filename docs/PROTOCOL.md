@@ -179,7 +179,7 @@ checksum over the producer's compact JSON with that field omitted. It is not a
 credential and receivers do not require their own serialization to reproduce
 it.
 
-## Direct FITS Upload
+## Direct Image Upload
 
 ```http
 POST /api/db/{catalog_id}/images/upload
@@ -192,9 +192,12 @@ image=@capture.fits
 ```
 
 The plugin hashes and streams the file from its durable background queue.
-PSF Guard accepts only readable FITS light frames, publishes without
-overwriting a different file, and imports through its normal target and
-exposure-plan resolver. Repeating the same basename and digest is idempotent.
+PSF Guard accepts readable FITS or XISF lights, bias frames, darks, dark-flats,
+and flats, publishes without overwriting a different file, and imports through
+its normal one-frame importer. Lights resolve through the target and
+exposure-plan catalog. Calibration frames enter PSF Guard's calibration tables
+and never enter Target Scheduler's `acquiredimage` table. Repeating the same
+basename and digest is idempotent.
 
 ## Merge Rules
 

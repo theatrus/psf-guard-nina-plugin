@@ -14,6 +14,8 @@ namespace PsfGuard.Nina.Plugin.Sequence;
 [JsonObject(MemberSerialization.OptIn)]
 public sealed class CheckPsfGuardConnection : PsfGuardSequenceItemBase
 {
+    protected override bool RequiresTargetScheduler => false;
+
     [ImportingConstructor]
     public CheckPsfGuardConnection(IProfileService profileService)
         : base(profileService)

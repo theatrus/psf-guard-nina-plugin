@@ -4,7 +4,7 @@ using System.Reflection;
 using NINA.Core.Model;
 using NINA.Profile.Interfaces;
 using NINA.Sequencer.Container;
-using NINA.Sequencer.SequenceItem;
+using NINA.Sequencer.Trigger;
 using NINA.Sequencer.Validations;
 using PsfGuard.Nina.Sync;
 using PsfGuard.Nina.Sync.Client;
@@ -13,19 +13,19 @@ using PsfGuard.Nina.Sync.TargetScheduler;
 
 namespace PsfGuard.Nina.Plugin.Sequence;
 
-public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
+public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatable
 {
     private readonly IProfileService profileService;
     private readonly PluginSettings settings;
     private IList<string> issues = [];
 
-    protected PsfGuardSequenceItemBase(IProfileService profileService)
+    protected PsfGuardSequenceTriggerBase(IProfileService profileService)
     {
         this.profileService = profileService;
         settings = new PluginSettings(profileService);
     }
 
-    protected PsfGuardSequenceItemBase(PsfGuardSequenceItemBase copy)
+    protected PsfGuardSequenceTriggerBase(PsfGuardSequenceTriggerBase copy)
         : this(copy.profileService)
     {
         CopyMetaData(copy);
@@ -44,6 +44,17 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
     protected bool AutoApplyPushes => settings.AutoApplyPushes;
     protected virtual bool RequiresTargetScheduler => true;
 
+    protected bool IsGlobalCapturePushEnabled =>
+        settings.Enabled && settings.AutoPushCaptures;
+
+    protected bool IsGlobalUploadEnabledFor(CaptureImageKind kind) =>
+        settings.Enabled
+        && settings.UploadCapturedImages
+        && CaptureImageTypes.ShouldUpload(
+            kind,
+            includeLights: true,
+            includeCalibration: settings.UploadCalibrationImages);
+
     protected SyncOrchestrator CreateOrchestrator()
     {
         var reader = new TargetSchedulerCatalogReader(
@@ -59,32 +70,9 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
             writer);
     }
 
-    protected async Task<string> CheckConnectionAsync(CancellationToken cancellationToken)
+    protected static string? FindCurrentTargetName(ISequenceContainer? container)
     {
-        var capabilities = await CreateOrchestrator()
-            .TestConnectionAsync(cancellationToken)
-            .ConfigureAwait(false);
-        var catalog = capabilities.Catalogs.FirstOrDefault(
-            item => string.Equals(item.Id, settings.CatalogId, StringComparison.Ordinal));
-        if (catalog is null)
-        {
-            throw new InvalidOperationException(
-                $"PSF Guard did not advertise catalog '{settings.CatalogId}'.");
-        }
-        if (settings.UploadCapturedImages
-            && !capabilities.Capabilities.Contains("image_upload", StringComparer.Ordinal))
-        {
-            throw new InvalidOperationException(
-                $"Remote image upload is disabled for PSF Guard catalog '{settings.CatalogId}'.");
-        }
-
-        return $"Connected to {capabilities.Product} {capabilities.ProductVersion}; "
-            + $"catalog {catalog.Name} is {(catalog.Writable ? "writable" : "read-only")}.";
-    }
-
-    protected string RequireCurrentTargetName()
-    {
-        for (var container = Parent; container is not null; container = container.Parent)
+        for (; container is not null; container = container.Parent)
         {
             if (container is IDeepSkyObjectContainer target
                 && !string.IsNullOrWhiteSpace(target.Target?.TargetName))
@@ -93,18 +81,27 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
             }
         }
 
-        throw new InvalidOperationException(
-            "Current-target reconciliation must be placed inside a target container.");
+        return null;
     }
 
-    protected static string FormatApplyResult(string label, ApplyResult result) =>
-        $"{label}: {result.Inserted} inserted, {result.Updated} updated, "
-        + $"{result.Unchanged} unchanged, {result.Skipped} skipped.";
+    protected static string RequireCurrentTargetName(ISequenceContainer? container) =>
+        FindCurrentTargetName(container)
+        ?? throw new InvalidOperationException(
+            "Target reconciliation can run only within a target container.");
 
     protected static string FormatPushReceipt(string label, PushReceipt receipt) =>
         receipt.Applied
             ? $"{label}: applied preview {receipt.PreviewId}."
             : $"{label}: preview {receipt.PreviewId} is ready in PSF Guard.";
+
+    protected async Task UploadImageAsync(
+        string imagePath,
+        CancellationToken cancellationToken)
+    {
+        using var client = CreateClient();
+        await client.UploadImageAsync(settings.CatalogId, imagePath, cancellationToken)
+            .ConfigureAwait(false);
+    }
 
     protected static void Report(
         IProgress<ApplicationStatus>? progress,
@@ -115,6 +112,10 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
             Source = "PSF Guard Sync",
             Status = status,
         });
+    }
+
+    protected virtual void AddValidationIssues(List<string> validationIssues)
+    {
     }
 
     public bool Validate()
@@ -153,6 +154,7 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
             validationIssues.Add("Configure an existing Target Scheduler database.");
         }
 
+        AddValidationIssues(validationIssues);
         Issues = validationIssues;
         return validationIssues.Count == 0;
     }

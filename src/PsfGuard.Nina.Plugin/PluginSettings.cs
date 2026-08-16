@@ -49,7 +49,7 @@ internal sealed class PluginSettings
 
     public bool AutoPushCaptures
     {
-        get => options.GetValueBoolean(nameof(AutoPushCaptures), true);
+        get => options.GetValueBoolean(nameof(AutoPushCaptures), false);
         set => options.SetValueBoolean(nameof(AutoPushCaptures), value);
     }
 
@@ -57,6 +57,12 @@ internal sealed class PluginSettings
     {
         get => options.GetValueBoolean(nameof(UploadCapturedImages), false);
         set => options.SetValueBoolean(nameof(UploadCapturedImages), value);
+    }
+
+    public bool UploadCalibrationImages
+    {
+        get => options.GetValueBoolean(nameof(UploadCalibrationImages), false);
+        set => options.SetValueBoolean(nameof(UploadCalibrationImages), value);
     }
 
     public bool AutoApplyPushes

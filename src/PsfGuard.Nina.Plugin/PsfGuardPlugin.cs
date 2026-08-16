@@ -182,6 +182,16 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
         }
     }
 
+    public bool UploadCalibrationImages
+    {
+        get => settings.UploadCalibrationImages;
+        set
+        {
+            settings.UploadCalibrationImages = value;
+            RaisePropertyChanged();
+        }
+    }
+
     public bool AutoApplyPushes
     {
         get => settings.AutoApplyPushes;
@@ -235,13 +245,18 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
 
     private void ImageSaved(object? sender, ImageSavedEventArgs args)
     {
-        if (!Enabled
-            || (!AutoPushCaptures && !UploadCapturedImages)
-            || !string.Equals(
-                args.MetaData.Image.ImageType,
-                "LIGHT",
-                StringComparison.OrdinalIgnoreCase)
-            || args.PathToImage is null)
+        if (!Enabled || args.PathToImage is null)
+        {
+            return;
+        }
+
+        var imageType = args.MetaData.Image.ImageType;
+        var shouldUpload = UploadCapturedImages
+            && CaptureImageTypes.ShouldDirectUpload(imageType, UploadCalibrationImages);
+        var shouldPushScheduler = AutoPushCaptures
+            && CaptureImageTypes.IsLight(imageType)
+            && HasTargetSchedulerDatabase();
+        if (!shouldUpload && !shouldPushScheduler)
         {
             return;
         }
@@ -254,7 +269,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                     try
                     {
                         RequireRemoteConfigured();
-                        if (UploadCapturedImages && IsFitsPath(imagePath))
+                        if (shouldUpload && CaptureImageTypes.IsSupportedImagePath(imagePath))
                         {
                             await imageUploadQueue.EnqueueAsync(
                                     CatalogId,
@@ -262,13 +277,13 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                                     lifetime.Token)
                                 .ConfigureAwait(false);
                         }
-                        else if (UploadCapturedImages)
+                        else if (shouldUpload)
                         {
                             SetStatus(
-                                $"Skipped direct upload for {Path.GetFileName(imagePath)}; PSF Guard ingest accepts FITS files.");
+                                $"Skipped direct upload for {Path.GetFileName(imagePath)}; PSF Guard ingest accepts FITS and XISF files.");
                         }
 
-                        if (AutoPushCaptures && HasTargetSchedulerDatabase())
+                        if (shouldPushScheduler)
                         {
                             SetStatus(
                                 $"Waiting for Target Scheduler to record {Path.GetFileName(imagePath)}...");
@@ -406,6 +421,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
             nameof(Enabled),
             nameof(AutoPushCaptures),
             nameof(UploadCapturedImages),
+            nameof(UploadCalibrationImages),
             nameof(AutoApplyPushes),
             nameof(IncludeThumbnails),
         })
@@ -438,11 +454,6 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
             ?? assembly?.GetName().Version?.ToString()
             ?? "unknown";
     }
-
-    private static bool IsFitsPath(string path) =>
-        new[] { ".fit", ".fits", ".fts" }.Contains(
-            Path.GetExtension(path),
-            StringComparer.OrdinalIgnoreCase);
 
     private static string FormatApplyResult(string label, ApplyResult result) =>
         $"{label}: {result.Inserted} inserted, {result.Updated} updated, "
