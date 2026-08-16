@@ -48,12 +48,81 @@ public sealed class PsfGuardSyncClientTests
         Assert.Equal(
             bundle.BundleId.ToString("D"),
             captured.Headers.GetValues("Idempotency-Key").Single());
+        Assert.Equal("respond-async", captured.Headers.GetValues("Prefer").Single());
 
         var body = await captured.Content!.ReadAsStringAsync();
         using var json = JsonDocument.Parse(body);
         Assert.Equal(
             "review",
             json.RootElement.GetProperty("catalog_id").GetString());
+    }
+
+    [Fact]
+    public async Task PreviewPollsAnAcceptedAsyncJobUntilReady()
+    {
+        var calls = 0;
+        var bundle = Bundle();
+        var handler = new StubHandler(
+            request =>
+            {
+                calls++;
+                Assert.Equal(
+                    calls == 1 ? HttpMethod.Post : HttpMethod.Get,
+                    request.Method);
+                Assert.Equal(
+                    calls == 1
+                        ? "https://psf.example/api/sync/v1/previews"
+                        : "https://psf.example/api/sync/v1/jobs/job-1",
+                    request.RequestUri!.AbsoluteUri);
+                return Task.FromResult(
+                    calls == 1
+                        ? Json(
+                            """{"job_id":"job-1","state":"running"}""",
+                            HttpStatusCode.Accepted)
+                        : Json(
+                            """
+                            {
+                              "job_id":"job-1",
+                              "state":"ready",
+                              "preview":{"preview_id":"preview-1","state":"ready"}
+                            }
+                            """));
+            });
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(handler),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        var preview = await client.CreatePreviewAsync(
+            "review",
+            bundle,
+            CancellationToken.None);
+
+        Assert.Equal("preview-1", preview.PreviewId);
+        Assert.Equal(2, calls);
+    }
+
+    [Fact]
+    public async Task RefreshPostsToTheExistingPreview()
+    {
+        HttpRequestMessage? captured = null;
+        var handler = new StubHandler(
+            request =>
+            {
+                captured = request;
+                return Task.FromResult(Json("""{"preview_id":"preview-1","state":"ready"}"""));
+            });
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(handler),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        await client.RefreshPreviewAsync("preview-1", CancellationToken.None);
+
+        Assert.Equal(HttpMethod.Post, captured!.Method);
+        Assert.Equal(
+            "https://psf.example/api/sync/v1/previews/preview-1/refresh",
+            captured.RequestUri!.AbsoluteUri);
     }
 
     [Fact]
@@ -90,6 +159,36 @@ public sealed class PsfGuardSyncClientTests
 
         Assert.Equal(bundle.BundleId, downloaded.BundleId);
         Assert.Equal(2, calls);
+    }
+
+    [Fact]
+    public async Task DownloadExportTreatsPayloadDigestAsAdvisory()
+    {
+        var bundle = Bundle();
+        bundle.PayloadSha256 = "not-a-canonical-json-digest";
+        var handler = new StubHandler(
+            _ => Task.FromResult(
+                Json(
+                    $$"""
+                    {
+                      "export_id":"export-1",
+                      "state":"ready",
+                      "bundle":{{ProtocolJson.Serialize(bundle)}}
+                    }
+                    """)));
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(handler),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        var downloaded = await client.DownloadExportAsync(
+            "review",
+            SyncOperation.PushGrades,
+            reviewedOnly: true,
+            CancellationToken.None);
+
+        Assert.Equal(bundle.BundleId, downloaded.BundleId);
+        Assert.False(downloaded.VerifyDigest());
     }
 
     [Fact]
@@ -169,10 +268,12 @@ public sealed class PsfGuardSyncClientTests
         return bundle;
     }
 
-    private static HttpResponseMessage Json(string body) => new(HttpStatusCode.OK)
-    {
-        Content = new StringContent(body, Encoding.UTF8, "application/json"),
-    };
+    private static HttpResponseMessage Json(
+        string body,
+        HttpStatusCode statusCode = HttpStatusCode.OK) => new(statusCode)
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json"),
+        };
 
     private static async Task<HttpRequestMessage> CloneAsync(HttpRequestMessage source)
     {

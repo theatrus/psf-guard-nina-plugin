@@ -46,6 +46,17 @@ public sealed record SyncPreview
     public IReadOnlyDictionary<string, long>? Summary { get; init; }
 }
 
+public sealed record SyncPreviewJob
+{
+    public required string JobId { get; init; }
+
+    public required string State { get; init; }
+
+    public SyncPreview? Preview { get; init; }
+
+    public string? Error { get; init; }
+}
+
 public sealed record SyncApplyResult
 {
     public required string State { get; init; }

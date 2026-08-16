@@ -9,6 +9,7 @@ namespace PsfGuard.Nina.Sync.Client;
 public sealed class PsfGuardSyncClient : IDisposable
 {
     private static readonly TimeSpan DefaultExportTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan DefaultPreviewTimeout = TimeSpan.FromMinutes(10);
     private readonly HttpClient httpClient;
 
     public PsfGuardSyncClient(HttpClient httpClient, Uri baseUri, string? apiToken)
@@ -81,11 +82,6 @@ public sealed class PsfGuardSyncClient : IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(catalogId);
         ArgumentNullException.ThrowIfNull(bundle);
 
-        if (!bundle.VerifyDigest())
-        {
-            throw new InvalidDataException("The catalog bundle digest is missing or invalid.");
-        }
-
         var request = new CreatePreviewRequest
         {
             CatalogId = catalogId,
@@ -97,7 +93,39 @@ public sealed class PsfGuardSyncClient : IDisposable
             Content = JsonContent.Create(request, options: ProtocolJson.Options),
         };
         message.Headers.Add("Idempotency-Key", bundle.BundleId.ToString("D"));
-        return await SendAsync<SyncPreview>(message, cancellationToken).ConfigureAwait(false);
+        message.Headers.TryAddWithoutValidation("Prefer", "respond-async");
+        using var response = await httpClient.SendAsync(message, cancellationToken)
+            .ConfigureAwait(false);
+        if (response.StatusCode != System.Net.HttpStatusCode.Accepted)
+        {
+            return await ReadAsync<SyncPreview>(response, cancellationToken).ConfigureAwait(false);
+        }
+
+        var job = await ReadAsync<SyncPreviewJob>(response, cancellationToken)
+            .ConfigureAwait(false);
+        var deadline = DateTimeOffset.UtcNow + DefaultPreviewTimeout;
+        while (!string.Equals(job.State, "ready", StringComparison.OrdinalIgnoreCase))
+        {
+            if (string.Equals(job.State, "failed", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(job.Error ?? "PSF Guard preview failed.");
+            }
+
+            if (DateTimeOffset.UtcNow >= deadline)
+            {
+                throw new TimeoutException("Timed out waiting for the PSF Guard preview.");
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(750), cancellationToken)
+                .ConfigureAwait(false);
+            job = await GetAsync<SyncPreviewJob>(
+                    $"api/sync/v1/jobs/{Uri.EscapeDataString(job.JobId)}",
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return job.Preview
+            ?? throw new InvalidDataException("PSF Guard marked the preview ready without a preview.");
     }
 
     public Task<SyncPreview> GetPreviewAsync(
@@ -117,6 +145,16 @@ public sealed class PsfGuardSyncClient : IDisposable
             HttpMethod.Post,
             $"api/sync/v1/previews/{Uri.EscapeDataString(previewId)}/apply");
         return await SendAsync<SyncApplyResult>(request, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<SyncPreview> RefreshPreviewAsync(
+        string previewId,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"api/sync/v1/previews/{Uri.EscapeDataString(previewId)}/refresh");
+        return await SendAsync<SyncPreview>(request, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<CatalogBundle> DownloadExportAsync(
@@ -160,11 +198,6 @@ public sealed class PsfGuardSyncClient : IDisposable
 
         var bundle = export.Bundle
             ?? throw new InvalidDataException("PSF Guard marked the export ready without a bundle.");
-        if (!bundle.VerifyDigest())
-        {
-            throw new InvalidDataException("The downloaded catalog bundle digest is invalid.");
-        }
-
         return bundle;
     }
 
@@ -180,6 +213,13 @@ public sealed class PsfGuardSyncClient : IDisposable
     {
         using var response = await httpClient.SendAsync(request, cancellationToken)
             .ConfigureAwait(false);
+        return await ReadAsync<T>(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<T> ReadAsync<T>(
+        HttpResponseMessage response,
+        CancellationToken cancellationToken)
+    {
         var content = await response.Content.ReadAsStringAsync(cancellationToken)
             .ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)

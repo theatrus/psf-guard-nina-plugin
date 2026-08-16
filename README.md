@@ -35,6 +35,8 @@ expose arbitrary SQL.
 - Grade pulls update only `gradingStatus` and `rejectreason`.
 - API tokens stored in Windows Credential Manager.
 - Optional Target Scheduler thumbnail transfer.
+- Background preview jobs for catalogs whose merge planning outlives an HTTP
+  proxy timeout.
 
 ## Requirements
 
@@ -76,7 +78,9 @@ Restart N.I.N.A., open **Plugins > Installed > PSF Guard Sync**, and configure:
 4. Optional Target Scheduler database path.
 5. FITS upload, catalog push, and preview-apply policy.
 
-Use **Test connection** before enabling automatic work.
+Use **Test connection** before enabling automatic work. When direct image
+upload is selected, the check also verifies that the chosen PSF Guard database
+has enabled its separate upload gate.
 
 ## Sequencer Instructions
 

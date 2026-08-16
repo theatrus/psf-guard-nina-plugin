@@ -1,7 +1,7 @@
 # PSF Guard remote sync protocol v1
 
 This document pins the client contract used by the N.I.N.A. plugin. It follows
-PSF Guard's `DATA_TRANSFER_DESIGN.md`: the wire format is versioned and moves
+PSF Guard's data-transfer design: the wire format is versioned and moves
 logical rows, never a live SQLite file.
 
 ## Transport
@@ -29,7 +29,7 @@ GET /api/sync/v1/capabilities
   "protocol_version": 1,
   "product": "psf-guard",
   "product_version": "0.6.0",
-  "capabilities": ["merge", "push_planning", "push_grades", "preview_apply", "exports", "image_upload"],
+  "capabilities": ["merge", "push_planning", "push_grades", "preview_apply", "preview_refresh", "async_preview_jobs", "exports", "image_upload"],
   "catalogs": [
     {
       "id": "review",
@@ -46,6 +46,7 @@ GET /api/sync/v1/capabilities
 ```http
 POST /api/sync/v1/previews
 Idempotency-Key: <bundle UUID>
+Prefer: respond-async
 ```
 
 ```json
@@ -76,8 +77,21 @@ Supported operations:
 - `push_planning`: projects, targets, templates, plans, and rule weights
 - `push_grades`: acquired-image GUID, grade, and reject reason
 
-The server validates the digest, protocol version, token scope, catalog scope,
-row limits, expanded size, and required columns before creating a preview.
+The server validates the protocol version, token scope, catalog scope, row
+limits, expanded size, and required columns before creating a preview. The
+payload digest is advisory because independent JSON implementations do not
+share one canonical byte encoding.
+
+An async-capable server returns `202 Accepted` immediately:
+
+```json
+{"job_id":"job-opaque-id","state":"running"}
+```
+
+The plugin polls `GET /api/sync/v1/jobs/{job_id}` until the job returns either
+`state: "ready"` with its `preview`, or `state: "failed"` with an error. Older
+servers may ignore `Prefer` and return the ready preview synchronously. A retry
+with the same idempotency key returns the same retained job.
 
 ```json
 {
@@ -97,11 +111,13 @@ Preview inspection and apply:
 ```http
 GET  /api/sync/v1/previews/{preview_id}
 POST /api/sync/v1/previews/{preview_id}/apply
+POST /api/sync/v1/previews/{preview_id}/refresh
 ```
 
 Apply is one-use and must use the frozen source bundle reviewed by the preview.
 If relevant destination rows changed, it returns `409 Conflict` and makes no
-writes.
+writes. Refresh recalculates the kept preview against the current destination
+without uploading its bundle again.
 
 ## Pull Export
 
@@ -158,8 +174,10 @@ is explicit:
 ```
 
 Integer and real values use invariant strings to avoid JSON number precision
-loss. Blob values are base64. The digest is SHA-256 over the compact canonical
-JSON with `payload_sha256` omitted.
+loss. Blob values are base64. `payload_sha256`, when present, is a courtesy
+checksum over the producer's compact JSON with that field omitted. It is not a
+credential and receivers do not require their own serialization to reproduce
+it.
 
 ## Direct FITS Upload
 
