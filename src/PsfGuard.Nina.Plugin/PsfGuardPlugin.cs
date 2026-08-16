@@ -254,7 +254,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                     try
                     {
                         RequireRemoteConfigured();
-                        if (UploadCapturedImages && IsFitsPath(imagePath))
+                        if (UploadCapturedImages && IsImagePath(imagePath))
                         {
                             await imageUploadQueue.EnqueueAsync(
                                     CatalogId,
@@ -265,7 +265,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                         else if (UploadCapturedImages)
                         {
                             SetStatus(
-                                $"Skipped direct upload for {Path.GetFileName(imagePath)}; PSF Guard ingest accepts FITS files.");
+                                $"Skipped direct upload for {Path.GetFileName(imagePath)}; PSF Guard ingest accepts FITS and XISF files.");
                         }
 
                         if (AutoPushCaptures && HasTargetSchedulerDatabase())
@@ -439,8 +439,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
             ?? "unknown";
     }
 
-    private static bool IsFitsPath(string path) =>
-        new[] { ".fit", ".fits", ".fts" }.Contains(
+    private static bool IsImagePath(string path) =>
+        new[] { ".fit", ".fits", ".fts", ".xisf" }.Contains(
             Path.GetExtension(path),
             StringComparer.OrdinalIgnoreCase);
 

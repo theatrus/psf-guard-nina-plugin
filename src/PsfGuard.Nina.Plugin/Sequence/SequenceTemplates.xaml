@@ -46,6 +46,30 @@
         </nina:SequenceBlockView>
     </DataTemplate>
 
+    <DataTemplate DataType="{x:Type local:ReconcilePsfGuardTargetAfterExposures}">
+        <nina:SequenceBlockView>
+            <nina:SequenceBlockView.SequenceItemContent>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock VerticalAlignment="Center" Text="Reconcile target every" />
+                    <TextBox
+                        Width="48"
+                        Margin="8,0"
+                        HorizontalContentAlignment="Right"
+                        Text="{Binding AfterExposures, UpdateSourceTrigger=PropertyChanged}" />
+                    <TextBlock VerticalAlignment="Center" Text="light exposure(s)" />
+                </StackPanel>
+            </nina:SequenceBlockView.SequenceItemContent>
+            <nina:SequenceBlockView.SequenceItemProgressContent>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock VerticalAlignment="Center" Text="Exposure" />
+                    <TextBlock Margin="5,0,0,0" VerticalAlignment="Center" Text="{Binding ProgressExposures}" />
+                    <TextBlock Margin="5,0,0,0" VerticalAlignment="Center" Text="of" />
+                    <TextBlock Margin="5,0,0,0" VerticalAlignment="Center" Text="{Binding AfterExposures}" />
+                </StackPanel>
+            </nina:SequenceBlockView.SequenceItemProgressContent>
+        </nina:SequenceBlockView>
+    </DataTemplate>
+
     <DataTemplate x:Key="PsfGuard.Nina.Plugin.Sequence.CheckPsfGuardConnection_Mini">
         <mini:MiniSequenceItem>
             <mini:MiniSequenceItem.SequenceItemContent>
@@ -84,5 +108,18 @@
                 <TextBlock Text="Reconcile target" />
             </mini:MiniSequenceItem.SequenceItemContent>
         </mini:MiniSequenceItem>
+    </DataTemplate>
+
+    <DataTemplate x:Key="PsfGuard.Nina.Plugin.Sequence.ReconcilePsfGuardTargetAfterExposures_Mini">
+        <mini:MiniTrigger>
+            <mini:MiniTrigger.TriggerProgressContent>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock VerticalAlignment="Center" Text="Exposure" />
+                    <TextBlock Margin="5,0,0,0" VerticalAlignment="Center" Text="{Binding ProgressExposures}" />
+                    <TextBlock Margin="5,0,0,0" VerticalAlignment="Center" Text="of" />
+                    <TextBlock Margin="5,0,0,0" VerticalAlignment="Center" Text="{Binding AfterExposures}" />
+                </StackPanel>
+            </mini:MiniTrigger.TriggerProgressContent>
+        </mini:MiniTrigger>
     </DataTemplate>
 </ResourceDictionary>

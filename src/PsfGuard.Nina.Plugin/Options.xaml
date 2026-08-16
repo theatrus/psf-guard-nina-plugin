@@ -21,11 +21,16 @@
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
+            <TextBlock
+                Grid.Row="0"
+                Margin="0,0,0,10"
+                VerticalAlignment="Center"
+                Text="Enable PSF Guard sync" />
             <CheckBox
                 Grid.Row="0"
-                Grid.ColumnSpan="2"
+                Grid.Column="1"
                 Margin="0,0,0,10"
-                Content="Enable PSF Guard sync"
+                HorizontalAlignment="Left"
                 IsChecked="{Binding Enabled}" />
 
             <TextBlock Grid.Row="1" Margin="0,4,12,4" VerticalAlignment="Center" Text="Server URL" />
@@ -57,20 +62,61 @@
                 Margin="0,4"
                 Text="{Binding TargetSchedulerDatabase, UpdateSourceTrigger=LostFocus}" />
 
-            <StackPanel Grid.Row="5" Grid.ColumnSpan="2" Margin="0,10,0,0">
+            <Grid Grid.Row="5" Grid.ColumnSpan="2" Margin="0,10,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="340" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <TextBlock
+                    Grid.Row="0"
+                    VerticalAlignment="Center"
+                    Text="Upload each saved FITS or XISF light frame directly" />
                 <CheckBox
-                    Content="Upload each saved FITS light frame"
+                    Grid.Row="0"
+                    Grid.Column="1"
+                    HorizontalAlignment="Left"
                     IsChecked="{Binding UploadCapturedImages}" />
-                <CheckBox Content="Push each saved light frame" IsChecked="{Binding AutoPushCaptures}" />
-                <CheckBox
+                <TextBlock
+                    Grid.Row="1"
                     Margin="0,5,0,0"
-                    Content="Apply remote previews automatically"
+                    VerticalAlignment="Center"
+                    Text="Push each saved light's Target Scheduler record" />
+                <CheckBox
+                    Grid.Row="1"
+                    Grid.Column="1"
+                    Margin="0,5,0,0"
+                    HorizontalAlignment="Left"
+                    IsChecked="{Binding AutoPushCaptures}" />
+                <TextBlock
+                    Grid.Row="2"
+                    Margin="0,5,0,0"
+                    VerticalAlignment="Center"
+                    Text="Apply remote previews automatically" />
+                <CheckBox
+                    Grid.Row="2"
+                    Grid.Column="1"
+                    Margin="0,5,0,0"
+                    HorizontalAlignment="Left"
                     IsChecked="{Binding AutoApplyPushes}" />
-                <CheckBox
+                <TextBlock
+                    Grid.Row="3"
                     Margin="0,5,0,0"
-                    Content="Include Target Scheduler thumbnails"
+                    VerticalAlignment="Center"
+                    Text="Include Target Scheduler thumbnails" />
+                <CheckBox
+                    Grid.Row="3"
+                    Grid.Column="1"
+                    Margin="0,5,0,0"
+                    HorizontalAlignment="Left"
                     IsChecked="{Binding IncludeThumbnails}" />
-            </StackPanel>
+            </Grid>
 
             <StackPanel Grid.Row="6" Grid.ColumnSpan="2" Margin="0,14,0,0" Orientation="Horizontal">
                 <Button

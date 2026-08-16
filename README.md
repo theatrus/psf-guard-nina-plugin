@@ -24,7 +24,7 @@ expose arbitrary SQL.
 ## Features
 
 - Push each captured light frame after Target Scheduler commits it.
-- Upload saved FITS lights without requiring Target Scheduler.
+- Upload saved FITS or XISF lights without requiring Target Scheduler.
 - Durable, idempotent sync and image queues below
   `%LOCALAPPDATA%\NINA\PsfGuardSync`.
 - Manual full merge, planning push, and reviewed-grade push.
@@ -78,6 +78,11 @@ Restart N.I.N.A., open **Plugins > Installed > PSF Guard Sync**, and configure:
 4. Optional Target Scheduler database path.
 5. FITS upload, catalog push, and preview-apply policy.
 
+Direct upload sends each saved light independently of scheduler sync. PSF Guard
+stores it in the receive directory selected for that destination catalog; when
+the catalog has several image roots, its settings choose exactly one. Reconcile
+operations transfer scheduler rows and optional thumbnails, never image bytes.
+
 Use **Test connection** before enabling automatic work. When direct image
 upload is selected, the check also verifies that the chosen PSF Guard database
 has enabled its separate upload gate.
@@ -101,6 +106,15 @@ advanced sequencer:
 - **Reconcile current target with PSF Guard** pushes only the enclosing target's
   project, plans, captures, and optional thumbnails. Put it inside a target
   container near that target's end.
+- **Reconcile PSF Guard target after exposures** is an Advanced Sequencer
+  trigger. Add it to a target or an ancestor trigger set and choose how many
+  successfully completed light exposures occur between target-scoped
+  reconciliations. Its counter resets when the active target changes.
+
+The trigger is a blocking synchronization point. The separate **Push each
+saved light's Target Scheduler record** setting remains a durable background
+queue; disable that setting when the trigger should be the only catalog-sync
+policy for those exposures.
 
 Reconciliation instructions wait two seconds for final Target Scheduler image
 transactions before taking their read-only snapshot. They then await the remote
@@ -117,7 +131,7 @@ of guessing.
 
 Direct image mode:
 
-1. N.I.N.A. saves a FITS light.
+1. N.I.N.A. saves a FITS or XISF light.
 2. The plugin persists an image-upload job and returns immediately.
 3. Its background worker hashes and streams the file to the selected PSF Guard
    database.
