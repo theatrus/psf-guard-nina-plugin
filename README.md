@@ -7,11 +7,12 @@ remote PSF Guard catalog and can upload captured lights and calibration frames
 directly.
 
 The plugin subscribes to N.I.N.A.'s `IImageSaveMediator.ImageSaved` event. For
-each saved light, bias, dark, dark-flat, or flat frame it can durably queue the
-FITS or XISF file for direct upload. If Target Scheduler is installed, saved
-lights can also wait briefly for the matching `acquiredimage` row, build a
-schema-preserving bundle with its dependencies, and queue that bundle. Network
-work never blocks N.I.N.A.'s image-save pipeline.
+each saved light it can durably queue the FITS or XISF file for direct upload.
+An additional opt-in includes bias, dark, dark-flat, and flat saves. If Target
+Scheduler is installed, saved lights can also wait briefly for the matching
+`acquiredimage` row, build a schema-preserving bundle with its dependencies,
+and queue that bundle. Network work never blocks N.I.N.A.'s image-save
+pipeline.
 
 ## Status
 
@@ -80,13 +81,14 @@ Restart N.I.N.A., open **Plugins > Installed > PSF Guard Sync**, and configure:
 4. Optional Target Scheduler database path.
 5. Image upload, catalog push, and preview-apply policy.
 
-Direct upload sends each saved light or calibration frame independently of
-scheduler sync. PSF Guard stores it in the receive directory selected for that
+Direct upload sends each saved light independently of scheduler sync. Enable
+**Also upload calibration frames** to include bias, dark, dark-flat, and flat
+saves. PSF Guard stores them in the receive directory selected for that
 destination catalog; when the catalog has several image roots, its settings
 choose exactly one. Lights resolve through the Target Scheduler-compatible
-catalog. Bias, dark, dark-flat, and flat frames enter PSF Guard's calibration
-library and never create `acquiredimage` rows. Reconcile operations transfer
-scheduler rows and optional thumbnails, never image bytes.
+catalog. Calibration frames enter PSF Guard's calibration library and never
+create `acquiredimage` rows. Reconcile operations transfer scheduler rows and
+optional thumbnails, never image bytes.
 
 Use **Test connection** before enabling automatic work. When direct image
 upload is selected, the check also verifies that the chosen PSF Guard database
@@ -136,7 +138,7 @@ of guessing.
 
 Direct image mode:
 
-1. N.I.N.A. saves a FITS or XISF light or calibration frame.
+1. N.I.N.A. saves a FITS or XISF light, or an opted-in calibration frame.
 2. The plugin persists an image-upload job and returns immediately.
 3. Its background worker hashes and streams the file to the selected PSF Guard
    database.

@@ -14,9 +14,21 @@ public sealed class CaptureImageTypesTests
     [InlineData("DARKFLAT")]
     [InlineData("DARK FLAT")]
     [InlineData("FLATDARK")]
-    public void DirectUploadAcceptsLightsAndCalibrationFrames(string imageType)
+    public void DirectUploadIncludesCalibrationWhenEnabled(string imageType)
     {
-        Assert.True(CaptureImageTypes.IsDirectUploadSupported(imageType));
+        Assert.True(CaptureImageTypes.ShouldDirectUpload(imageType, includeCalibration: true));
+    }
+
+    [Theory]
+    [InlineData("FLAT")]
+    [InlineData("DARK")]
+    [InlineData("BIAS")]
+    [InlineData("OFFSET")]
+    [InlineData("DARKFLAT")]
+    public void CalibrationClassificationExcludesLights(string imageType)
+    {
+        Assert.True(CaptureImageTypes.IsCalibration(imageType));
+        Assert.False(CaptureImageTypes.IsLight(imageType));
     }
 
     [Theory]
@@ -25,7 +37,21 @@ public sealed class CaptureImageTypesTests
     [InlineData("SNAPSHOT")]
     public void DirectUploadRejectsOtherImageTypes(string? imageType)
     {
-        Assert.False(CaptureImageTypes.IsDirectUploadSupported(imageType));
+        Assert.False(CaptureImageTypes.ShouldDirectUpload(imageType, includeCalibration: true));
+    }
+
+    [Theory]
+    [InlineData("LIGHT", true)]
+    [InlineData("FLAT", false)]
+    [InlineData("DARK", false)]
+    [InlineData("BIAS", false)]
+    public void DirectUploadRequiresTheCalibrationOptIn(
+        string imageType,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            CaptureImageTypes.ShouldDirectUpload(imageType, includeCalibration: false));
     }
 
     [Theory]

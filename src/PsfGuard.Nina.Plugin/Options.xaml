@@ -72,12 +72,13 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
                 <TextBlock
                     Grid.Row="0"
                     VerticalAlignment="Center"
-                    Text="Upload saved light and calibration images directly" />
+                    Text="Upload saved light images directly" />
                 <CheckBox
                     Grid.Row="0"
                     Grid.Column="1"
@@ -87,31 +88,43 @@
                     Grid.Row="1"
                     Margin="0,5,0,0"
                     VerticalAlignment="Center"
-                    Text="Push each saved light's Target Scheduler record" />
+                    Text="Also upload calibration frames" />
                 <CheckBox
                     Grid.Row="1"
                     Grid.Column="1"
                     Margin="0,5,0,0"
                     HorizontalAlignment="Left"
-                    IsChecked="{Binding AutoPushCaptures}" />
+                    IsChecked="{Binding UploadCalibrationImages}"
+                    IsEnabled="{Binding UploadCapturedImages}" />
                 <TextBlock
                     Grid.Row="2"
                     Margin="0,5,0,0"
                     VerticalAlignment="Center"
-                    Text="Apply remote previews automatically" />
+                    Text="Push each saved light's Target Scheduler record" />
                 <CheckBox
                     Grid.Row="2"
                     Grid.Column="1"
                     Margin="0,5,0,0"
                     HorizontalAlignment="Left"
-                    IsChecked="{Binding AutoApplyPushes}" />
+                    IsChecked="{Binding AutoPushCaptures}" />
                 <TextBlock
                     Grid.Row="3"
                     Margin="0,5,0,0"
                     VerticalAlignment="Center"
-                    Text="Include Target Scheduler thumbnails" />
+                    Text="Apply remote previews automatically" />
                 <CheckBox
                     Grid.Row="3"
+                    Grid.Column="1"
+                    Margin="0,5,0,0"
+                    HorizontalAlignment="Left"
+                    IsChecked="{Binding AutoApplyPushes}" />
+                <TextBlock
+                    Grid.Row="4"
+                    Margin="0,5,0,0"
+                    VerticalAlignment="Center"
+                    Text="Include Target Scheduler thumbnails" />
+                <CheckBox
+                    Grid.Row="4"
                     Grid.Column="1"
                     Margin="0,5,0,0"
                     HorizontalAlignment="Left"

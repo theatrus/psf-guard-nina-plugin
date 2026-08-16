@@ -182,6 +182,16 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
         }
     }
 
+    public bool UploadCalibrationImages
+    {
+        get => settings.UploadCalibrationImages;
+        set
+        {
+            settings.UploadCalibrationImages = value;
+            RaisePropertyChanged();
+        }
+    }
+
     public bool AutoApplyPushes
     {
         get => settings.AutoApplyPushes;
@@ -242,7 +252,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
 
         var imageType = args.MetaData.Image.ImageType;
         var shouldUpload = UploadCapturedImages
-            && CaptureImageTypes.IsDirectUploadSupported(imageType);
+            && CaptureImageTypes.ShouldDirectUpload(imageType, UploadCalibrationImages);
         var shouldPushScheduler = AutoPushCaptures
             && CaptureImageTypes.IsLight(imageType)
             && HasTargetSchedulerDatabase();
@@ -411,6 +421,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
             nameof(Enabled),
             nameof(AutoPushCaptures),
             nameof(UploadCapturedImages),
+            nameof(UploadCalibrationImages),
             nameof(AutoApplyPushes),
             nameof(IncludeThumbnails),
         })

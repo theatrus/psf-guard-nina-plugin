@@ -59,6 +59,12 @@ internal sealed class PluginSettings
         set => options.SetValueBoolean(nameof(UploadCapturedImages), value);
     }
 
+    public bool UploadCalibrationImages
+    {
+        get => options.GetValueBoolean(nameof(UploadCalibrationImages), false);
+        set => options.SetValueBoolean(nameof(UploadCalibrationImages), value);
+    }
+
     public bool AutoApplyPushes
     {
         get => options.GetValueBoolean(nameof(AutoApplyPushes), true);
