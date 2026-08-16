@@ -7,6 +7,7 @@ public sealed class CaptureImageTypesTests
     [Theory]
     [InlineData("LIGHT")]
     [InlineData("light")]
+    [InlineData("LIGHT FRAME")]
     [InlineData(" FLAT ")]
     [InlineData("DARK")]
     [InlineData("BIAS")]
@@ -14,6 +15,7 @@ public sealed class CaptureImageTypesTests
     [InlineData("DARKFLAT")]
     [InlineData("DARK FLAT")]
     [InlineData("FLATDARK")]
+    [InlineData("FLAT DARK")]
     public void DirectUploadIncludesCalibrationWhenEnabled(string imageType)
     {
         Assert.True(CaptureImageTypes.ShouldDirectUpload(imageType, includeCalibration: true));
@@ -63,5 +65,48 @@ public sealed class CaptureImageTypesTests
     public void SchedulerCapturePushRemainsLightOnly(string imageType, bool expected)
     {
         Assert.Equal(expected, CaptureImageTypes.IsLight(imageType));
+    }
+
+    [Theory]
+    [InlineData("LIGHT", CaptureImageKind.Light)]
+    [InlineData("LIGHT FRAME", CaptureImageKind.Light)]
+    [InlineData("BIAS FRAME", CaptureImageKind.Bias)]
+    [InlineData("DARK FRAME", CaptureImageKind.Dark)]
+    [InlineData("DARK FLAT", CaptureImageKind.DarkFlat)]
+    [InlineData("FLAT DARK", CaptureImageKind.DarkFlat)]
+    [InlineData("FLAT FRAME", CaptureImageKind.Flat)]
+    [InlineData("SNAPSHOT", CaptureImageKind.Unsupported)]
+    public void ClassificationMatchesTheServerContract(
+        string imageType,
+        CaptureImageKind expected)
+    {
+        Assert.Equal(expected, CaptureImageTypes.Classify(imageType));
+    }
+
+    [Theory]
+    [InlineData("capture.fit")]
+    [InlineData("capture.FITS")]
+    [InlineData("capture.fts")]
+    [InlineData("capture.xisf")]
+    public void SupportedImagePathsMatchRemoteIntake(string path)
+    {
+        Assert.True(CaptureImageTypes.IsSupportedImagePath(path));
+    }
+
+    [Theory]
+    [InlineData(CaptureImageKind.Light, true, false, true)]
+    [InlineData(CaptureImageKind.Light, false, true, false)]
+    [InlineData(CaptureImageKind.Flat, true, false, false)]
+    [InlineData(CaptureImageKind.Flat, false, true, true)]
+    [InlineData(CaptureImageKind.Unsupported, true, true, false)]
+    public void PerSequencePolicyKeepsLightAndCalibrationSwitchesIndependent(
+        CaptureImageKind kind,
+        bool includeLights,
+        bool includeCalibration,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            CaptureImageTypes.ShouldUpload(kind, includeLights, includeCalibration));
     }
 }

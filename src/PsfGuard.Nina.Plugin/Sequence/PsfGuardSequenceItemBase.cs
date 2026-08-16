@@ -42,6 +42,7 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
     }
 
     protected bool AutoApplyPushes => settings.AutoApplyPushes;
+    protected virtual bool RequiresTargetScheduler => true;
 
     protected SyncOrchestrator CreateOrchestrator()
     {
@@ -145,8 +146,9 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
             validationIssues.Add("Configure the PSF Guard API token.");
         }
 
-        if (string.IsNullOrWhiteSpace(settings.TargetSchedulerDatabase)
-            || !File.Exists(settings.TargetSchedulerDatabase))
+        if (RequiresTargetScheduler
+            && (string.IsNullOrWhiteSpace(settings.TargetSchedulerDatabase)
+                || !File.Exists(settings.TargetSchedulerDatabase)))
         {
             validationIssues.Add("Configure an existing Target Scheduler database.");
         }

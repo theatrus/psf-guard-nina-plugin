@@ -78,7 +78,7 @@
                 <TextBlock
                     Grid.Row="0"
                     VerticalAlignment="Center"
-                    Text="Upload saved light images directly" />
+                    Text="Automatically upload saved light images" />
                 <CheckBox
                     Grid.Row="0"
                     Grid.Column="1"

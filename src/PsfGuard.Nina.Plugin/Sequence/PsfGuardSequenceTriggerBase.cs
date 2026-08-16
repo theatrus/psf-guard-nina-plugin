@@ -42,6 +42,15 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
     }
 
     protected bool AutoApplyPushes => settings.AutoApplyPushes;
+    protected virtual bool RequiresTargetScheduler => true;
+
+    protected bool IsGlobalUploadEnabledFor(CaptureImageKind kind) =>
+        settings.Enabled
+        && settings.UploadCapturedImages
+        && CaptureImageTypes.ShouldUpload(
+            kind,
+            includeLights: true,
+            includeCalibration: settings.UploadCalibrationImages);
 
     protected SyncOrchestrator CreateOrchestrator()
     {
@@ -81,6 +90,15 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
         receipt.Applied
             ? $"{label}: applied preview {receipt.PreviewId}."
             : $"{label}: preview {receipt.PreviewId} is ready in PSF Guard.";
+
+    protected async Task UploadImageAsync(
+        string imagePath,
+        CancellationToken cancellationToken)
+    {
+        using var client = CreateClient();
+        await client.UploadImageAsync(settings.CatalogId, imagePath, cancellationToken)
+            .ConfigureAwait(false);
+    }
 
     protected static void Report(
         IProgress<ApplicationStatus>? progress,
@@ -126,8 +144,9 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
             validationIssues.Add("Configure the PSF Guard API token.");
         }
 
-        if (string.IsNullOrWhiteSpace(settings.TargetSchedulerDatabase)
-            || !File.Exists(settings.TargetSchedulerDatabase))
+        if (RequiresTargetScheduler
+            && (string.IsNullOrWhiteSpace(settings.TargetSchedulerDatabase)
+                || !File.Exists(settings.TargetSchedulerDatabase)))
         {
             validationIssues.Add("Configure an existing Target Scheduler database.");
         }

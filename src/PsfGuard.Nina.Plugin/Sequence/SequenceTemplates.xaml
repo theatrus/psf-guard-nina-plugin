@@ -70,6 +70,25 @@
         </nina:SequenceBlockView>
     </DataTemplate>
 
+    <DataTemplate DataType="{x:Type local:UploadPsfGuardImageAfterExposure}">
+        <nina:SequenceBlockView>
+            <nina:SequenceBlockView.SequenceItemContent>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock VerticalAlignment="Center" Text="Upload lights" />
+                    <CheckBox
+                        Margin="6,0,14,0"
+                        VerticalAlignment="Center"
+                        IsChecked="{Binding UploadLights}" />
+                    <TextBlock VerticalAlignment="Center" Text="Calibration" />
+                    <CheckBox
+                        Margin="6,0,0,0"
+                        VerticalAlignment="Center"
+                        IsChecked="{Binding UploadCalibrationFrames}" />
+                </StackPanel>
+            </nina:SequenceBlockView.SequenceItemContent>
+        </nina:SequenceBlockView>
+    </DataTemplate>
+
     <DataTemplate x:Key="PsfGuard.Nina.Plugin.Sequence.CheckPsfGuardConnection_Mini">
         <mini:MiniSequenceItem>
             <mini:MiniSequenceItem.SequenceItemContent>
@@ -119,6 +138,14 @@
                     <TextBlock Margin="5,0,0,0" VerticalAlignment="Center" Text="of" />
                     <TextBlock Margin="5,0,0,0" VerticalAlignment="Center" Text="{Binding AfterExposures}" />
                 </StackPanel>
+            </mini:MiniTrigger.TriggerProgressContent>
+        </mini:MiniTrigger>
+    </DataTemplate>
+
+    <DataTemplate x:Key="PsfGuard.Nina.Plugin.Sequence.UploadPsfGuardImageAfterExposure_Mini">
+        <mini:MiniTrigger>
+            <mini:MiniTrigger.TriggerProgressContent>
+                <TextBlock Text="Upload saved image" />
             </mini:MiniTrigger.TriggerProgressContent>
         </mini:MiniTrigger>
     </DataTemplate>

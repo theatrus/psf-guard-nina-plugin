@@ -90,6 +90,14 @@ catalog. Calibration frames enter PSF Guard's calibration library and never
 create `acquiredimage` rows. Reconcile operations transfer scheduler rows and
 optional thumbnails, never image bytes.
 
+All profile-wide capture automation defaults off, including scheduler-row
+pushes and both image-upload switches. For sequence-local control, leave them
+off and add **Upload image to PSF Guard after exposure** to the applicable
+Advanced Sequencer trigger set. The trigger can include lights, calibration
+frames, or both and waits for N.I.N.A. to finish saving before it uploads. When
+a matching global policy is also enabled, the trigger recognizes that the
+durable global queue owns the file and does not send it twice.
+
 Use **Test connection** before enabling automatic work. When direct image
 upload is selected, the check also verifies that the chosen PSF Guard database
 has enabled its separate upload gate.
@@ -117,6 +125,10 @@ advanced sequencer:
   trigger. Add it to a target or an ancestor trigger set and choose how many
   successfully completed light exposures occur between target-scoped
   reconciliations. Its counter resets when the active target changes.
+- **Upload image to PSF Guard after exposure** waits for N.I.N.A.'s completed
+  save and uploads the resulting FITS or XISF file. Its own light and
+  calibration switches are serialized with the sequence, so it works without
+  enabling profile-wide automatic uploads or installing Target Scheduler.
 
 The trigger is a blocking synchronization point. The separate **Push each
 saved light's Target Scheduler record** setting remains a durable background
@@ -136,7 +148,7 @@ of guessing.
 
 ## Capture Flow
 
-Direct image mode:
+Global direct image mode:
 
 1. N.I.N.A. saves a FITS or XISF light, or an opted-in calibration frame.
 2. The plugin persists an image-upload job and returns immediately.
@@ -145,6 +157,11 @@ Direct image mode:
 4. PSF Guard verifies the digest and imports the image. Lights resolve or
    create a target and exposure plan; calibration frames enter its calibration
    library.
+
+Sequence-triggered image mode follows the same server path but uploads as a
+blocking trigger after each selected exposure. A failed upload therefore uses
+the trigger's configured sequence error behavior instead of remaining in the
+durable background queue.
 
 Target Scheduler catalog mode:
 

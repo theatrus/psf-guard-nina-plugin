@@ -49,7 +49,7 @@ internal sealed class PluginSettings
 
     public bool AutoPushCaptures
     {
-        get => options.GetValueBoolean(nameof(AutoPushCaptures), true);
+        get => options.GetValueBoolean(nameof(AutoPushCaptures), false);
         set => options.SetValueBoolean(nameof(AutoPushCaptures), value);
     }
 

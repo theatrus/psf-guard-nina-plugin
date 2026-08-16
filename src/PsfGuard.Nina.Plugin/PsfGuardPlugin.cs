@@ -269,7 +269,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                     try
                     {
                         RequireRemoteConfigured();
-                        if (shouldUpload && IsImagePath(imagePath))
+                        if (shouldUpload && CaptureImageTypes.IsSupportedImagePath(imagePath))
                         {
                             await imageUploadQueue.EnqueueAsync(
                                     CatalogId,
@@ -454,11 +454,6 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
             ?? assembly?.GetName().Version?.ToString()
             ?? "unknown";
     }
-
-    private static bool IsImagePath(string path) =>
-        new[] { ".fit", ".fits", ".fts", ".xisf" }.Contains(
-            Path.GetExtension(path),
-            StringComparer.OrdinalIgnoreCase);
 
     private static string FormatApplyResult(string label, ApplyResult result) =>
         $"{label}: {result.Inserted} inserted, {result.Updated} updated, "
