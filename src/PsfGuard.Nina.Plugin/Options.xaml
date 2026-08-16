@@ -77,7 +77,7 @@
                 <TextBlock
                     Grid.Row="0"
                     VerticalAlignment="Center"
-                    Text="Upload each saved FITS or XISF light frame directly" />
+                    Text="Upload saved light and calibration images directly" />
                 <CheckBox
                     Grid.Row="0"
                     Grid.Column="1"

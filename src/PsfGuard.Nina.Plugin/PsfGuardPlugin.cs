@@ -235,13 +235,18 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
 
     private void ImageSaved(object? sender, ImageSavedEventArgs args)
     {
-        if (!Enabled
-            || (!AutoPushCaptures && !UploadCapturedImages)
-            || !string.Equals(
-                args.MetaData.Image.ImageType,
-                "LIGHT",
-                StringComparison.OrdinalIgnoreCase)
-            || args.PathToImage is null)
+        if (!Enabled || args.PathToImage is null)
+        {
+            return;
+        }
+
+        var imageType = args.MetaData.Image.ImageType;
+        var shouldUpload = UploadCapturedImages
+            && CaptureImageTypes.IsDirectUploadSupported(imageType);
+        var shouldPushScheduler = AutoPushCaptures
+            && CaptureImageTypes.IsLight(imageType)
+            && HasTargetSchedulerDatabase();
+        if (!shouldUpload && !shouldPushScheduler)
         {
             return;
         }
@@ -254,7 +259,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                     try
                     {
                         RequireRemoteConfigured();
-                        if (UploadCapturedImages && IsImagePath(imagePath))
+                        if (shouldUpload && IsImagePath(imagePath))
                         {
                             await imageUploadQueue.EnqueueAsync(
                                     CatalogId,
@@ -262,13 +267,13 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                                     lifetime.Token)
                                 .ConfigureAwait(false);
                         }
-                        else if (UploadCapturedImages)
+                        else if (shouldUpload)
                         {
                             SetStatus(
                                 $"Skipped direct upload for {Path.GetFileName(imagePath)}; PSF Guard ingest accepts FITS and XISF files.");
                         }
 
-                        if (AutoPushCaptures && HasTargetSchedulerDatabase())
+                        if (shouldPushScheduler)
                         {
                             SetStatus(
                                 $"Waiting for Target Scheduler to record {Path.GetFileName(imagePath)}...");

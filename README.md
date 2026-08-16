@@ -3,14 +3,15 @@
 [![CI](https://github.com/theatrus/psf-guard-nina-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/theatrus/psf-guard-nina-plugin/actions/workflows/ci.yml)
 
 A N.I.N.A. 3.2 plugin that synchronizes a live Target Scheduler catalog with a
-remote PSF Guard catalog and can upload captured FITS lights directly.
+remote PSF Guard catalog and can upload captured lights and calibration frames
+directly.
 
 The plugin subscribes to N.I.N.A.'s `IImageSaveMediator.ImageSaved` event. For
-each saved light frame it can durably queue the FITS file for direct upload. If
-Target Scheduler is installed, it can also wait briefly for the matching
-`acquiredimage` row, build a schema-preserving bundle with its dependencies,
-and queue that bundle. Network work never blocks N.I.N.A.'s image-save
-pipeline.
+each saved light, bias, dark, dark-flat, or flat frame it can durably queue the
+FITS or XISF file for direct upload. If Target Scheduler is installed, saved
+lights can also wait briefly for the matching `acquiredimage` row, build a
+schema-preserving bundle with its dependencies, and queue that bundle. Network
+work never blocks N.I.N.A.'s image-save pipeline.
 
 ## Status
 
@@ -24,7 +25,8 @@ expose arbitrary SQL.
 ## Features
 
 - Push each captured light frame after Target Scheduler commits it.
-- Upload saved FITS or XISF lights without requiring Target Scheduler.
+- Upload saved FITS or XISF lights and calibration frames without requiring
+  Target Scheduler.
 - Durable, idempotent sync and image queues below
   `%LOCALAPPDATA%\NINA\PsfGuardSync`.
 - Manual full merge, planning push, and reviewed-grade push.
@@ -45,7 +47,7 @@ expose arbitrary SQL.
 - A PSF Guard server implementing sync protocol v1
 
 Target Scheduler schema 22 or newer is required only for catalog sync. Direct
-FITS upload works without Target Scheduler.
+image upload works without Target Scheduler.
 
 Target Scheduler's default database is:
 
@@ -76,12 +78,15 @@ Restart N.I.N.A., open **Plugins > Installed > PSF Guard Sync**, and configure:
 2. Destination PSF Guard catalog ID.
 3. Remote API key generated for that PSF Guard database.
 4. Optional Target Scheduler database path.
-5. FITS upload, catalog push, and preview-apply policy.
+5. Image upload, catalog push, and preview-apply policy.
 
-Direct upload sends each saved light independently of scheduler sync. PSF Guard
-stores it in the receive directory selected for that destination catalog; when
-the catalog has several image roots, its settings choose exactly one. Reconcile
-operations transfer scheduler rows and optional thumbnails, never image bytes.
+Direct upload sends each saved light or calibration frame independently of
+scheduler sync. PSF Guard stores it in the receive directory selected for that
+destination catalog; when the catalog has several image roots, its settings
+choose exactly one. Lights resolve through the Target Scheduler-compatible
+catalog. Bias, dark, dark-flat, and flat frames enter PSF Guard's calibration
+library and never create `acquiredimage` rows. Reconcile operations transfer
+scheduler rows and optional thumbnails, never image bytes.
 
 Use **Test connection** before enabling automatic work. When direct image
 upload is selected, the check also verifies that the chosen PSF Guard database
@@ -131,12 +136,13 @@ of guessing.
 
 Direct image mode:
 
-1. N.I.N.A. saves a FITS or XISF light.
+1. N.I.N.A. saves a FITS or XISF light or calibration frame.
 2. The plugin persists an image-upload job and returns immediately.
 3. Its background worker hashes and streams the file to the selected PSF Guard
    database.
-4. PSF Guard verifies the digest, resolves or creates the target and exposure
-   plan, and imports the image.
+4. PSF Guard verifies the digest and imports the image. Lights resolve or
+   create a target and exposure plan; calibration frames enter its calibration
+   library.
 
 Target Scheduler catalog mode:
 
