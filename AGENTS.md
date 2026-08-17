@@ -9,8 +9,9 @@
 - Wire table names are allowlisted. Never accept arbitrary SQL or identifiers
   from a remote peer.
 - Planning pulls preserve destination `acquired` and `accepted` counters.
-- Grade pulls update only `gradingStatus` and `rejectreason`, matched by an
-  unambiguous GUID.
+- Grade pulls update only `gradingStatus` and `rejectreason` on acquired-image
+  rows, matched by an unambiguous GUID. Reconcile `exposureplan.accepted` from
+  the acquired-image rows for every affected plan after applying a pull.
 - A protocol change requires matching updates to `docs/PROTOCOL.md` and tests.
 - Run:
 

@@ -52,9 +52,9 @@ public sealed class TargetSchedulerCatalogWriter
         using var transaction = connection.BeginTransaction();
         var result = new MutableApplyResult();
         var duplicateSourceGuids = FindDuplicateGuids(rows);
-        var (destinations, duplicateDestinationGuids) = ReadGradeDestinations(
-            connection,
-            transaction);
+        var (destinations, duplicateDestinationGuids, acceptedCounts) =
+            ReadGradeDestinations(connection, transaction);
+        var affectedExposurePlans = new HashSet<long>();
         using var update = connection.CreateCommand();
         update.Transaction = transaction;
         update.CommandText =
@@ -81,6 +81,7 @@ public sealed class TargetSchedulerCatalogWriter
                 continue;
             }
 
+            affectedExposurePlans.Add(destination.ExposurePlanId);
             var status = RequiredInteger(row, "gradingStatus");
             var reason = DatabaseValue(row, "rejectreason");
             var newReason = reason as string;
@@ -91,6 +92,17 @@ public sealed class TargetSchedulerCatalogWriter
                 continue;
             }
 
+            if (destination.GradingStatus == 1 && status != 1)
+            {
+                acceptedCounts[destination.ExposurePlanId] =
+                    acceptedCounts.GetValueOrDefault(destination.ExposurePlanId) - 1;
+            }
+            else if (destination.GradingStatus != 1 && status == 1)
+            {
+                acceptedCounts[destination.ExposurePlanId] =
+                    acceptedCounts.GetValueOrDefault(destination.ExposurePlanId) + 1;
+            }
+
             statusParameter.Value = status;
             reasonParameter.Value = reason ?? DBNull.Value;
             idParameter.Value = destination.Id;
@@ -98,8 +110,33 @@ public sealed class TargetSchedulerCatalogWriter
             result.Updated++;
         }
 
+        ReconcileAcceptedCounts(
+            connection,
+            transaction,
+            affectedExposurePlans,
+            acceptedCounts);
         transaction.Commit();
         return result.ToImmutable();
+    }
+
+    private static void ReconcileAcceptedCounts(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        IReadOnlyCollection<long> exposurePlanIds,
+        IReadOnlyDictionary<long, long> acceptedCounts)
+    {
+        using var update = connection.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText = "UPDATE exposureplan SET accepted = @accepted WHERE Id = @id";
+        var acceptedParameter = update.Parameters.AddWithValue("@accepted", 0L);
+        var idParameter = update.Parameters.AddWithValue("@id", 0L);
+
+        foreach (var exposurePlanId in exposurePlanIds)
+        {
+            acceptedParameter.Value = acceptedCounts.GetValueOrDefault(exposurePlanId);
+            idParameter.Value = exposurePlanId;
+            update.ExecuteNonQuery();
+        }
     }
 
     private ApplyResult ApplyPlanning(CatalogBundle bundle)
@@ -446,20 +483,35 @@ public sealed class TargetSchedulerCatalogWriter
 
     private static (
         Dictionary<string, GradeDestination> Rows,
-        HashSet<string> DuplicateGuids) ReadGradeDestinations(
+        HashSet<string> DuplicateGuids,
+        Dictionary<long, long> AcceptedCounts) ReadGradeDestinations(
             SQLiteConnection connection,
             SQLiteTransaction transaction)
     {
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText =
-            "SELECT Id, guid, gradingStatus, rejectreason "
-            + "FROM acquiredimage WHERE guid IS NOT NULL";
+            "SELECT Id, guid, gradingStatus, rejectreason, exposureId "
+            + "FROM acquiredimage";
         using var reader = command.ExecuteReader();
         var rows = new Dictionary<string, GradeDestination>(StringComparer.Ordinal);
         var duplicateGuids = new HashSet<string>(StringComparer.Ordinal);
+        var acceptedCounts = new Dictionary<long, long>();
         while (reader.Read())
         {
+            var gradingStatus = reader.GetInt64(2);
+            var exposurePlanId = reader.GetInt64(4);
+            if (gradingStatus == 1)
+            {
+                acceptedCounts[exposurePlanId] =
+                    acceptedCounts.GetValueOrDefault(exposurePlanId) + 1;
+            }
+
+            if (reader.IsDBNull(1))
+            {
+                continue;
+            }
+
             var guid = reader.GetString(1);
             if (duplicateGuids.Contains(guid))
             {
@@ -468,8 +520,9 @@ public sealed class TargetSchedulerCatalogWriter
 
             var row = new GradeDestination(
                 reader.GetInt64(0),
-                reader.GetInt64(2),
-                reader.IsDBNull(3) ? null : reader.GetString(3));
+                gradingStatus,
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                exposurePlanId);
             if (!rows.TryAdd(guid, row))
             {
                 rows.Remove(guid);
@@ -477,7 +530,7 @@ public sealed class TargetSchedulerCatalogWriter
             }
         }
 
-        return (rows, duplicateGuids);
+        return (rows, duplicateGuids, acceptedCounts);
     }
 
     private static List<long> FindIdsByGuid(
@@ -534,7 +587,8 @@ public sealed class TargetSchedulerCatalogWriter
     private readonly record struct GradeDestination(
         long Id,
         long GradingStatus,
-        string? RejectReason);
+        string? RejectReason,
+        long ExposurePlanId);
 
     private static Dictionary<string, object?> IntersectValues(
         IReadOnlyDictionary<string, WireValue> source,
