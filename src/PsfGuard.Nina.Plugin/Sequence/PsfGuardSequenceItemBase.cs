@@ -8,7 +8,6 @@ using NINA.Sequencer.SequenceItem;
 using NINA.Sequencer.Validations;
 using PsfGuard.Nina.Sync;
 using PsfGuard.Nina.Sync.Client;
-using PsfGuard.Nina.Sync.Queue;
 using PsfGuard.Nina.Sync.TargetScheduler;
 
 namespace PsfGuard.Nina.Plugin.Sequence;
@@ -97,24 +96,15 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
             "Current-target reconciliation must be placed inside a target container.");
     }
 
-    protected static string FormatApplyResult(string label, ApplyResult result) =>
-        $"{label}: {result.Inserted} inserted, {result.Updated} updated, "
-        + $"{result.Unchanged} unchanged, {result.Skipped} skipped.";
-
-    protected static string FormatPushReceipt(string label, PushReceipt receipt) =>
-        receipt.Applied
-            ? $"{label}: applied preview {receipt.PreviewId}."
-            : $"{label}: preview {receipt.PreviewId} is ready in PSF Guard.";
+    protected static IDisposable BeginStatus(
+        IProgress<ApplicationStatus>? progress) =>
+        PsfGuardStatus.Begin(progress);
 
     protected static void Report(
         IProgress<ApplicationStatus>? progress,
         string status)
     {
-        progress?.Report(new ApplicationStatus
-        {
-            Source = "PSF Guard Sync",
-            Status = status,
-        });
+        PsfGuardStatus.Report(progress, status);
     }
 
     public bool Validate()

@@ -87,14 +87,14 @@ public sealed class ReconcilePsfGuardTargetAfterExposures : PsfGuardSequenceTrig
         IProgress<ApplicationStatus> progress,
         CancellationToken token)
     {
+        using var status = BeginStatus(progress);
         var targetName = currentTargetName ?? RequireCurrentTargetName(context);
-        Report(progress, $"Waiting for final {targetName} capture commit...");
+        Report(progress, "Waiting for scheduler...");
         await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
-        Report(progress, $"Reconciling {targetName} after exposure...");
-        var receipt = await CreateOrchestrator()
+        Report(progress, $"Reconciling {targetName}...");
+        await CreateOrchestrator()
             .ReconcileTargetAsync(targetName, AutoApplyPushes, token)
             .ConfigureAwait(false);
-        Report(progress, FormatPushReceipt($"{targetName} reconciliation", receipt));
     }
 
     public override object Clone() =>

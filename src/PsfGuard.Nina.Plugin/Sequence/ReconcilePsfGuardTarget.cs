@@ -29,14 +29,14 @@ public sealed class ReconcilePsfGuardTarget : PsfGuardSequenceItemBase
         IProgress<ApplicationStatus> progress,
         CancellationToken token)
     {
+        using var status = BeginStatus(progress);
         var targetName = RequireCurrentTargetName();
-        Report(progress, $"Waiting for final {targetName} capture commits...");
+        Report(progress, "Waiting for scheduler...");
         await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
         Report(progress, $"Reconciling {targetName}...");
-        var receipt = await CreateOrchestrator()
+        await CreateOrchestrator()
             .ReconcileTargetAsync(targetName, AutoApplyPushes, token)
             .ConfigureAwait(false);
-        Report(progress, FormatPushReceipt($"{targetName} reconciliation", receipt));
     }
 
     public override object Clone() => new ReconcilePsfGuardTarget(this);

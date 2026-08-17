@@ -29,13 +29,13 @@ public sealed class ReconcilePsfGuardCatalog : PsfGuardSequenceItemBase
         IProgress<ApplicationStatus> progress,
         CancellationToken token)
     {
-        Report(progress, "Waiting for final Target Scheduler capture commits...");
+        using var status = BeginStatus(progress);
+        Report(progress, "Waiting for scheduler...");
         await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
-        Report(progress, "Reconciling the Target Scheduler catalog...");
-        var receipt = await CreateOrchestrator()
+        Report(progress, "Reconciling catalog...");
+        await CreateOrchestrator()
             .ReconcileCatalogAsync(AutoApplyPushes, token)
             .ConfigureAwait(false);
-        Report(progress, FormatPushReceipt("Catalog reconciliation", receipt));
     }
 
     public override object Clone() => new ReconcilePsfGuardCatalog(this);

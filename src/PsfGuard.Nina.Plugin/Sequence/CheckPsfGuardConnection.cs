@@ -31,9 +31,9 @@ public sealed class CheckPsfGuardConnection : PsfGuardSequenceItemBase
         IProgress<ApplicationStatus> progress,
         CancellationToken token)
     {
-        Report(progress, "Checking remote server and catalog...");
-        var result = await CheckConnectionAsync(token).ConfigureAwait(false);
-        Report(progress, result);
+        using var status = BeginStatus(progress);
+        Report(progress, "Checking connection...");
+        await CheckConnectionAsync(token).ConfigureAwait(false);
     }
 
     public override object Clone() => new CheckPsfGuardConnection(this);

@@ -8,7 +8,6 @@ using NINA.Sequencer.Trigger;
 using NINA.Sequencer.Validations;
 using PsfGuard.Nina.Sync;
 using PsfGuard.Nina.Sync.Client;
-using PsfGuard.Nina.Sync.Queue;
 using PsfGuard.Nina.Sync.TargetScheduler;
 
 namespace PsfGuard.Nina.Plugin.Sequence;
@@ -89,11 +88,6 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
         ?? throw new InvalidOperationException(
             "Target reconciliation can run only within a target container.");
 
-    protected static string FormatPushReceipt(string label, PushReceipt receipt) =>
-        receipt.Applied
-            ? $"{label}: applied preview {receipt.PreviewId}."
-            : $"{label}: preview {receipt.PreviewId} is ready in PSF Guard.";
-
     protected async Task UploadImageAsync(
         string imagePath,
         CancellationToken cancellationToken)
@@ -103,15 +97,15 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
             .ConfigureAwait(false);
     }
 
+    protected static IDisposable BeginStatus(
+        IProgress<ApplicationStatus>? progress) =>
+        PsfGuardStatus.Begin(progress);
+
     protected static void Report(
         IProgress<ApplicationStatus>? progress,
         string status)
     {
-        progress?.Report(new ApplicationStatus
-        {
-            Source = "PSF Guard Sync",
-            Status = status,
-        });
+        PsfGuardStatus.Report(progress, status);
     }
 
     protected virtual void AddValidationIssues(List<string> validationIssues)
