@@ -19,7 +19,7 @@ env:
   PLUGIN_DLL_NAME: "PSF Guard Sync"
   PLUGIN_PROJECT: "src/PsfGuard.Nina.Plugin/PsfGuard.Nina.Plugin.csproj"
   RELEASE_PREFIX: "PsfGuard.Nina.Plugin"
-  PLUGIN_IS_BETA: true
+  PLUGIN_IS_BETA: false
   RELEASE_VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
   DOTNET_CLI_TELEMETRY_OPTOUT: true
   DOTNET_NOLOGO: true
