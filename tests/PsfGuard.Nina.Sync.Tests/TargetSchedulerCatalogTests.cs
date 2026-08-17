@@ -215,4 +215,33 @@ public sealed class TargetSchedulerCatalogTests
         Assert.Equal(1, result.Skipped);
         Assert.Equal(0, result.Updated);
     }
+
+    [Fact]
+    public async Task GradePullSkipsAnAmbiguousDestinationGuid()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0, grade: 2, rejectReason: "Clouds");
+        destination.Seed(100, grade: 0);
+        destination.Seed(200, grade: 1);
+
+        var reader = new TargetSchedulerCatalogReader(source.Path, "5.9.6.0");
+        var bundle = await reader.BuildGradesBundleAsync(
+            reviewedOnly: true,
+            CancellationToken.None);
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+        var result = await writer.ApplyGradesAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(1, result.Skipped);
+        Assert.Equal(0, result.Updated);
+        using var connection = destination.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT gradingStatus FROM acquiredimage WHERE guid = 'image-guid' ORDER BY Id";
+        using var rows = command.ExecuteReader();
+        Assert.True(rows.Read());
+        Assert.Equal(0, rows.GetInt32(0));
+        Assert.True(rows.Read());
+        Assert.Equal(1, rows.GetInt32(0));
+    }
 }

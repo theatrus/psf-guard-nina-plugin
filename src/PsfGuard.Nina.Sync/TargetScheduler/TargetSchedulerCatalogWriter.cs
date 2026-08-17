@@ -51,7 +51,18 @@ public sealed class TargetSchedulerCatalogWriter
         using var connection = OpenReadWrite();
         using var transaction = connection.BeginTransaction();
         var result = new MutableApplyResult();
-        var sourceGuids = FindDuplicateGuids(rows);
+        var duplicateSourceGuids = FindDuplicateGuids(rows);
+        var (destinations, duplicateDestinationGuids) = ReadGradeDestinations(
+            connection,
+            transaction);
+        using var update = connection.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText =
+            "UPDATE acquiredimage SET gradingStatus = @status, rejectreason = @reason "
+            + "WHERE Id = @id";
+        var statusParameter = update.Parameters.AddWithValue("@status", 0L);
+        var reasonParameter = update.Parameters.AddWithValue("@reason", DBNull.Value);
+        var idParameter = update.Parameters.AddWithValue("@id", 0L);
 
         foreach (var row in rows)
         {
@@ -62,14 +73,9 @@ public sealed class TargetSchedulerCatalogWriter
                 continue;
             }
 
-            if (sourceGuids.Contains(guid))
-            {
-                result.Skipped++;
-                continue;
-            }
-
-            var matches = FindIdsByGuid(connection, transaction, "acquiredimage", guid);
-            if (matches.Count != 1)
+            if (duplicateSourceGuids.Contains(guid)
+                || duplicateDestinationGuids.Contains(guid)
+                || !destinations.TryGetValue(guid, out var destination))
             {
                 result.Skipped++;
                 continue;
@@ -77,37 +83,17 @@ public sealed class TargetSchedulerCatalogWriter
 
             var status = RequiredInteger(row, "gradingStatus");
             var reason = DatabaseValue(row, "rejectreason");
-            using var current = connection.CreateCommand();
-            current.Transaction = transaction;
-            current.CommandText =
-                "SELECT gradingStatus, rejectreason FROM acquiredimage WHERE Id = @id";
-            current.Parameters.AddWithValue("@id", matches[0]);
-            using var reader = current.ExecuteReader();
-            if (!reader.Read())
-            {
-                result.Skipped++;
-                continue;
-            }
-
-            var currentStatus = reader.GetInt64(0);
-            var currentReason = reader.IsDBNull(1) ? null : reader.GetString(1);
             var newReason = reason as string;
-            if (currentStatus == status
-                && string.Equals(currentReason, newReason, StringComparison.Ordinal))
+            if (destination.GradingStatus == status
+                && string.Equals(destination.RejectReason, newReason, StringComparison.Ordinal))
             {
                 result.Unchanged++;
                 continue;
             }
 
-            reader.Close();
-            using var update = connection.CreateCommand();
-            update.Transaction = transaction;
-            update.CommandText =
-                "UPDATE acquiredimage SET gradingStatus = @status, rejectreason = @reason "
-                + "WHERE Id = @id";
-            update.Parameters.AddWithValue("@status", status);
-            update.Parameters.AddWithValue("@reason", reason ?? DBNull.Value);
-            update.Parameters.AddWithValue("@id", matches[0]);
+            statusParameter.Value = status;
+            reasonParameter.Value = reason ?? DBNull.Value;
+            idParameter.Value = destination.Id;
             update.ExecuteNonQuery();
             result.Updated++;
         }
@@ -458,6 +444,42 @@ public sealed class TargetSchedulerCatalogWriter
             .ToHashSet(StringComparer.Ordinal);
     }
 
+    private static (
+        Dictionary<string, GradeDestination> Rows,
+        HashSet<string> DuplicateGuids) ReadGradeDestinations(
+            SQLiteConnection connection,
+            SQLiteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            "SELECT Id, guid, gradingStatus, rejectreason "
+            + "FROM acquiredimage WHERE guid IS NOT NULL";
+        using var reader = command.ExecuteReader();
+        var rows = new Dictionary<string, GradeDestination>(StringComparer.Ordinal);
+        var duplicateGuids = new HashSet<string>(StringComparer.Ordinal);
+        while (reader.Read())
+        {
+            var guid = reader.GetString(1);
+            if (duplicateGuids.Contains(guid))
+            {
+                continue;
+            }
+
+            var row = new GradeDestination(
+                reader.GetInt64(0),
+                reader.GetInt64(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3));
+            if (!rows.TryAdd(guid, row))
+            {
+                rows.Remove(guid);
+                duplicateGuids.Add(guid);
+            }
+        }
+
+        return (rows, duplicateGuids);
+    }
+
     private static List<long> FindIdsByGuid(
         SQLiteConnection connection,
         SQLiteTransaction transaction,
@@ -508,6 +530,11 @@ public sealed class TargetSchedulerCatalogWriter
 
         return result;
     }
+
+    private readonly record struct GradeDestination(
+        long Id,
+        long GradingStatus,
+        string? RejectReason);
 
     private static Dictionary<string, object?> IntersectValues(
         IReadOnlyDictionary<string, WireValue> source,
