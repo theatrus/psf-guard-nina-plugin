@@ -223,8 +223,8 @@ dependencies, generates a registry-compatible manifest, and publishes both
 files on the GitHub release.
 
 `PLUGIN_IS_BETA` in the release workflow controls both the GitHub prerelease
-flag and the manifest's N.I.N.A. channel. It remains enabled while the remote
-sync API is under active integration.
+flag and the manifest's N.I.N.A. channel. Keep it disabled for stable releases
+and enable it only when publishing a prerelease.
 
 The workflow can also be dispatched manually to build and validate a release
 candidate without creating a tag or GitHub release.
