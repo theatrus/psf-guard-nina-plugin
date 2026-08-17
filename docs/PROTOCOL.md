@@ -206,5 +206,6 @@ basename and digest is idempotent.
 - Parent IDs are remapped through parent GUID matches.
 - Rule weights match by destination project plus name.
 - Planning apply preserves destination `acquired` and `accepted`.
-- Grade apply changes only `gradingStatus` and `rejectreason`.
+- Grade apply changes only `gradingStatus` and `rejectreason` on acquired-image
+  rows, then reconciles `exposureplan.accepted` for each affected plan.
 - Version 1 never deletes a destination row.

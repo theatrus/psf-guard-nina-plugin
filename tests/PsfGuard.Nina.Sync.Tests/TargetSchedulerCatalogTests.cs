@@ -135,7 +135,7 @@ public sealed class TargetSchedulerCatalogTests
     }
 
     [Fact]
-    public async Task GradePullMatchesByGuidAndDoesNotTouchOtherFields()
+    public async Task GradePullMatchesByGuidAndOnlyChangesAcquiredImageGradeFields()
     {
         using var source = new TestDatabase();
         using var destination = new TestDatabase();
@@ -159,6 +159,44 @@ public sealed class TargetSchedulerCatalogTests
         Assert.Equal(2, row.GetInt32(0));
         Assert.Equal("Clouds", row.GetString(1));
         Assert.Equal(101, row.GetInt64(2));
+    }
+
+    [Fact]
+    public async Task GradePullReconcilesAcceptedCountFromAcquiredImages()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0, grade: 2, rejectReason: "Clouds");
+        destination.Seed(100, grade: 1, accepted: 12);
+
+        var reader = new TargetSchedulerCatalogReader(source.Path, "5.9.6.0");
+        var bundle = await reader.BuildGradesBundleAsync(
+            reviewedOnly: true,
+            CancellationToken.None);
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+        var result = await writer.ApplyGradesAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(1, result.Updated);
+        Assert.Equal(0, ReadAcceptedCount(destination));
+    }
+
+    [Fact]
+    public async Task GradePullRepairsAcceptedCountWhenGradeAlreadyMatches()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0, grade: 1);
+        destination.Seed(100, grade: 1, accepted: 12);
+
+        var reader = new TargetSchedulerCatalogReader(source.Path, "5.9.6.0");
+        var bundle = await reader.BuildGradesBundleAsync(
+            reviewedOnly: true,
+            CancellationToken.None);
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+        var result = await writer.ApplyGradesAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(1, result.Unchanged);
+        Assert.Equal(1, ReadAcceptedCount(destination));
     }
 
     [Fact]
@@ -243,5 +281,13 @@ public sealed class TargetSchedulerCatalogTests
         Assert.Equal(0, rows.GetInt32(0));
         Assert.True(rows.Read());
         Assert.Equal(1, rows.GetInt32(0));
+    }
+
+    private static long ReadAcceptedCount(TestDatabase database)
+    {
+        using var connection = database.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT accepted FROM exposureplan";
+        return (long)(command.ExecuteScalar() ?? throw new InvalidOperationException());
     }
 }

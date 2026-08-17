@@ -35,7 +35,8 @@ expose arbitrary SQL.
 - GUID-based identity and Target Scheduler schema 22+ checks.
 - Parent-ID remapping for projects, targets, templates, and plans.
 - Preservation of telescope-side `acquired` and `accepted` plan counters.
-- Grade pulls update only `gradingStatus` and `rejectreason`.
+- Grade pulls update only `gradingStatus` and `rejectreason` on acquired-image
+  rows, then reconcile the affected plans' accepted counts.
 - API tokens stored in Windows Credential Manager.
 - Optional Target Scheduler thumbnail transfer.
 - Background preview jobs for catalogs whose merge planning outlives an HTTP
@@ -123,7 +124,8 @@ advanced sequencer:
 - **Push PSF Guard planning** sends Target Scheduler projects, targets,
   templates, and plans to PSF Guard and waits for the preview or apply.
 - **Pull PSF Guard grades** applies reviewed grades and rejection reasons by
-  unambiguous acquired-image GUID.
+  unambiguous acquired-image GUID, then reconciles each affected Target
+  Scheduler plan's accepted count from its acquired images.
 - **Push PSF Guard grades** sends reviewed Target Scheduler grades and rejection
   reasons to PSF Guard and waits for the preview or apply.
 - **Reconcile PSF Guard catalog** pushes a fresh full scheduler snapshot and
@@ -200,7 +202,9 @@ resumes after the next plugin start.
 Planning and grade pulls are explicit commands. Planning upserts are one
 SQLite transaction and preserve the destination plan's progress counters.
 Grade pulls match only unambiguous image GUIDs and change only the grade and
-reject reason.
+reject reason on acquired-image rows. After the pull, the plugin recomputes the
+accepted count for each affected exposure plan from those acquired-image
+grades.
 
 Do not pull planning while a Target Scheduler Container is actively executing.
 The database write is transactional, but Target Scheduler can still hold an
