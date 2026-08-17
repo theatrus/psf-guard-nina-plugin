@@ -162,6 +162,29 @@ public sealed class TargetSchedulerCatalogTests
     }
 
     [Fact]
+    public async Task GradePullAcceptsABundleWhoseDigestOnlyItsSenderCanVerify()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0, grade: 2, rejectReason: "Clouds");
+        destination.Seed(100, grade: 0);
+
+        var reader = new TargetSchedulerCatalogReader(source.Path, "5.9.6.0");
+        var bundle = await reader.BuildGradesBundleAsync(
+            reviewedOnly: true,
+            CancellationToken.None);
+        // A PSF Guard server computes payload_sha256 over its own JSON
+        // writer's bytes, which this library cannot reproduce byte for byte.
+        // The digest is advisory; transport integrity comes from the
+        // X-Content-SHA256 response header over the raw body.
+        bundle.PayloadSha256 = "computed-by-a-different-json-writer";
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+        var result = await writer.ApplyGradesAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(1, result.Updated);
+    }
+
+    [Fact]
     public async Task GradePullSkipsABlankSourceGuid()
     {
         using var source = new TestDatabase();

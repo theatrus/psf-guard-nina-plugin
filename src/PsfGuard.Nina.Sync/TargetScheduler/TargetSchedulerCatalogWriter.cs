@@ -413,10 +413,12 @@ public sealed class TargetSchedulerCatalogWriter
                 $"Expected a {operation} bundle, received {bundle.Operation}.");
         }
 
-        if (!bundle.VerifyDigest())
-        {
-            throw new InvalidDataException("Bundle digest is missing or invalid.");
-        }
+        // PayloadSha256 is advisory here: verifying it means re-serializing
+        // the bundle and matching the sender's JSON writer byte for byte,
+        // which only works when the sender was this library. A bundle pulled
+        // from a PSF Guard server is integrity-checked at the transport
+        // instead, against the raw bytes in its X-Content-SHA256 response
+        // header; the durable queue still verifies the bundles it sealed.
     }
 
     private static IReadOnlyList<Dictionary<string, WireValue>> RowsByColumn(

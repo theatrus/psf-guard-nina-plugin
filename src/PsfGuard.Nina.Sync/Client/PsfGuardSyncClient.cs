@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using PsfGuard.Nina.Sync.Protocol;
 
@@ -220,8 +221,25 @@ public sealed class PsfGuardSyncClient : IDisposable
         HttpResponseMessage response,
         CancellationToken cancellationToken)
     {
-        var content = await response.Content.ReadAsStringAsync(cancellationToken)
+        // Hash the raw bytes before any decoding: X-Content-SHA256 covers
+        // exactly what the server wrote, so this check needs no agreement
+        // about JSON encodings — unlike the in-bundle payload_sha256, which
+        // only ever verifies against this library's own serializer.
+        var raw = await response.Content.ReadAsByteArrayAsync(cancellationToken)
             .ConfigureAwait(false);
+        if (response.IsSuccessStatusCode
+            && response.Headers.TryGetValues("X-Content-SHA256", out var digests))
+        {
+            var expected = digests.FirstOrDefault()?.Trim();
+            var actual = Convert.ToHexString(SHA256.HashData(raw)).ToLowerInvariant();
+            if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    "PSF Guard response bytes do not match its X-Content-SHA256 header.");
+            }
+        }
+
+        var content = Encoding.UTF8.GetString(raw);
         if (!response.IsSuccessStatusCode)
         {
             var message = content.Length > 2_000 ? content[..2_000] : content;

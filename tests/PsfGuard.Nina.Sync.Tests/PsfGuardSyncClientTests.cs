@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using PsfGuard.Nina.Sync.Client;
@@ -189,6 +190,72 @@ public sealed class PsfGuardSyncClientTests
 
         Assert.Equal(bundle.BundleId, downloaded.BundleId);
         Assert.False(downloaded.VerifyDigest());
+    }
+
+    [Fact]
+    public async Task DownloadExportAcceptsAMatchingRawBodyDigestHeader()
+    {
+        var bundle = Bundle();
+        var body = $$"""
+            {
+              "export_id":"export-1",
+              "state":"ready",
+              "bundle":{{ProtocolJson.Serialize(bundle)}}
+            }
+            """;
+        var handler = new StubHandler(
+            _ =>
+            {
+                var response = Json(body);
+                response.Headers.Add(
+                    "X-Content-SHA256",
+                    Convert.ToHexString(
+                        SHA256.HashData(Encoding.UTF8.GetBytes(body))).ToLowerInvariant());
+                return Task.FromResult(response);
+            });
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(handler),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        var downloaded = await client.DownloadExportAsync(
+            "review",
+            SyncOperation.PushGrades,
+            reviewedOnly: true,
+            CancellationToken.None);
+
+        Assert.Equal(bundle.BundleId, downloaded.BundleId);
+    }
+
+    [Fact]
+    public async Task DownloadExportRejectsABodyThatDoesNotMatchItsDigestHeader()
+    {
+        var bundle = Bundle();
+        var handler = new StubHandler(
+            _ =>
+            {
+                var response = Json(
+                    $$"""
+                    {
+                      "export_id":"export-1",
+                      "state":"ready",
+                      "bundle":{{ProtocolJson.Serialize(bundle)}}
+                    }
+                    """);
+                response.Headers.Add("X-Content-SHA256", new string('0', 64));
+                return Task.FromResult(response);
+            });
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(handler),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => client.DownloadExportAsync(
+                "review",
+                SyncOperation.PushGrades,
+                reviewedOnly: true,
+                CancellationToken.None));
     }
 
     [Fact]
