@@ -10,7 +10,7 @@
     <FileVersion>$(Version)</FileVersion>
     <Title>PSF Guard Sync</Title>
     <Description>Synchronizes N.I.N.A. Target Scheduler catalogs and captured images with PSF Guard.</Description>
-    <Company>Yann Ramin</Company>
+    <Company>Yann Ramin (@theatrus)</Company>
     <Product>PSF Guard Sync</Product>
     <Copyright>Copyright (c) 2026 Yann Ramin</Copyright>
     <UseWPF>true</UseWPF>
