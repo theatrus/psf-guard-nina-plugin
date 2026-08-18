@@ -33,6 +33,32 @@ public sealed class PsfGuardSyncClient : IDisposable
         return GetAsync<SyncCapabilities>("api/sync/v1/capabilities", cancellationToken);
     }
 
+    /// <summary>
+    /// Exchange a one-time pairing code for this install's durable
+    /// credential. Construct the client with no API token for this call —
+    /// the code is the entire authorization, and the server hands back the
+    /// bearer token to store.
+    /// </summary>
+    public async Task<PairResponse> PairAsync(
+        string pairingCode,
+        string clientName,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pairingCode);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "api/sync/v1/pair")
+        {
+            Content = JsonContent.Create(
+                new
+                {
+                    protocol_version = 1,
+                    pairing_token = pairingCode.Trim(),
+                    client_name = clientName,
+                },
+                options: ProtocolJson.Options),
+        };
+        return await SendAsync<PairResponse>(request, cancellationToken).ConfigureAwait(false);
+    }
+
     public void Dispose() => httpClient.Dispose();
 
     public async Task UploadImageAsync(
