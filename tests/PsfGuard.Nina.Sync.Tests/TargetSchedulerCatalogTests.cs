@@ -138,11 +138,57 @@ public sealed class TargetSchedulerCatalogTests
     }
 
     [Fact]
+    public async Task FullMergeReportsTableReadsInOrderBeforePreparingTheBundle()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0);
+        var updates = new List<SyncProgress>();
+        var reader = new TargetSchedulerCatalogReader(database.Path, "5.9.6.0");
+
+        var bundle = await reader.BuildFullMergeBundleAsync(
+            includeThumbnails: false,
+            CancellationToken.None,
+            new RecordingProgress<SyncProgress>(updates.Add));
+
+        string[] tables =
+        [
+            "exposuretemplate",
+            "project",
+            "ruleweight",
+            "target",
+            "exposureplan",
+            "acquiredimage",
+        ];
+        var previousCompletion = -1;
+        foreach (var table in tables)
+        {
+            var started = updates.FindIndex(
+                update => update.Message == $"Reading Target Scheduler table {table}...");
+            var completed = updates.FindIndex(
+                update => update.Message.Contains(
+                    $"from Target Scheduler table {table} in ",
+                    StringComparison.Ordinal));
+            Assert.True(started > previousCompletion, $"Expected {table} to start in table order.");
+            Assert.True(completed > started, $"Expected {table} to complete after it started.");
+            Assert.Equal(SyncProgressStage.ReadingCatalog, updates[started].Stage);
+            Assert.Equal(0, updates[started].Rows);
+            previousCompletion = completed;
+        }
+
+        var preparing = Assert.Single(
+            updates,
+            update => update.Stage == SyncProgressStage.PreparingBundle);
+        Assert.Equal(bundle.RowCount, preparing.Rows);
+        Assert.Equal(updates.Count - 1, updates.IndexOf(preparing));
+    }
+
+    [Fact]
     public async Task FullMergeCancelsDuringTableMaterialization()
     {
         using var database = new TestDatabase();
         database.Seed(0);
         using var cancellation = new CancellationTokenSource();
+        var updates = new List<SyncProgress>();
         var reader = new TargetSchedulerCatalogReader(
             database.Path,
             "5.9.6.0",
@@ -158,7 +204,21 @@ public sealed class TargetSchedulerCatalogTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => reader.BuildFullMergeBundleAsync(
                 includeThumbnails: false,
-                cancellation.Token));
+                cancellation.Token,
+                new RecordingProgress<SyncProgress>(updates.Add)));
+
+        Assert.Contains(
+            updates,
+            update => update.Message == "Reading Target Scheduler table project...");
+        Assert.DoesNotContain(
+            updates,
+            update => update.Message.Contains(
+                "from Target Scheduler table project in ",
+                StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            updates,
+            update => update.Stage is SyncProgressStage.PreparingBundle
+                or SyncProgressStage.Completed);
     }
 
     [Fact]
@@ -598,5 +658,10 @@ public sealed class TargetSchedulerCatalogTests
             .Single(item => item.item.Name.Equals(column, StringComparison.OrdinalIgnoreCase))
             .index;
         return Assert.IsType<string>(table.Rows.Single().Values[index].ToDatabaseValue());
+    }
+
+    private sealed class RecordingProgress<T>(Action<T> record) : IProgress<T>
+    {
+        public void Report(T value) => record(value);
     }
 }

@@ -39,7 +39,12 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
     private Task? captureWorker;
     private string lastStatus = "Not connected";
     private PendingPreviewContext? pendingPreview;
-    private int operationRunning;
+    private readonly object statusGate = new();
+    private readonly List<AsyncRelayCommand> manualCommands = [];
+    private long nextOperationId;
+    private long activeOperationId;
+    private long nextStatusSequence;
+    private long displayedStatusSequence;
     private readonly AsyncRelayCommand applyPreviewCommand;
     private readonly AsyncRelayCommand forgetPreviewCommand;
 
@@ -58,7 +63,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                 "PsfGuardSync",
                 "queue"),
             CreateQueuedClient,
-            SetStatus);
+            SetBackgroundStatus);
         imageUploadQueue = new DurableImageUploadQueue(
             Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -66,27 +71,30 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                 "PsfGuardSync",
                 "image-upload-queue"),
             CreateQueuedClient,
-            SetStatus);
+            SetBackgroundStatus);
 
-        TestConnectionCommand = new AsyncRelayCommand(
-            () => RunCommandAsync(TestConnectionAsync));
-        PushAllCommand = new AsyncRelayCommand(
+        TestConnectionCommand = CreateManualCommand(
+            () => RunCommandAsync(TestConnectionAsync, "Testing the PSF Guard connection..."));
+        PushAllCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
                 {
                     await CreateOrchestrator().QueueFullMergeAsync(token).ConfigureAwait(false);
                     return "Full Target Scheduler merge queued.";
-                }));
-        ReconcileCommand = new AsyncRelayCommand(
+                },
+                "Preparing a full Target Scheduler merge for the queue..."));
+        ReconcileCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
                 {
                     var configuration = CaptureSyncConfiguration();
                     var orchestrator = CreateOrchestrator(configuration);
                     var pullBack = RoundTripReconcile;
+                    var reconcileProgress = CreateSyncProgress(
+                        suppressCompleted: pullBack && configuration.AutoApplyPushes);
                     if (pullBack)
                     {
-                        await orchestrator.EnsureRoundTripSupportedAsync(token)
+                        await orchestrator.EnsureRoundTripSupportedAsync(token, reconcileProgress)
                             .ConfigureAwait(false);
                     }
 
@@ -94,7 +102,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                         .ReconcileCatalogAsync(
                             configuration.AutoApplyPushes,
                             token,
-                            CreateSyncProgress())
+                            reconcileProgress)
                         .ConfigureAwait(false);
                     SetPendingPreview(receipt.Applied
                         ? null
@@ -110,8 +118,9 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                     return FormatPushReceipt("Catalog reconcile", receipt)
                         + " "
                         + FormatApplyResult("Catalog pull-back", pulled);
-                }));
-        applyPreviewCommand = new AsyncRelayCommand(
+                },
+                "Starting full catalog reconcile..."));
+        applyPreviewCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
                 {
@@ -119,14 +128,15 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                         ?? throw new InvalidOperationException("There is no pending PSF Guard preview.");
                     var orchestrator = CreateOrchestrator(pending.Configuration);
                     var pullBack = RoundTripReconcile;
+                    var applyProgress = CreateSyncProgress(suppressCompleted: pullBack);
                     if (pullBack)
                     {
-                        await orchestrator.EnsureRoundTripSupportedAsync(token)
+                        await orchestrator.EnsureRoundTripSupportedAsync(token, applyProgress)
                             .ConfigureAwait(false);
                     }
 
                     var receipt = await orchestrator
-                        .ApplyPreviewAsync(pending.Receipt, token, CreateSyncProgress())
+                        .ApplyPreviewAsync(pending.Receipt, token, applyProgress)
                         .ConfigureAwait(false);
                     SetPendingPreview(null);
                     if (!pullBack)
@@ -140,21 +150,22 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                     return FormatPushReceipt("Catalog reconcile", receipt)
                         + " "
                         + FormatApplyResult("Catalog pull-back", pulled);
-                }),
-            () => HasPendingPreview && !IsOperationRunning);
-        forgetPreviewCommand = new AsyncRelayCommand(
+                },
+                "Starting PSF Guard preview apply..."),
+            () => HasPendingPreview);
+        forgetPreviewCommand = CreateManualCommand(
             () =>
             {
                 var previewId = pendingPreview?.Receipt.PreviewId;
                 SetPendingPreview(null);
-                SetStatus(
+                SetBackgroundStatus(
                     previewId is null
                         ? "There is no pending PSF Guard preview."
                         : $"Forgot preview {previewId}; PSF Guard will expire it automatically.");
                 return Task.CompletedTask;
             },
-            () => HasPendingPreview && !IsOperationRunning);
-        PullMergedCatalogCommand = new AsyncRelayCommand(
+            () => HasPendingPreview);
+        PullMergedCatalogCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
                 {
@@ -162,22 +173,25 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                         .PullMergedCatalogAsync(token, CreateSyncProgress())
                         .ConfigureAwait(false);
                     return FormatApplyResult("Catalog pull", result);
-                }));
-        PushPlanningCommand = new AsyncRelayCommand(
+                },
+                "Starting merged catalog pull..."));
+        PushPlanningCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
                 {
                     await CreateOrchestrator().QueuePlanningPushAsync(token).ConfigureAwait(false);
                     return "Planning push queued.";
-                }));
-        PushGradesCommand = new AsyncRelayCommand(
+                },
+                "Preparing planning rows for the queue..."));
+        PushGradesCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
                 {
                     await CreateOrchestrator().QueueGradePushAsync(token).ConfigureAwait(false);
                     return "Reviewed-grade push queued.";
-                }));
-        PullPlanningCommand = new AsyncRelayCommand(
+                },
+                "Preparing reviewed grades for the queue..."));
+        PullPlanningCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
                 {
@@ -185,8 +199,9 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                         .PullPlanningAsync(token)
                         .ConfigureAwait(false);
                     return FormatApplyResult("Planning pull", result);
-                }));
-        PullGradesCommand = new AsyncRelayCommand(
+                },
+                "Pulling planning rows from PSF Guard..."));
+        PullGradesCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
                 {
@@ -194,9 +209,10 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                         .PullGradesAsync(token)
                         .ConfigureAwait(false);
                     return FormatApplyResult("Grade pull", result);
-                }));
-        RetryBlockedCommand = new AsyncRelayCommand(
-            () => RunCommandAsync(RetryBlockedAsync));
+                },
+                "Pulling reviewed grades from PSF Guard..."));
+        RetryBlockedCommand = CreateManualCommand(
+            () => RunCommandAsync(RetryBlockedAsync, "Retrying blocked PSF Guard jobs..."));
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -369,7 +385,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
 
     public bool HasPendingPreview => pendingPreview is not null;
 
-    private bool IsOperationRunning => Volatile.Read(ref operationRunning) != 0;
+    public bool IsOperationRunning => Volatile.Read(ref activeOperationId) != 0;
 
     public string PendingPreviewStatus
     {
@@ -397,7 +413,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
         queue.Start();
         imageUploadQueue.Start();
         captureWorker = Task.Run(ProcessCaptureWorkAsync);
-        SetStatus(Enabled ? "Capture sync is active." : "Sync is disabled.");
+        SetBackgroundStatus(Enabled ? "Capture sync is active." : "Sync is disabled.");
         return base.Initialize();
     }
 
@@ -441,7 +457,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
             var imageType = args.MetaData?.Image?.ImageType;
             if (string.IsNullOrWhiteSpace(imageType))
             {
-                SetStatus("Skipped saved image without an image type.");
+                SetBackgroundStatus("Skipped saved image without an image type.");
                 return;
             }
 
@@ -460,7 +476,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                 && CaptureImageTypes.IsSupportedImagePath(imagePath);
             if (shouldUpload && !supportedUpload && !shouldPushScheduler)
             {
-                SetStatus(
+                SetBackgroundStatus(
                     $"Skipped {Path.GetFileName(imagePath)}; PSF Guard accepts FITS and XISF files.");
                 return;
             }
@@ -478,13 +494,13 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                 TargetSchedulerVersion());
             if (!captureWork.Writer.TryWrite(work))
             {
-                SetStatus("Skipped saved image because PSF Guard sync is stopping.");
+                SetBackgroundStatus("Skipped saved image because PSF Guard sync is stopping.");
             }
         }
         catch (Exception exception)
         {
             Logger.Error(exception);
-            SetStatus($"Could not queue saved image: {exception.Message}");
+            SetBackgroundStatus($"Could not queue saved image: {exception.Message}");
         }
     }
 
@@ -573,20 +589,26 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
     }
 
     private async Task RunCommandAsync(
-        Func<CancellationToken, Task<string>> operation)
+        Func<CancellationToken, Task<string>> operation,
+        string startingStatus)
     {
-        if (Interlocked.CompareExchange(ref operationRunning, 1, 0) != 0)
+        var operationId = Interlocked.Increment(ref nextOperationId);
+        lock (statusGate)
         {
-            SetStatus("Another PSF Guard operation is already running.");
-            return;
+            if (activeOperationId != 0)
+            {
+                return;
+            }
+
+            Volatile.Write(ref activeOperationId, operationId);
         }
 
-        RaisePendingCommandStates();
+        RaiseCommandStates();
         try
         {
-            SetStatus("Working...");
+            SetOperationStatus(operationId, startingStatus);
             var result = await operation(lifetime.Token).ConfigureAwait(false);
-            SetStatus(result);
+            SetOperationStatus(operationId, result);
             Notification.ShowSuccess(result);
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
@@ -595,13 +617,20 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
         catch (Exception exception)
         {
             Logger.Error(exception);
-            SetStatus(exception.Message);
+            SetOperationStatus(operationId, exception.Message);
             Notification.ShowError(exception.Message);
         }
         finally
         {
-            Interlocked.Exchange(ref operationRunning, 0);
-            RaisePendingCommandStates();
+            lock (statusGate)
+            {
+                if (activeOperationId == operationId)
+                {
+                    Volatile.Write(ref activeOperationId, 0);
+                }
+            }
+
+            RaiseCommandStates();
         }
     }
 
@@ -686,7 +715,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                 result += $" Could not queue {string.Join("; ", errors)}.";
             }
 
-            SetStatus(result.Trim());
+            SetBackgroundStatus(result.Trim());
         }
     }
 
@@ -743,26 +772,101 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
         }
     }
 
-    private void SetStatus(string value)
+    private AsyncRelayCommand CreateManualCommand(
+        Func<Task> execute,
+        Func<bool>? canExecute = null)
+    {
+        var command = new AsyncRelayCommand(
+            execute,
+            () => !IsOperationRunning && (canExecute?.Invoke() ?? true));
+        manualCommands.Add(command);
+        return command;
+    }
+
+    private void SetOperationStatus(long operationId, string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return;
+        }
+
+        long sequence;
+        lock (statusGate)
+        {
+            if (operationId == 0 || activeOperationId != operationId)
+            {
+                return;
+            }
+
+            sequence = ++nextStatusSequence;
+        }
+
+        Logger.Info($"PSF Guard Sync: {value}");
+        DispatchStatus(sequence, value);
+    }
+
+    private void SetBackgroundStatus(string value)
     {
         if (!string.IsNullOrWhiteSpace(value))
         {
             Logger.Info($"PSF Guard Sync: {value}");
         }
 
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return;
+        }
+
+        long sequence;
+        lock (statusGate)
+        {
+            if (activeOperationId != 0)
+            {
+                return;
+            }
+
+            sequence = ++nextStatusSequence;
+        }
+
+        DispatchStatus(sequence, value);
+    }
+
+    private void DispatchStatus(long sequence, string value)
+    {
+        void ApplyStatus()
+        {
+            if (sequence <= Volatile.Read(ref displayedStatusSequence))
+            {
+                return;
+            }
+
+            Interlocked.Exchange(ref displayedStatusSequence, sequence);
+            LastStatus = value;
+        }
+
         var dispatcher = Application.Current?.Dispatcher;
         if (dispatcher is not null && !dispatcher.CheckAccess())
         {
-            _ = dispatcher.BeginInvoke(() => LastStatus = value);
+            _ = dispatcher.BeginInvoke(ApplyStatus);
         }
         else
         {
-            LastStatus = value;
+            ApplyStatus();
         }
     }
 
-    private IProgress<SyncProgress> CreateSyncProgress() =>
-        new CallbackProgress<SyncProgress>(update => SetStatus(update.Message));
+    private IProgress<SyncProgress> CreateSyncProgress(bool suppressCompleted = false)
+    {
+        var operationId = Volatile.Read(ref activeOperationId);
+        return new CallbackProgress<SyncProgress>(
+            update =>
+            {
+                if (!suppressCompleted || update.Stage != SyncProgressStage.Completed)
+                {
+                    SetOperationStatus(operationId, update.Message);
+                }
+            });
+    }
 
     private void SetPendingPreview(PendingPreviewContext? pending)
     {
@@ -781,20 +885,23 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
         pendingPreview = pending;
         RaisePropertyChanged(nameof(HasPendingPreview));
         RaisePropertyChanged(nameof(PendingPreviewStatus));
-        RaisePendingCommandStates();
+        RaiseCommandStates();
     }
 
-    private void RaisePendingCommandStates()
+    private void RaiseCommandStates()
     {
         var dispatcher = Application.Current?.Dispatcher;
         if (dispatcher is not null && !dispatcher.CheckAccess())
         {
-            _ = dispatcher.BeginInvoke(RaisePendingCommandStates);
+            _ = dispatcher.BeginInvoke(RaiseCommandStates);
             return;
         }
 
-        applyPreviewCommand?.RaiseCanExecuteChanged();
-        forgetPreviewCommand?.RaiseCanExecuteChanged();
+        RaisePropertyChanged(nameof(IsOperationRunning));
+        foreach (var command in manualCommands)
+        {
+            command.RaiseCanExecuteChanged();
+        }
     }
 
     private static string TargetSchedulerVersion()

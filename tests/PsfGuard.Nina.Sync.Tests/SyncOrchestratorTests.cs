@@ -139,11 +139,70 @@ public sealed class SyncOrchestratorTests
         Assert.Equal(5, inserted);
         Assert.Equal(6, updated);
         Assert.Contains(updates, update => update.Stage == SyncProgressStage.ReadingCatalog);
+        Assert.Contains(updates, update => update.Stage == SyncProgressStage.PreparingBundle);
         Assert.Contains(updates, update => update.Stage == SyncProgressStage.BundleReady);
         Assert.Contains(updates, update => update.Stage == SyncProgressStage.UploadingBundle);
         Assert.Contains(updates, update => update.Stage == SyncProgressStage.WaitingForPreview);
         Assert.Contains(updates, update => update.Stage == SyncProgressStage.ApplyingPreview);
         Assert.Contains(updates, update => update.Stage == SyncProgressStage.Completed);
+    }
+
+    [Fact]
+    public async Task RoundTripPreflightReportsCheckingServerBeforeCapabilitiesRespond()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0);
+        var response = new TaskCompletionSource<HttpResponseMessage>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var updates = new List<SyncProgress>();
+        var orchestrator = Orchestrator(
+            database.Path,
+            (_, _) => response.Task);
+
+        var preflight = orchestrator.EnsureRoundTripSupportedAsync(
+            CancellationToken.None,
+            new RecordingProgress<SyncProgress>(updates.Add));
+
+        var completedBeforeResponse = preflight.IsCompleted;
+        var updatesBeforeResponse = updates.ToArray();
+        response.SetResult(Capabilities([SyncOrchestrator.ExportsCapability]));
+        await preflight;
+
+        Assert.False(completedBeforeResponse);
+        Assert.Contains(
+            updatesBeforeResponse,
+            update => update.Stage == SyncProgressStage.CheckingServer
+                && update.Message.Contains("Checking", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task CancelledHeartbeatWaitObservesTheUnderlyingRequestBeforeReturning()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0);
+        using var cancellation = new CancellationTokenSource();
+        var response = new TaskCompletionSource<HttpResponseMessage>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancellationObserved = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var orchestrator = Orchestrator(
+            database.Path,
+            (_, token) =>
+            {
+                token.Register(cancellationObserved.SetResult);
+                return response.Task;
+            });
+
+        var preflight = orchestrator.EnsureRoundTripSupportedAsync(
+            cancellation.Token,
+            new RecordingProgress<SyncProgress>(_ => { }));
+        cancellation.Cancel();
+        await cancellationObserved.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        await Task.Delay(50);
+
+        Assert.False(preflight.IsCompleted);
+        response.SetCanceled(cancellation.Token);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => preflight);
     }
 
     [Fact]
@@ -165,6 +224,43 @@ public sealed class SyncOrchestratorTests
 
         Assert.Equal(1, calls);
         Assert.Contains("catalog exports", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SuccessfulRoundTripPreflightIsCachedForPullMergedCatalog()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0, grade: 2, rejectReason: "Clouds");
+        destination.Seed(100, grade: 0);
+        var sourceReader = new TargetSchedulerCatalogReader(source.Path, "5.9.6.0");
+        var bundle = await sourceReader.BuildFullMergeBundleAsync(
+            includeThumbnails: false,
+            CancellationToken.None);
+        var capabilityRequests = 0;
+        var orchestrator = Orchestrator(
+            destination.Path,
+            request =>
+            {
+                if (request.Method == HttpMethod.Get
+                    && request.RequestUri!.AbsolutePath.EndsWith(
+                        "/capabilities",
+                        StringComparison.Ordinal))
+                {
+                    capabilityRequests++;
+                    return Capabilities([SyncOrchestrator.ExportsCapability]);
+                }
+
+                return Json(
+                    $$"""
+                    {"export_id":"export-merge","state":"ready","bundle":{{ProtocolJson.Serialize(bundle)}}}
+                    """);
+            });
+
+        await orchestrator.EnsureRoundTripSupportedAsync(CancellationToken.None);
+        await orchestrator.PullMergedCatalogAsync(CancellationToken.None);
+
+        Assert.Equal(1, capabilityRequests);
     }
 
     [Fact]
@@ -218,7 +314,14 @@ public sealed class SyncOrchestratorTests
 
     private static SyncOrchestrator Orchestrator(
         string databasePath,
-        Func<HttpRequestMessage, HttpResponseMessage> send) => new(
+        Func<HttpRequestMessage, HttpResponseMessage> send) =>
+        Orchestrator(
+            databasePath,
+            (request, _) => Task.FromResult(send(request)));
+
+    private static SyncOrchestrator Orchestrator(
+        string databasePath,
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) => new(
         "catalog-a",
         autoApplyPushes: true,
         includeThumbnails: false,
@@ -246,12 +349,13 @@ public sealed class SyncOrchestratorTests
             }
             """);
 
-    private sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> send)
+    private sealed class StubHandler(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send)
         : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
-            CancellationToken cancellationToken) => Task.FromResult(send(request));
+            CancellationToken cancellationToken) => send(request, cancellationToken);
     }
 
     private sealed class RecordingProgress<T>(Action<T> record) : IProgress<T>

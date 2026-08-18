@@ -270,7 +270,8 @@ public sealed class PsfGuardSyncClient : IDisposable
         {
             Content = JsonContent.Create(requestBody, options: ProtocolJson.Options),
         };
-        var export = await SendAsync<SyncExport>(request, cancellationToken).ConfigureAwait(false);
+        var export = await SendAsync<SyncExport>(request, cancellationToken, progress)
+            .ConfigureAwait(false);
         var deadline = DateTimeOffset.UtcNow + DefaultExportTimeout;
         var exportStarted = Stopwatch.StartNew();
         var nextHeartbeat = TimeSpan.FromSeconds(5);
@@ -292,7 +293,8 @@ public sealed class PsfGuardSyncClient : IDisposable
                 .ConfigureAwait(false);
             export = await GetAsync<SyncExport>(
                     $"api/sync/v1/exports/{Uri.EscapeDataString(export.ExportId)}",
-                    cancellationToken)
+                    cancellationToken,
+                    progress)
                 .ConfigureAwait(false);
             if (!string.Equals(export.State, "ready", StringComparison.OrdinalIgnoreCase)
                 && exportStarted.Elapsed >= nextHeartbeat)
@@ -318,30 +320,38 @@ public sealed class PsfGuardSyncClient : IDisposable
         return bundle;
     }
 
-    private async Task<T> GetAsync<T>(string relativeUri, CancellationToken cancellationToken)
+    private async Task<T> GetAsync<T>(
+        string relativeUri,
+        CancellationToken cancellationToken,
+        IProgress<SyncProgress>? progress = null)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, relativeUri);
-        return await SendAsync<T>(request, cancellationToken).ConfigureAwait(false);
+        return await SendAsync<T>(request, cancellationToken, progress).ConfigureAwait(false);
     }
 
     private async Task<T> SendAsync<T>(
         HttpRequestMessage request,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<SyncProgress>? progress = null)
     {
-        using var response = await httpClient.SendAsync(request, cancellationToken)
+        using var response = await httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken)
             .ConfigureAwait(false);
-        return await ReadAsync<T>(response, cancellationToken).ConfigureAwait(false);
+        return await ReadAsync<T>(response, cancellationToken, progress).ConfigureAwait(false);
     }
 
     private static async Task<T> ReadAsync<T>(
         HttpResponseMessage response,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<SyncProgress>? progress = null)
     {
         // Hash the raw bytes before any decoding: X-Content-SHA256 covers
         // exactly what the server wrote, so this check needs no agreement
-        // about JSON encodings — unlike the in-bundle payload_sha256, which
-        // only ever verifies against this library's own serializer.
-        var raw = await response.Content.ReadAsByteArrayAsync(cancellationToken)
+        // about JSON encodings. The in-bundle payload_sha256 only verifies
+        // against this library's own serializer.
+        var raw = await ReadResponseBytesAsync(response.Content, cancellationToken, progress)
             .ConfigureAwait(false);
         if (response.IsSuccessStatusCode
             && response.Headers.TryGetValues("X-Content-SHA256", out var digests))
@@ -383,6 +393,57 @@ public sealed class PsfGuardSyncClient : IDisposable
                 : root;
         return payload.Deserialize<T>(ProtocolJson.Options)
             ?? throw new InvalidDataException($"PSF Guard returned no {typeof(T).Name} payload.");
+    }
+
+    private static async Task<byte[]> ReadResponseBytesAsync(
+        HttpContent content,
+        CancellationToken cancellationToken,
+        IProgress<SyncProgress>? progress)
+    {
+        if (progress is null)
+        {
+            return await content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        var capacity = content.Headers.ContentLength is > 0
+            ? (int)Math.Min(content.Headers.ContentLength.Value, 16L * 1024 * 1024)
+            : 0;
+        using var buffer = new MemoryStream(capacity);
+        await using var stream = await content.ReadAsStreamAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var chunk = new byte[80 * 1024];
+        var started = Stopwatch.StartNew();
+        var lastReportedBytes = 0L;
+        var lastReportedAt = TimeSpan.Zero;
+        var reported = false;
+        while (true)
+        {
+            var read = await stream.ReadAsync(chunk, cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                break;
+            }
+
+            await buffer.WriteAsync(chunk.AsMemory(0, read), cancellationToken)
+                .ConfigureAwait(false);
+            var bytes = buffer.Length;
+            var elapsed = started.Elapsed;
+            if (bytes - lastReportedBytes >= 1024 * 1024
+                || elapsed - lastReportedAt >= TimeSpan.FromSeconds(2))
+            {
+                ReportDownloadProgress(progress, bytes, elapsed, complete: false);
+                reported = true;
+                lastReportedBytes = bytes;
+                lastReportedAt = elapsed;
+            }
+        }
+
+        if (reported || buffer.Length >= 256 * 1024)
+        {
+            ReportDownloadProgress(progress, buffer.Length, started.Elapsed, complete: true);
+        }
+
+        return buffer.ToArray();
     }
 
     private static Uri NormalizeBaseUri(Uri baseUri)
@@ -460,6 +521,26 @@ public sealed class PsfGuardSyncClient : IDisposable
                     + $"({FormatElapsed(elapsed)})...",
                 Elapsed = elapsed,
                 JobId = export.ExportId,
+            });
+    }
+
+    private static void ReportDownloadProgress(
+        IProgress<SyncProgress>? progress,
+        long bytes,
+        TimeSpan elapsed,
+        bool complete)
+    {
+        SyncProgressReporter.Report(
+            progress,
+            new SyncProgress
+            {
+                Stage = SyncProgressStage.DownloadingCatalog,
+                Message = complete
+                    ? $"Received {FormatBytes(bytes)} from PSF Guard; parsing catalog..."
+                    : $"Downloading PSF Guard catalog: {FormatBytes(bytes)} received "
+                        + $"({FormatElapsed(elapsed)})...",
+                BytesTransferred = bytes,
+                Elapsed = elapsed,
             });
     }
 

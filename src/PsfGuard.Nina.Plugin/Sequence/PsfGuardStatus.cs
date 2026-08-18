@@ -12,8 +12,16 @@ internal static class PsfGuardStatus
         new StatusScope(progress);
 
     public static IProgress<SyncProgress> CreateSyncProgress(
-        IProgress<ApplicationStatus>? progress) =>
-        new CallbackProgress<SyncProgress>(update => Report(progress, update.Message));
+        IProgress<ApplicationStatus>? progress,
+        bool suppressCompleted = false) =>
+        new CallbackProgress<SyncProgress>(
+            update =>
+            {
+                if (!suppressCompleted || update.Stage != SyncProgressStage.Completed)
+                {
+                    Report(progress, update.Message);
+                }
+            });
 
     public static void Report(
         IProgress<ApplicationStatus>? progress,
