@@ -7,7 +7,7 @@ using NINA.Sequencer.SequenceItem;
 namespace PsfGuard.Nina.Plugin.Sequence;
 
 [ExportMetadata("Name", "Reconcile PSF Guard catalog")]
-[ExportMetadata("Description", "Push and apply a current Target Scheduler snapshot, including captures")]
+[ExportMetadata("Description", "Push a current Target Scheduler snapshot, including captures, and wait for the remote preview")]
 [ExportMetadata("Icon", "LoopSVG")]
 [ExportMetadata("Category", "PSF Guard Sync")]
 [Export(typeof(ISequenceItem))]
@@ -30,8 +30,13 @@ public sealed class ReconcilePsfGuardCatalog : PsfGuardSequenceItemBase
         CancellationToken token)
     {
         using var status = BeginStatus(progress);
-        var autoApply = RequireAutomaticApply();
+        var autoApply = AutoApplyPushes;
         var roundTrip = RoundTripReconcile;
+        if (roundTrip && !autoApply)
+        {
+            throw new InvalidOperationException(
+                "Full round-trip reconcile requires automatic preview apply for sequencer use.");
+        }
         Report(progress, "Waiting for scheduler...");
         await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
         Report(progress, "Reconciling catalog...");
@@ -57,5 +62,12 @@ public sealed class ReconcilePsfGuardCatalog : PsfGuardSequenceItemBase
     public override string ToString() =>
         $"Category: {Category}, Item: {nameof(ReconcilePsfGuardCatalog)}";
 
-    protected override bool RequiresAutomaticApply => true;
+    protected override void AddValidationIssues(List<string> validationIssues)
+    {
+        if (RoundTripReconcile && !AutoApplyPushes)
+        {
+            validationIssues.Add(
+                "Full round-trip reconcile requires automatic preview apply for sequencer use.");
+        }
+    }
 }

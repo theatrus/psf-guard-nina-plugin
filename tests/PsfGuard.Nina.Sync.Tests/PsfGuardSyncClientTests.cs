@@ -118,7 +118,7 @@ public sealed class PsfGuardSyncClientTests
                 {
                     uploadedBytes = (await request.Content!.ReadAsByteArrayAsync()).LongLength;
                     return Json(
-                        """{"job_id":"job-visible","state":"running"}""",
+                        """{"job_id":"job-visible","state":"running","phase":"materializing"}""",
                         HttpStatusCode.Accepted);
                 }
 
@@ -160,6 +160,9 @@ public sealed class PsfGuardSyncClientTests
             updates,
             update => update.Stage == SyncProgressStage.WaitingForPreview
                 && update.JobId == "job-visible");
+        Assert.Contains(
+            updates,
+            update => update.Message.Contains("materializing", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -249,11 +252,11 @@ public sealed class PsfGuardSyncClientTests
         Assert.Equal(bundle.BundleId, downloaded.BundleId);
         Assert.Equal(2, calls);
         using var json = JsonDocument.Parse(requestBody!);
-        Assert.False(json.RootElement.TryGetProperty("with_image_data", out _));
+        Assert.False(json.RootElement.TryGetProperty("include_thumbnails", out _));
     }
 
     [Fact]
-    public async Task MergeExportExplicitlyExcludesImageData()
+    public async Task MergeExportExplicitlyDisablesThumbnails()
     {
         string? requestBody = null;
         var bundle = Bundle() with { Operation = SyncOperation.Merge };
@@ -276,12 +279,12 @@ public sealed class PsfGuardSyncClientTests
             "review",
             SyncOperation.Merge,
             reviewedOnly: false,
-            withImageData: false,
+            includeThumbnails: false,
             CancellationToken.None);
 
         Assert.Equal(SyncOperation.Merge, downloaded.Operation);
         using var json = JsonDocument.Parse(requestBody!);
-        Assert.False(json.RootElement.GetProperty("with_image_data").GetBoolean());
+        Assert.False(json.RootElement.GetProperty("include_thumbnails").GetBoolean());
     }
 
     [Fact]

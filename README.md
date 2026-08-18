@@ -122,11 +122,12 @@ all** remains the durable queue-based equivalent.
 
 Enable **Pull merged catalog back after full reconcile** for a round trip: after
 PSF Guard applies the incoming snapshot, the plugin downloads the resulting
-catalog without `imagedata` thumbnails and transactionally merges it back into
-Target Scheduler. This requires a server advertising
-`merge_export_without_image_data`; the plugin checks before it pushes anything.
-Sequencer push and reconcile instructions require automatic preview apply so
-they cannot discard an unapplied preview after the instruction finishes.
+catalog with `include_thumbnails: false` and transactionally merges it back into
+Target Scheduler. This requires the thumbnail export option introduced by
+[PSF Guard #353](https://github.com/theatrus/psf-guard/pull/353). The plugin
+rejects a legacy response that still contains `imagedata`. Sequencer round trips
+require automatic preview apply; ordinary sequencer pushes may leave a staged
+preview for PSF Guard #353's Data Transfer UI.
 
 Queue records retain their original server, catalog, and profile-specific
 Credential Manager reference. They never store the API key itself and never
@@ -146,16 +147,16 @@ advanced sequencer:
 - **Pull PSF Guard planning** applies remote projects, targets, templates, and
   plans to Target Scheduler. Run it before a Target Scheduler container starts;
   an already-running container may retain its in-memory plan.
-- **Push PSF Guard planning** sends and applies Target Scheduler projects,
-  targets, templates, and plans in PSF Guard.
+- **Push PSF Guard planning** sends Target Scheduler projects, targets,
+  templates, and plans to PSF Guard and waits for the preview or apply.
 - **Pull PSF Guard grades** applies reviewed grades and rejection reasons by
   unambiguous acquired-image GUID, then reconciles each affected Target
   Scheduler plan's accepted count from its acquired images.
-- **Push PSF Guard grades** sends and applies reviewed Target Scheduler grades
-  and rejection reasons in PSF Guard.
+- **Push PSF Guard grades** sends reviewed Target Scheduler grades and rejection
+  reasons to PSF Guard and waits for the preview or apply.
 - **Reconcile PSF Guard catalog** pushes a fresh full scheduler snapshot and
-  waits until PSF Guard creates and applies its preview. It is suitable for
-  session-end instructions.
+  waits until PSF Guard creates, and optionally applies, its preview. It is
+  suitable for session-end instructions.
 - **Reconcile current target with PSF Guard** pushes only the enclosing target's
   project, plans, captures, and optional thumbnails. Put it inside a target
   container near that target's end.
@@ -179,11 +180,11 @@ queue; disable that setting when the trigger should be the only catalog-sync
 policy for those exposures.
 
 Reconciliation instructions wait two seconds for final Target Scheduler image
-transactions before taking one consistent, read-only SQLite snapshot.
-Sequencer push and reconcile instructions require **Apply remote
-previews automatically** and await that apply, making them actual sequence
-barriers rather than queue-only actions. Automatic per-capture pushes remain
-durably queued and retry independently.
+transactions before taking one consistent, read-only SQLite snapshot. They then
+await the remote preview, making them actual sequence barriers rather than
+queue-only actions. **Apply remote previews automatically** controls whether the
+barrier also applies the preview or leaves it staged in PSF Guard. Automatic
+per-capture pushes remain durably queued and retry independently.
 
 Current-target reconciliation matches the enclosing N.I.N.A. target name
 case-insensitively. It refuses ambiguous Target Scheduler target names instead

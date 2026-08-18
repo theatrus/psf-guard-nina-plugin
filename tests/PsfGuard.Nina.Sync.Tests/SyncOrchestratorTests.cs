@@ -147,7 +147,7 @@ public sealed class SyncOrchestratorTests
     }
 
     [Fact]
-    public async Task RoundTripPreflightRejectsAnOlderServerBeforeUploading()
+    public async Task RoundTripPreflightRequiresCatalogExports()
     {
         using var database = new TestDatabase();
         database.Seed(0);
@@ -164,7 +164,7 @@ public sealed class SyncOrchestratorTests
             () => orchestrator.EnsureRoundTripSupportedAsync(CancellationToken.None));
 
         Assert.Equal(1, calls);
-        Assert.Contains("without thumbnails", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("catalog exports", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -186,7 +186,7 @@ public sealed class SyncOrchestratorTests
             {
                 if (request.Method == HttpMethod.Get)
                 {
-                    return Capabilities([SyncOrchestrator.MergeExportWithoutImageDataCapability]);
+                    return Capabilities([SyncOrchestrator.ExportsCapability]);
                 }
 
                 exportRequest = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
@@ -202,7 +202,7 @@ public sealed class SyncOrchestratorTests
 
         Assert.True(result.Updated > 0);
         using var requestJson = JsonDocument.Parse(exportRequest!);
-        Assert.False(requestJson.RootElement.GetProperty("with_image_data").GetBoolean());
+        Assert.False(requestJson.RootElement.GetProperty("include_thumbnails").GetBoolean());
         using var connection = destination.Open();
         using var command = connection.CreateCommand();
         command.CommandText =

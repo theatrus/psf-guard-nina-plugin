@@ -8,8 +8,7 @@ namespace PsfGuard.Nina.Sync;
 
 public sealed class SyncOrchestrator
 {
-    public const string MergeExportWithoutImageDataCapability =
-        "merge_export_without_image_data";
+    public const string ExportsCapability = "exports";
 
     private readonly string destinationCatalogId;
     private readonly bool autoApplyPushes;
@@ -184,11 +183,11 @@ public sealed class SyncOrchestrator
     {
         var capabilities = await TestConnectionAsync(cancellationToken).ConfigureAwait(false);
         if (!capabilities.Capabilities.Contains(
-                MergeExportWithoutImageDataCapability,
+                ExportsCapability,
                 StringComparer.Ordinal))
         {
             throw new NotSupportedException(
-                "This PSF Guard server cannot export a merged catalog without thumbnails; "
+                "This PSF Guard server does not advertise catalog exports; "
                 + "update PSF Guard before enabling full round-trip reconcile.");
         }
     }
@@ -210,7 +209,7 @@ public sealed class SyncOrchestrator
                     destinationCatalogId,
                     SyncOperation.Merge,
                     reviewedOnly: false,
-                    withImageData: false,
+                    includeThumbnails: false,
                     cancellationToken: cancellationToken,
                     progress: progress))
             .ConfigureAwait(false);

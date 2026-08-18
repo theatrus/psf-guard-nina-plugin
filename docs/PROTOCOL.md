@@ -29,7 +29,7 @@ GET /api/sync/v1/capabilities
   "protocol_version": 1,
   "product": "psf-guard",
   "product_version": "0.6.0",
-  "capabilities": ["merge", "push_planning", "push_grades", "preview_apply", "preview_refresh", "async_preview_jobs", "exports", "merge_export_without_image_data", "image_upload"],
+  "capabilities": ["merge", "push_planning", "push_grades", "preview_apply", "preview_refresh", "async_preview_jobs", "exports", "image_upload"],
   "catalogs": [
     {
       "id": "review",
@@ -85,13 +85,16 @@ share one canonical byte encoding.
 An async-capable server returns `202 Accepted` immediately:
 
 ```json
-{"job_id":"job-opaque-id","state":"running"}
+{"job_id":"job-opaque-id","state":"running","phase":"materializing"}
 ```
 
 The plugin polls `GET /api/sync/v1/jobs/{job_id}` until the job returns either
 `state: "ready"` with its `preview`, or `state: "failed"` with an error. Older
 servers may ignore `Prefer` and return the ready preview synchronously. A retry
 with the same idempotency key returns the same retained job.
+
+PSF Guard #353 reports `phase: "materializing"` while it stages the bundle and
+`phase: "comparing"` while it builds the dry-run result. Older servers omit it.
 
 ```json
 {
@@ -131,14 +134,14 @@ POST /api/sync/v1/exports
   "catalog_id": "review",
   "operation": "merge",
   "reviewed_only": false,
-  "with_image_data": false
+  "include_thumbnails": false
 }
 ```
 
-For a full `merge` export, `with_image_data: false` requires the
-`merge_export_without_image_data` capability. A client must check the capability
-before requesting a thumbnail-free round trip because an older server may ignore
-the field and return `imagedata`.
+For a full `merge` export, `include_thumbnails` defaults to `false` on PSF Guard
+versions that implement the option. An older server may ignore the field and
+return `imagedata`, so the plugin verifies that the returned merge bundle is
+thumbnail-free before applying it locally.
 
 The server may return a ready export immediately:
 
@@ -162,9 +165,8 @@ The plugin accepts these export operations:
 
 - `push_planning` for a local planning apply
 - `push_grades` for a local grade apply
-- `merge` for a transactional full-catalog apply after the server advertises
-  `merge_export_without_image_data`; the bundle must contain the planning and
-  `acquiredimage` tables and must not contain `imagedata`
+- `merge` for a transactional full-catalog apply; the bundle must contain the
+  planning and `acquiredimage` tables and must not contain `imagedata`
 
 It does not accept remote SQL, table names outside its allowlist, deletes, or
 an arbitrary local database path.

@@ -7,7 +7,7 @@ using NINA.Sequencer.SequenceItem;
 namespace PsfGuard.Nina.Plugin.Sequence;
 
 [ExportMetadata("Name", "Reconcile current target with PSF Guard")]
-[ExportMetadata("Description", "Push and apply the enclosing target's structure and captures")]
+[ExportMetadata("Description", "Push the enclosing target's structure and captures, then wait for the remote preview")]
 [ExportMetadata("Icon", "LoopSVG")]
 [ExportMetadata("Category", "PSF Guard Sync")]
 [Export(typeof(ISequenceItem))]
@@ -30,7 +30,7 @@ public sealed class ReconcilePsfGuardTarget : PsfGuardSequenceItemBase
         CancellationToken token)
     {
         using var status = BeginStatus(progress);
-        var autoApply = RequireAutomaticApply();
+        var autoApply = AutoApplyPushes;
         var targetName = RequireCurrentTargetName();
         Report(progress, "Waiting for scheduler...");
         await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
@@ -48,6 +48,4 @@ public sealed class ReconcilePsfGuardTarget : PsfGuardSequenceItemBase
 
     public override string ToString() =>
         $"Category: {Category}, Item: {nameof(ReconcilePsfGuardTarget)}";
-
-    protected override bool RequiresAutomaticApply => true;
 }

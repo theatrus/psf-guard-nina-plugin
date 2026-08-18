@@ -54,6 +54,8 @@ public sealed record SyncPreviewJob
 
     public required string State { get; init; }
 
+    public string? Phase { get; init; }
+
     public SyncPreview? Preview { get; init; }
 
     public string? Error { get; init; }
@@ -77,7 +79,7 @@ public sealed record CreateExportRequest
     public bool ReviewedOnly { get; init; } = true;
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public bool? WithImageData { get; init; }
+    public bool? IncludeThumbnails { get; init; }
 }
 
 public sealed record SyncExport

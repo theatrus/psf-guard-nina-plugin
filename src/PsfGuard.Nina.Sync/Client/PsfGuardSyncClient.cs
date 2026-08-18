@@ -147,7 +147,7 @@ public sealed class PsfGuardSyncClient : IDisposable
             new SyncProgress
             {
                 Stage = SyncProgressStage.WaitingForPreview,
-                Message = $"PSF Guard preview job {job.JobId} is {job.State}...",
+                Message = $"PSF Guard preview job {job.JobId} is {PreviewJobPhase(job)}...",
                 JobId = job.JobId,
             });
         while (!string.Equals(job.State, "ready", StringComparison.OrdinalIgnoreCase))
@@ -176,7 +176,7 @@ public sealed class PsfGuardSyncClient : IDisposable
                     new SyncProgress
                     {
                         Stage = SyncProgressStage.WaitingForPreview,
-                        Message = $"PSF Guard preview job {job.JobId} is {job.State} "
+                        Message = $"PSF Guard preview job {job.JobId} is {PreviewJobPhase(job)} "
                             + $"({FormatElapsed(previewStarted.Elapsed)})...",
                         Elapsed = previewStarted.Elapsed,
                         JobId = job.JobId,
@@ -229,7 +229,7 @@ public sealed class PsfGuardSyncClient : IDisposable
             catalogId,
             operation,
             reviewedOnly,
-            withImageData: null,
+            includeThumbnails: null,
             cancellationToken: cancellationToken,
             progress: null);
 
@@ -237,7 +237,7 @@ public sealed class PsfGuardSyncClient : IDisposable
         string catalogId,
         SyncOperation operation,
         bool reviewedOnly,
-        bool withImageData,
+        bool includeThumbnails,
         CancellationToken cancellationToken,
         IProgress<SyncProgress>? progress = null)
     {
@@ -245,7 +245,7 @@ public sealed class PsfGuardSyncClient : IDisposable
                 catalogId,
                 operation,
                 reviewedOnly,
-                withImageData,
+                includeThumbnails,
                 cancellationToken,
                 progress)
             .ConfigureAwait(false);
@@ -255,7 +255,7 @@ public sealed class PsfGuardSyncClient : IDisposable
         string catalogId,
         SyncOperation operation,
         bool reviewedOnly,
-        bool? withImageData,
+        bool? includeThumbnails,
         CancellationToken cancellationToken,
         IProgress<SyncProgress>? progress)
     {
@@ -264,7 +264,7 @@ public sealed class PsfGuardSyncClient : IDisposable
             CatalogId = catalogId,
             Operation = operation,
             ReviewedOnly = reviewedOnly,
-            WithImageData = withImageData,
+            IncludeThumbnails = includeThumbnails,
         };
         using var request = new HttpRequestMessage(HttpMethod.Post, "api/sync/v1/exports")
         {
@@ -469,6 +469,9 @@ public sealed class PsfGuardSyncClient : IDisposable
         >= 1024 => $"{bytes / 1024d:0.0} KiB",
         _ => $"{bytes} bytes",
     };
+
+    private static string PreviewJobPhase(SyncPreviewJob job) =>
+        string.IsNullOrWhiteSpace(job.Phase) ? job.State : job.Phase;
 
     private static string FormatElapsed(TimeSpan elapsed) =>
         elapsed.TotalMinutes >= 1

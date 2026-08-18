@@ -42,7 +42,6 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
 
     protected bool AutoApplyPushes => settings.AutoApplyPushes;
     protected virtual bool RequiresTargetScheduler => true;
-    protected virtual bool RequiresAutomaticApply => false;
 
     protected bool IsGlobalCapturePushEnabled =>
         settings.Enabled && settings.AutoPushCaptures;
@@ -162,26 +161,9 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
             validationIssues.Add("Configure an existing Target Scheduler database.");
         }
 
-        if (RequiresAutomaticApply && !AutoApplyPushes)
-        {
-            validationIssues.Add(
-                "Enable automatic preview apply for PSF Guard sequencer push actions.");
-        }
-
         AddValidationIssues(validationIssues);
         Issues = validationIssues;
         return validationIssues.Count == 0;
-    }
-
-    protected bool RequireAutomaticApply()
-    {
-        if (!AutoApplyPushes)
-        {
-            throw new InvalidOperationException(
-                "PSF Guard sequencer push actions require automatic preview apply.");
-        }
-
-        return true;
     }
 
     private static PsfGuardSyncClient CreateClient(Uri serverUri, string apiToken) =>
