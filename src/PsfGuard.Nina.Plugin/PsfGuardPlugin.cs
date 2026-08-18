@@ -73,6 +73,16 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                     await CreateOrchestrator().QueueFullMergeAsync(token).ConfigureAwait(false);
                     return "Full Target Scheduler merge queued.";
                 }));
+        ReconcileCommand = new AsyncRelayCommand(
+            () => RunCommandAsync(
+                async token =>
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
+                    var receipt = await CreateOrchestrator()
+                        .ReconcileCatalogAsync(AutoApplyPushes, token)
+                        .ConfigureAwait(false);
+                    return FormatPushReceipt("Catalog reconcile", receipt);
+                }));
         PushPlanningCommand = new AsyncRelayCommand(
             () => RunCommandAsync(
                 async token =>
@@ -114,6 +124,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
     public ICommand TestConnectionCommand { get; }
 
     public ICommand PushAllCommand { get; }
+
+    public ICommand ReconcileCommand { get; }
 
     public ICommand PushPlanningCommand { get; }
 
@@ -598,6 +610,22 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
     private static string FormatApplyResult(string label, ApplyResult result) =>
         $"{label}: {result.Inserted} inserted, {result.Updated} updated, "
         + $"{result.Unchanged} unchanged, {result.Skipped} skipped.";
+
+    private static string FormatPushReceipt(string label, PushReceipt receipt)
+    {
+        var message = receipt.Applied
+            ? $"{label} applied in PSF Guard"
+            : $"{label} preview {receipt.PreviewId} is ready in PSF Guard";
+        if (!receipt.TryGetChangeCounts(out var inserted, out var updated))
+        {
+            return $"{message}.";
+        }
+
+        return message
+            + (receipt.Applied
+                ? $": {inserted} inserted, {updated} updated."
+                : $": {inserted} to insert, {updated} to update.");
+    }
 
     private void RaisePropertyChanged([CallerMemberName] string? propertyName = null)
     {

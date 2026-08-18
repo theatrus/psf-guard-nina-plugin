@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace PsfGuard.Nina.Sync.Protocol;
@@ -60,15 +61,17 @@ public sealed record CatalogBundle
     [JsonIgnore]
     public int RowCount => Tables.Values.Sum(table => table.Rows.Count);
 
-    public void Seal()
+    public void Seal() => Seal(CancellationToken.None);
+
+    public void Seal(CancellationToken cancellationToken)
     {
         PayloadSha256 = null;
-        var payload = ProtocolJson.Serialize(this);
-        PayloadSha256 = Convert.ToHexString(
-            SHA256.HashData(Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
+        PayloadSha256 = ComputeDigest(cancellationToken);
     }
 
-    public bool VerifyDigest()
+    public bool VerifyDigest() => VerifyDigest(CancellationToken.None);
+
+    public bool VerifyDigest(CancellationToken cancellationToken)
     {
         var expected = PayloadSha256;
         if (string.IsNullOrWhiteSpace(expected))
@@ -79,9 +82,7 @@ public sealed record CatalogBundle
         PayloadSha256 = null;
         try
         {
-            var payload = ProtocolJson.Serialize(this);
-            var actual = Convert.ToHexString(
-                SHA256.HashData(Encoding.UTF8.GetBytes(payload))).ToLowerInvariant();
+            var actual = ComputeDigest(cancellationToken);
             return CryptographicOperations.FixedTimeEquals(
                 Encoding.ASCII.GetBytes(actual),
                 Encoding.ASCII.GetBytes(expected));
@@ -89,6 +90,59 @@ public sealed record CatalogBundle
         finally
         {
             PayloadSha256 = expected;
+        }
+    }
+
+    private string ComputeDigest(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        using var stream = new HashingWriteStream(hash, cancellationToken);
+        JsonSerializer.Serialize(stream, this, ProtocolJson.Options);
+        cancellationToken.ThrowIfCancellationRequested();
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+
+    private sealed class HashingWriteStream(
+        IncrementalHash hash,
+        CancellationToken cancellationToken) : Stream
+    {
+        public override bool CanRead => false;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => true;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+            throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            hash.AppendData(buffer, offset, count);
+        }
+
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            hash.AppendData(buffer);
         }
     }
 }

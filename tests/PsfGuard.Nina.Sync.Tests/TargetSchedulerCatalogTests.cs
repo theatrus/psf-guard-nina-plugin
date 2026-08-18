@@ -101,6 +101,88 @@ public sealed class TargetSchedulerCatalogTests
     }
 
     [Fact]
+    public async Task FullMergeReadsAllTablesFromOneSnapshot()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0);
+        using (var connection = database.Open())
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "PRAGMA journal_mode = WAL";
+            Assert.Equal("wal", Convert.ToString(command.ExecuteScalar())?.ToLowerInvariant());
+        }
+
+        var updated = false;
+        var reader = new TargetSchedulerCatalogReader(
+            database.Path,
+            "5.9.6.0",
+            TargetSchedulerCatalogReader.DefaultMaximumThumbnailBytes,
+            table =>
+            {
+                if (updated || !table.Equals("project", StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                updated = true;
+                using var writer = database.Open();
+                writer.Execute("UPDATE target SET name = 'Changed after snapshot' WHERE Id = 2");
+            });
+
+        var bundle = await reader.BuildFullMergeBundleAsync(
+            includeThumbnails: false,
+            CancellationToken.None);
+
+        Assert.True(updated);
+        Assert.Equal("M 31", TextValue(bundle.Tables["target"], "name"));
+    }
+
+    [Fact]
+    public async Task FullMergeCancelsDuringTableMaterialization()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0);
+        using var cancellation = new CancellationTokenSource();
+        var reader = new TargetSchedulerCatalogReader(
+            database.Path,
+            "5.9.6.0",
+            TargetSchedulerCatalogReader.DefaultMaximumThumbnailBytes,
+            table =>
+            {
+                if (table.Equals("project", StringComparison.Ordinal))
+                {
+                    cancellation.Cancel();
+                }
+            });
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => reader.BuildFullMergeBundleAsync(
+                includeThumbnails: false,
+                cancellation.Token));
+    }
+
+    [Fact]
+    public async Task ThumbnailBudgetFailsBeforeLoadingBlobRows()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0);
+        var tablesRead = new List<string>();
+        var reader = new TargetSchedulerCatalogReader(
+            database.Path,
+            "5.9.6.0",
+            maximumThumbnailBytes: 2,
+            tablesRead.Add);
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(
+            () => reader.BuildFullMergeBundleAsync(
+                includeThumbnails: true,
+                CancellationToken.None));
+
+        Assert.Contains("safe reconcile limit", exception.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("imagedata", tablesRead);
+    }
+
+    [Fact]
     public async Task PlanningPullRemapsIdsAndPreservesDestinationProgress()
     {
         using var source = new TestDatabase();
@@ -289,5 +371,14 @@ public sealed class TargetSchedulerCatalogTests
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT accepted FROM exposureplan";
         return (long)(command.ExecuteScalar() ?? throw new InvalidOperationException());
+    }
+
+    private static string TextValue(BundleTable table, string column)
+    {
+        var index = table.Columns
+            .Select((item, index) => (item, index))
+            .Single(item => item.item.Name.Equals(column, StringComparison.OrdinalIgnoreCase))
+            .index;
+        return Assert.IsType<string>(table.Rows.Single().Values[index].ToDatabaseValue());
     }
 }

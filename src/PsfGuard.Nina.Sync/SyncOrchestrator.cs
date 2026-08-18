@@ -213,17 +213,31 @@ public sealed class SyncOrchestrator
                             bundle,
                             cancellationToken)
                         .ConfigureAwait(false);
+                    SyncApplyResult? applied = null;
                     if (apply)
                     {
-                        await client.ApplyPreviewAsync(preview.PreviewId, cancellationToken)
+                        applied = await client.ApplyPreviewAsync(
+                                preview.PreviewId,
+                                cancellationToken)
                             .ConfigureAwait(false);
+                    }
+
+                    var state = applied?.State ?? preview.State;
+                    var expectedState = apply ? "applied" : "ready";
+                    if (!string.Equals(state, expectedState, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidDataException(
+                            $"PSF Guard returned sync state '{state}' after "
+                            + (apply ? "applying" : "creating")
+                            + $" preview {preview.PreviewId}; expected '{expectedState}'.");
                     }
 
                     return new PushReceipt
                     {
                         BundleId = bundle.BundleId,
                         PreviewId = preview.PreviewId,
-                        Applied = apply,
+                        State = state,
+                        Summary = applied?.Summary ?? preview.Summary,
                     };
                 })
             .ConfigureAwait(false);
