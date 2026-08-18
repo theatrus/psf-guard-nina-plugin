@@ -11,7 +11,7 @@ using NINA.Sequencer.Trigger;
 namespace PsfGuard.Nina.Plugin.Sequence;
 
 [ExportMetadata("Name", "PSF Guard target sync")]
-[ExportMetadata("Description", "Push the current target to PSF Guard after a configurable number of completed light exposures")]
+[ExportMetadata("Description", "Push and apply the current target after a configurable number of completed light exposures")]
 [ExportMetadata("Icon", "LoopSVG")]
 [ExportMetadata("Category", "PSF Guard Sync")]
 [Export(typeof(ISequenceTrigger))]
@@ -88,12 +88,17 @@ public sealed class ReconcilePsfGuardTargetAfterExposures : PsfGuardSequenceTrig
         CancellationToken token)
     {
         using var status = BeginStatus(progress);
+        var autoApply = RequireAutomaticApply();
         var targetName = currentTargetName ?? RequireCurrentTargetName(context);
         Report(progress, "Waiting for scheduler...");
         await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
         Report(progress, $"Reconciling {targetName}...");
         await CreateOrchestrator()
-            .ReconcileTargetAsync(targetName, AutoApplyPushes, token)
+            .ReconcileTargetAsync(
+                targetName,
+                autoApply,
+                token,
+                CreateSyncProgress(progress))
             .ConfigureAwait(false);
     }
 
@@ -117,4 +122,6 @@ public sealed class ReconcilePsfGuardTargetAfterExposures : PsfGuardSequenceTrig
             validationIssues.Add("Set the PSF Guard reconciliation interval to at least one exposure.");
         }
     }
+
+    protected override bool RequiresAutomaticApply => true;
 }

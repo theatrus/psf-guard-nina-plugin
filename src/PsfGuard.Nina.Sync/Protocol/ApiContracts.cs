@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace PsfGuard.Nina.Sync.Protocol;
 
 public sealed record SyncCatalogCapability
@@ -73,6 +75,9 @@ public sealed record CreateExportRequest
     public required SyncOperation Operation { get; init; }
 
     public bool ReviewedOnly { get; init; } = true;
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? WithImageData { get; init; }
 }
 
 public sealed record SyncExport

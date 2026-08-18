@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Data.SQLite;
 using PsfGuard.Nina.Sync.Protocol;
 
@@ -5,6 +6,9 @@ namespace PsfGuard.Nina.Sync.TargetScheduler;
 
 public sealed class TargetSchedulerCatalogWriter
 {
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> ApplyGates =
+        new(StringComparer.OrdinalIgnoreCase);
+
     private static readonly string[] PlanningTables =
     [
         "exposuretemplate",
@@ -12,6 +16,12 @@ public sealed class TargetSchedulerCatalogWriter
         "ruleweight",
         "target",
         "exposureplan",
+    ];
+
+    private static readonly string[] RequiredMergeTables =
+    [
+        .. PlanningTables,
+        "acquiredimage",
     ];
 
     private readonly string databasePath;
@@ -28,14 +38,41 @@ public sealed class TargetSchedulerCatalogWriter
         CatalogBundle bundle,
         CancellationToken cancellationToken)
     {
-        return Task.Run(() => ApplyGrades(bundle), cancellationToken);
+        return RunSerializedAsync(() => ApplyGrades(bundle), cancellationToken);
     }
 
     public Task<ApplyResult> ApplyPlanningAsync(
         CatalogBundle bundle,
         CancellationToken cancellationToken)
     {
-        return Task.Run(() => ApplyPlanning(bundle), cancellationToken);
+        return RunSerializedAsync(
+            () => ApplyPlanning(bundle, cancellationToken),
+            cancellationToken);
+    }
+
+    public Task<ApplyResult> ApplyMergeAsync(
+        CatalogBundle bundle,
+        CancellationToken cancellationToken)
+    {
+        return RunSerializedAsync(
+            () => ApplyMerge(bundle, cancellationToken),
+            cancellationToken);
+    }
+
+    private async Task<ApplyResult> RunSerializedAsync(
+        Func<ApplyResult> apply,
+        CancellationToken cancellationToken)
+    {
+        var gate = ApplyGates.GetOrAdd(databasePath, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await Task.Run(apply, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     private ApplyResult ApplyGrades(CatalogBundle bundle)
@@ -139,21 +176,109 @@ public sealed class TargetSchedulerCatalogWriter
         }
     }
 
-    private ApplyResult ApplyPlanning(CatalogBundle bundle)
+    private ApplyResult ApplyPlanning(
+        CatalogBundle bundle,
+        CancellationToken cancellationToken)
     {
         ValidateBundle(bundle, SyncOperation.PushPlanning);
-        foreach (var table in PlanningTables)
-        {
-            if (!bundle.Tables.ContainsKey(table))
-            {
-                throw new InvalidDataException($"Planning bundle has no {table} table.");
-            }
-        }
+        EnsureBundleTables(bundle, PlanningTables, "Planning");
 
         using var connection = OpenReadWrite();
         using var transaction = connection.BeginTransaction();
         var result = new MutableApplyResult();
+        _ = ApplyPlanningTables(
+            connection,
+            transaction,
+            bundle,
+            result,
+            preservePlanProgress: true,
+            cancellationToken);
 
+        transaction.Commit();
+        return result.ToImmutable();
+    }
+
+    private ApplyResult ApplyMerge(
+        CatalogBundle bundle,
+        CancellationToken cancellationToken)
+    {
+        ValidateBundle(bundle, SyncOperation.Merge);
+        EnsureBundleTables(bundle, RequiredMergeTables, "Merge");
+        EnsureRequiredColumns(
+            bundle.Tables["acquiredimage"],
+            "Id",
+            "guid",
+            "projectId",
+            "targetId",
+            "gradingStatus");
+        if (bundle.Tables.TryGetValue("imagedata", out var imageData))
+        {
+            EnsureRequiredColumns(imageData, "acquiredimageid", "tag");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        using var connection = OpenReadWrite();
+        using var cancellationRegistration = cancellationToken.Register(
+            static state => ((SQLiteConnection)state!).Cancel(),
+            connection);
+        using var transaction = connection.BeginTransaction();
+        try
+        {
+            var result = new MutableApplyResult();
+            var maps = ApplyPlanningTables(
+                connection,
+                transaction,
+                bundle,
+                result,
+                preservePlanProgress: false,
+                cancellationToken);
+            var affectedExposurePlans = new HashSet<long>(maps.ExposurePlans.Values);
+            var acquiredImageMap = UpsertAcquiredImages(
+                connection,
+                transaction,
+                bundle.Tables["acquiredimage"],
+                maps,
+                affectedExposurePlans,
+                result,
+                cancellationToken);
+
+            if (imageData is not null)
+            {
+                InsertMissingImageData(
+                    connection,
+                    transaction,
+                    imageData,
+                    acquiredImageMap,
+                    result,
+                    cancellationToken);
+            }
+
+            ReconcileExposurePlanCounts(
+                connection,
+                transaction,
+                affectedExposurePlans,
+                ReadExposurePlanCounts(connection, transaction));
+            cancellationToken.ThrowIfCancellationRequested();
+            transaction.Commit();
+            return result.ToImmutable();
+        }
+        catch (SQLiteException exception) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OperationCanceledException(
+                "Target Scheduler merge apply was canceled.",
+                exception,
+                cancellationToken);
+        }
+    }
+
+    private static PlanningMaps ApplyPlanningTables(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        CatalogBundle bundle,
+        MutableApplyResult result,
+        bool preservePlanProgress,
+        CancellationToken cancellationToken)
+    {
         var templateMap = UpsertGuidTable(
             connection,
             transaction,
@@ -161,7 +286,8 @@ public sealed class TargetSchedulerCatalogWriter
             bundle.Tables["exposuretemplate"],
             [],
             [],
-            result);
+            result,
+            cancellationToken);
         var projectMap = UpsertGuidTable(
             connection,
             transaction,
@@ -169,13 +295,15 @@ public sealed class TargetSchedulerCatalogWriter
             bundle.Tables["project"],
             [],
             [],
-            result);
+            result,
+            cancellationToken);
         UpsertRuleWeights(
             connection,
             transaction,
             bundle.Tables["ruleweight"],
             projectMap,
-            result);
+            result,
+            cancellationToken);
         var targetMap = UpsertGuidTable(
             connection,
             transaction,
@@ -183,8 +311,9 @@ public sealed class TargetSchedulerCatalogWriter
             bundle.Tables["target"],
             [new ForeignKeyMap("projectId", projectMap, false)],
             [],
-            result);
-        _ = UpsertGuidTable(
+            result,
+            cancellationToken);
+        var exposurePlanMap = UpsertGuidTable(
             connection,
             transaction,
             "exposureplan",
@@ -193,11 +322,210 @@ public sealed class TargetSchedulerCatalogWriter
                 new ForeignKeyMap("targetId", targetMap, false),
                 new ForeignKeyMap("exposureTemplateId", templateMap, false),
             ],
-            ["acquired", "accepted"],
-            result);
+            preservePlanProgress ? ["acquired", "accepted"] : [],
+            result,
+            cancellationToken);
 
-        transaction.Commit();
-        return result.ToImmutable();
+        return new PlanningMaps(projectMap, targetMap, exposurePlanMap);
+    }
+
+    private static Dictionary<long, long> UpsertAcquiredImages(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        BundleTable table,
+        PlanningMaps maps,
+        ISet<long> affectedExposurePlans,
+        MutableApplyResult result,
+        CancellationToken cancellationToken)
+    {
+        const string tableName = "acquiredimage";
+        var destinationColumns = ReadColumnNames(connection, transaction, tableName);
+        EnsureDestinationColumns(
+            destinationColumns,
+            tableName,
+            "Id",
+            "guid",
+            "projectId",
+            "targetId",
+            "gradingStatus");
+        var sourceColumns = table.Columns
+            .Select(column => column.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var writeColumns = destinationColumns
+            .Where(column => !column.Equals("Id", StringComparison.OrdinalIgnoreCase))
+            .Where(sourceColumns.Contains)
+            .ToArray();
+        var rows = RowsByColumn(table);
+        var duplicateSourceGuids = FindDuplicateGuids(rows);
+        var (destinations, duplicateDestinationGuids) = ReadGuidDestinations(
+            connection,
+            transaction,
+            tableName,
+            writeColumns);
+        var idMap = new Dictionary<long, long>();
+
+        using var insert = CreateInsertCommand(
+            connection,
+            transaction,
+            tableName,
+            writeColumns);
+        using var update = CreateUpdateCommand(
+            connection,
+            transaction,
+            tableName,
+            writeColumns);
+
+        foreach (var sourceRow in rows)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var sourceId = RequiredInteger(sourceRow, "Id");
+            var guid = OptionalText(sourceRow, "guid");
+            if (guid is null
+                || duplicateSourceGuids.Contains(guid)
+                || duplicateDestinationGuids.Contains(guid))
+            {
+                result.Skipped++;
+                continue;
+            }
+
+            var values = IntersectValues(sourceRow, writeColumns, excludeId: false);
+            if (!TryRemapRequiredForeignKey(values, "projectId", maps.Projects)
+                || !TryRemapRequiredForeignKey(values, "targetId", maps.Targets))
+            {
+                result.Skipped++;
+                continue;
+            }
+
+            RemapOptionalForeignKey(values, "exposureId", maps.ExposurePlans);
+            AddExposurePlan(affectedExposurePlans, DatabaseValue(values, "exposureId"));
+
+            if (destinations.TryGetValue(guid, out var destination))
+            {
+                idMap[sourceId] = destination.Id;
+                AddExposurePlan(
+                    affectedExposurePlans,
+                    DatabaseValue(destination.Values, "exposureId"));
+                if (RowsEqual(destination.Values, values))
+                {
+                    result.Unchanged++;
+                }
+                else
+                {
+                    ExecuteWriteCommand(update, writeColumns, values, destination.Id);
+                    result.Updated++;
+                }
+            }
+            else
+            {
+                ExecuteWriteCommand(insert, writeColumns, values);
+                idMap[sourceId] = connection.LastInsertRowId;
+                result.Inserted++;
+            }
+        }
+
+        return idMap;
+    }
+
+    private static void InsertMissingImageData(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        BundleTable table,
+        IReadOnlyDictionary<long, long> acquiredImageMap,
+        MutableApplyResult result,
+        CancellationToken cancellationToken)
+    {
+        const string tableName = "imagedata";
+        var destinationColumns = ReadColumnNames(connection, transaction, tableName);
+        EnsureDestinationColumns(
+            destinationColumns,
+            tableName,
+            "Id",
+            "tag",
+            "acquiredimageid");
+        var sourceColumns = table.Columns
+            .Select(column => column.Name)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var writeColumns = destinationColumns
+            .Where(column => !column.Equals("Id", StringComparison.OrdinalIgnoreCase))
+            .Where(sourceColumns.Contains)
+            .ToArray();
+        var existing = ReadImageDataKeys(connection, transaction);
+        using var insert = CreateInsertCommand(
+            connection,
+            transaction,
+            tableName,
+            writeColumns);
+
+        foreach (var sourceRow in RowsByColumn(table))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var sourceAcquiredImageId = RequiredInteger(sourceRow, "acquiredimageid");
+            if (!acquiredImageMap.TryGetValue(sourceAcquiredImageId, out var acquiredImageId))
+            {
+                result.Skipped++;
+                continue;
+            }
+
+            var tagValue = DatabaseValue(sourceRow, "tag");
+            if (tagValue is not null and not string)
+            {
+                throw new InvalidDataException("Image data tag is not text.");
+            }
+
+            var key = new ImageDataKey(acquiredImageId, (string?)tagValue);
+            if (!existing.Add(key))
+            {
+                result.Unchanged++;
+                continue;
+            }
+
+            var values = IntersectValues(sourceRow, writeColumns, excludeId: false);
+            values["acquiredimageid"] = acquiredImageId;
+            ExecuteWriteCommand(insert, writeColumns, values);
+            result.Inserted++;
+        }
+    }
+
+    private static bool TryRemapRequiredForeignKey(
+        IDictionary<string, object?> values,
+        string column,
+        IReadOnlyDictionary<long, long> idMap)
+    {
+        if (!values.TryGetValue(column, out var value) || value is null)
+        {
+            return false;
+        }
+
+        var sourceId = Convert.ToInt64(value);
+        if (!idMap.TryGetValue(sourceId, out var destinationId))
+        {
+            return false;
+        }
+
+        values[column] = destinationId;
+        return true;
+    }
+
+    private static void RemapOptionalForeignKey(
+        IDictionary<string, object?> values,
+        string column,
+        IReadOnlyDictionary<long, long> idMap)
+    {
+        if (!values.TryGetValue(column, out var value) || value is null)
+        {
+            return;
+        }
+
+        var sourceId = Convert.ToInt64(value);
+        values[column] = idMap.GetValueOrDefault(sourceId);
+    }
+
+    private static void AddExposurePlan(ISet<long> plans, object? value)
+    {
+        if (value is not null && Convert.ToInt64(value) > 0)
+        {
+            plans.Add(Convert.ToInt64(value));
+        }
     }
 
     private static Dictionary<long, long> UpsertGuidTable(
@@ -207,7 +535,8 @@ public sealed class TargetSchedulerCatalogWriter
         BundleTable table,
         IReadOnlyList<ForeignKeyMap> foreignKeys,
         IReadOnlyCollection<string> preserveProgress,
-        MutableApplyResult result)
+        MutableApplyResult result,
+        CancellationToken cancellationToken)
     {
         ValidatePlanningTable(tableName);
         EnsureRequiredColumns(table, "Id", "guid");
@@ -218,6 +547,7 @@ public sealed class TargetSchedulerCatalogWriter
 
         foreach (var sourceRow in rows)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var sourceId = RequiredInteger(sourceRow, "Id");
             var guid = OptionalText(sourceRow, "guid");
             if (guid is null)
@@ -327,12 +657,14 @@ public sealed class TargetSchedulerCatalogWriter
         SQLiteTransaction transaction,
         BundleTable table,
         IReadOnlyDictionary<long, long> projectMap,
-        MutableApplyResult result)
+        MutableApplyResult result,
+        CancellationToken cancellationToken)
     {
         EnsureRequiredColumns(table, "projectId", "name");
         var destinationColumns = ReadColumnNames(connection, transaction, "ruleweight");
         foreach (var sourceRow in RowsByColumn(table))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var sourceProjectId = RequiredInteger(sourceRow, "projectId");
             if (!projectMap.TryGetValue(sourceProjectId, out var projectId))
             {
@@ -533,6 +865,132 @@ public sealed class TargetSchedulerCatalogWriter
         return (rows, duplicateGuids, acceptedCounts);
     }
 
+    private static (
+        Dictionary<string, GuidDestination> Rows,
+        HashSet<string> DuplicateGuids) ReadGuidDestinations(
+            SQLiteConnection connection,
+            SQLiteTransaction transaction,
+            string table,
+            IReadOnlyList<string> columns)
+    {
+        ValidateGuidTable(table);
+        var guidIndex = columns
+            .Select((column, index) => (column, index))
+            .Where(item => item.column.Equals("guid", StringComparison.OrdinalIgnoreCase))
+            .Select(item => item.index)
+            .DefaultIfEmpty(-1)
+            .Single();
+        if (guidIndex < 0)
+        {
+            throw new InvalidDataException($"Target Scheduler table {table} has no guid column.");
+        }
+
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            $"SELECT Id, {string.Join(", ", columns.Select(Quote))} FROM {Quote(table)}";
+        using var reader = command.ExecuteReader();
+        var rows = new Dictionary<string, GuidDestination>(StringComparer.Ordinal);
+        var duplicateGuids = new HashSet<string>(StringComparer.Ordinal);
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(guidIndex + 1))
+            {
+                continue;
+            }
+
+            var guid = reader.GetString(guidIndex + 1);
+            if (string.IsNullOrWhiteSpace(guid) || duplicateGuids.Contains(guid))
+            {
+                continue;
+            }
+
+            var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            for (var index = 0; index < columns.Count; index++)
+            {
+                values[columns[index]] = reader.IsDBNull(index + 1)
+                    ? null
+                    : reader.GetValue(index + 1);
+            }
+
+            var row = new GuidDestination(reader.GetInt64(0), values);
+            if (!rows.TryAdd(guid, row))
+            {
+                rows.Remove(guid);
+                duplicateGuids.Add(guid);
+            }
+        }
+
+        return (rows, duplicateGuids);
+    }
+
+    private static HashSet<ImageDataKey> ReadImageDataKeys(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT acquiredimageid, tag FROM imagedata";
+        using var reader = command.ExecuteReader();
+        var keys = new HashSet<ImageDataKey>();
+        while (reader.Read())
+        {
+            keys.Add(
+                new ImageDataKey(
+                    reader.GetInt64(0),
+                    reader.IsDBNull(1) ? null : reader.GetString(1)));
+        }
+
+        return keys;
+    }
+
+    private static Dictionary<long, ExposurePlanCounts> ReadExposurePlanCounts(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            "SELECT exposureId, COUNT(*), "
+            + "SUM(CASE WHEN gradingStatus = 1 THEN 1 ELSE 0 END) "
+            + "FROM acquiredimage WHERE exposureId IS NOT NULL "
+            + "GROUP BY exposureId";
+        using var reader = command.ExecuteReader();
+        var counts = new Dictionary<long, ExposurePlanCounts>();
+        while (reader.Read())
+        {
+            counts[reader.GetInt64(0)] = new ExposurePlanCounts(
+                reader.GetInt64(1),
+                reader.GetInt64(2));
+        }
+
+        return counts;
+    }
+
+    private static void ReconcileExposurePlanCounts(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        IReadOnlyCollection<long> exposurePlanIds,
+        IReadOnlyDictionary<long, ExposurePlanCounts> counts)
+    {
+        using var update = connection.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText =
+            "UPDATE exposureplan SET acquired = @acquired, accepted = @accepted WHERE Id = @id";
+        var acquiredParameter = update.Parameters.AddWithValue("@acquired", 0L);
+        var acceptedParameter = update.Parameters.AddWithValue("@accepted", 0L);
+        var idParameter = update.Parameters.AddWithValue("@id", 0L);
+
+        foreach (var exposurePlanId in exposurePlanIds)
+        {
+            var planCounts = counts.GetValueOrDefault(exposurePlanId);
+            acquiredParameter.Value = planCounts.Acquired;
+            acceptedParameter.Value = planCounts.Accepted;
+            idParameter.Value = exposurePlanId;
+            update.ExecuteNonQuery();
+        }
+    }
+
     private static List<long> FindIdsByGuid(
         SQLiteConnection connection,
         SQLiteTransaction transaction,
@@ -617,7 +1075,7 @@ public sealed class TargetSchedulerCatalogWriter
         SQLiteTransaction transaction,
         string table)
     {
-        ValidatePlanningTable(table);
+        ValidateWritableTable(table);
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = $"PRAGMA table_info({Quote(table)})";
@@ -628,7 +1086,83 @@ public sealed class TargetSchedulerCatalogWriter
             names.Add(reader.GetString(1));
         }
 
+        if (names.Count == 0)
+        {
+            throw new InvalidDataException($"Target Scheduler table {table} is missing.");
+        }
+
         return names;
+    }
+
+    private static SQLiteCommand CreateInsertCommand(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        string table,
+        IReadOnlyList<string> columns)
+    {
+        ValidateWritableTable(table);
+        if (columns.Count == 0)
+        {
+            throw new InvalidDataException($"No compatible columns can be written to {table}.");
+        }
+
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            $"INSERT INTO {Quote(table)} ({string.Join(", ", columns.Select(Quote))}) "
+            + $"VALUES ({string.Join(", ", columns.Select((_, index) => $"@p{index}"))})";
+        AddWriteParameters(command, columns.Count);
+        return command;
+    }
+
+    private static SQLiteCommand CreateUpdateCommand(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        string table,
+        IReadOnlyList<string> columns)
+    {
+        ValidateWritableTable(table);
+        if (columns.Count == 0)
+        {
+            throw new InvalidDataException($"No compatible columns can be written to {table}.");
+        }
+
+        var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            $"UPDATE {Quote(table)} SET "
+            + string.Join(", ", columns.Select((column, index) => $"{Quote(column)} = @p{index}"))
+            + " WHERE Id = @id";
+        AddWriteParameters(command, columns.Count);
+        command.Parameters.AddWithValue("@id", 0L);
+        return command;
+    }
+
+    private static void AddWriteParameters(SQLiteCommand command, int count)
+    {
+        for (var index = 0; index < count; index++)
+        {
+            command.Parameters.AddWithValue($"@p{index}", DBNull.Value);
+        }
+    }
+
+    private static void ExecuteWriteCommand(
+        SQLiteCommand command,
+        IReadOnlyList<string> columns,
+        IReadOnlyDictionary<string, object?> values,
+        long? id = null)
+    {
+        for (var index = 0; index < columns.Count; index++)
+        {
+            command.Parameters[index].Value = values[columns[index]] ?? DBNull.Value;
+        }
+
+        if (id.HasValue)
+        {
+            command.Parameters["@id"].Value = id.Value;
+        }
+
+        command.ExecuteNonQuery();
     }
 
     private static long InsertRow(
@@ -717,6 +1251,20 @@ public sealed class TargetSchedulerCatalogWriter
     private static bool IsNumber(object value) =>
         value is byte or sbyte or short or ushort or int or uint or long or ulong or float or double or decimal;
 
+    private static void EnsureBundleTables(
+        CatalogBundle bundle,
+        IEnumerable<string> requiredTables,
+        string label)
+    {
+        foreach (var table in requiredTables)
+        {
+            if (!bundle.Tables.ContainsKey(table))
+            {
+                throw new InvalidDataException($"{label} bundle has no {table} table.");
+            }
+        }
+    }
+
     private static void EnsureRequiredColumns(BundleTable table, params string[] names)
     {
         var columns = table.Columns.Select(column => column.Name).ToHashSet(
@@ -730,10 +1278,31 @@ public sealed class TargetSchedulerCatalogWriter
         }
     }
 
+    private static void EnsureDestinationColumns(
+        IReadOnlyCollection<string> columns,
+        string table,
+        params string[] required)
+    {
+        var available = columns.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var column in required)
+        {
+            if (!available.Contains(column))
+            {
+                throw new InvalidDataException(
+                    $"Target Scheduler table {table} is missing required column {column}.");
+            }
+        }
+    }
+
     private static object? DatabaseValue(
         IReadOnlyDictionary<string, WireValue> row,
         string name) =>
         row.TryGetValue(name, out var value) ? value.ToDatabaseValue() : null;
+
+    private static object? DatabaseValue(
+        IReadOnlyDictionary<string, object?> row,
+        string name) =>
+        row.TryGetValue(name, out var value) ? value : null;
 
     private static long RequiredInteger(
         IReadOnlyDictionary<string, WireValue> row,
@@ -786,6 +1355,21 @@ public sealed class TargetSchedulerCatalogWriter
         }
     }
 
+    private static void ValidateWritableTable(string table)
+    {
+        if (table is not (
+            "acquiredimage"
+            or "exposuretemplate"
+            or "project"
+            or "ruleweight"
+            or "target"
+            or "exposureplan"
+            or "imagedata"))
+        {
+            throw new ArgumentOutOfRangeException(nameof(table), table, "Table is not writable sync data.");
+        }
+    }
+
     private static string Quote(string identifier) =>
         $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
@@ -793,6 +1377,19 @@ public sealed class TargetSchedulerCatalogWriter
         string Column,
         IReadOnlyDictionary<long, long> Map,
         bool ZeroWhenMissing);
+
+    private sealed record PlanningMaps(
+        IReadOnlyDictionary<long, long> Projects,
+        IReadOnlyDictionary<long, long> Targets,
+        IReadOnlyDictionary<long, long> ExposurePlans);
+
+    private sealed record GuidDestination(
+        long Id,
+        IReadOnlyDictionary<string, object?> Values);
+
+    private sealed record ImageDataKey(long AcquiredImageId, string? Tag);
+
+    private readonly record struct ExposurePlanCounts(long Acquired, long Accepted);
 
     private sealed class MutableApplyResult
     {

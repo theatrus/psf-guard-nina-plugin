@@ -73,6 +73,7 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
                 <TextBlock
@@ -129,6 +130,17 @@
                     Margin="0,5,0,0"
                     HorizontalAlignment="Left"
                     IsChecked="{Binding IncludeThumbnails}" />
+                <TextBlock
+                    Grid.Row="5"
+                    Margin="0,5,0,0"
+                    VerticalAlignment="Center"
+                    Text="Pull merged catalog back after full reconcile" />
+                <CheckBox
+                    Grid.Row="5"
+                    Grid.Column="1"
+                    Margin="0,5,0,0"
+                    HorizontalAlignment="Left"
+                    IsChecked="{Binding RoundTripReconcile}" />
             </Grid>
 
             <StackPanel Grid.Row="6" Grid.ColumnSpan="2" Margin="0,14,0,0" Orientation="Horizontal">
@@ -171,12 +183,43 @@
                     Content="Pull grades" />
                 <Button
                     MinWidth="120"
+                    Margin="0,0,8,0"
                     Command="{Binding RetryBlockedCommand}"
                     Content="Retry blocked" />
+                <Button
+                    MinWidth="120"
+                    Command="{Binding PullMergedCatalogCommand}"
+                    Content="Pull catalog" />
             </StackPanel>
 
+            <Grid Grid.Row="8" Grid.ColumnSpan="2" Margin="0,14,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock
+                    Margin="0,0,12,0"
+                    VerticalAlignment="Center"
+                    Text="{Binding PendingPreviewStatus}"
+                    TextWrapping="Wrap" />
+                <Button
+                    Grid.Column="1"
+                    MinWidth="110"
+                    Margin="0,0,8,0"
+                    Command="{Binding ApplyPreviewCommand}"
+                    Content="Apply preview"
+                    IsEnabled="{Binding HasPendingPreview}" />
+                <Button
+                    Grid.Column="2"
+                    MinWidth="110"
+                    Command="{Binding ForgetPreviewCommand}"
+                    Content="Forget preview"
+                    IsEnabled="{Binding HasPendingPreview}" />
+            </Grid>
+
             <Border
-                Grid.Row="8"
+                Grid.Row="9"
                 Grid.ColumnSpan="2"
                 Margin="0,14,0,0"
                 Padding="10"

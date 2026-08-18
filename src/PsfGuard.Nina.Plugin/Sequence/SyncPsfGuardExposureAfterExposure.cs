@@ -85,12 +85,13 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
             .ConfigureAwait(false);
         if (!globalSync)
         {
+            var autoApply = RequireAutomaticApply();
             Report(progress, "Waiting for scheduler...");
             await CreateOrchestrator()
                 .PushCapturedImageAsync(
                     capture.ImagePath,
                     capture.ExposureStart,
-                    AutoApplyPushes,
+                    autoApply,
                     token)
                 .ConfigureAwait(false);
         }
@@ -116,6 +117,8 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
 
     public override string ToString() =>
         $"Trigger: {nameof(SyncPsfGuardExposureAfterExposure)}, UploadImage: {UploadImage}";
+
+    protected override bool RequiresAutomaticApply => !IsGlobalCapturePushEnabled;
 
     private void ImageSaved(object? sender, ImageSavedEventArgs args)
     {

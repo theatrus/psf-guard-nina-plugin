@@ -74,7 +74,9 @@ internal sealed class TestDatabase : IDisposable
                 Id INTEGER PRIMARY KEY,
                 tag TEXT,
                 imagedata BLOB,
-                acquiredimageid INTEGER
+                acquiredimageid INTEGER,
+                width INTEGER,
+                height INTEGER
             );
             """);
     }
@@ -125,8 +127,8 @@ internal sealed class TestDatabase : IDisposable
                 VALUES (@imageId, @projectId, @targetId, @date, 'L', @grade, @metadata,
                         @reason, 'profile', @planId, 'image-guid');
             INSERT INTO imagedata
-                (Id, tag, imagedata, acquiredimageid)
-                VALUES (@imageDataId, '', X'010203', @imageId);
+                (Id, tag, imagedata, acquiredimageid, width, height)
+                VALUES (@imageDataId, '', X'010203', @imageId, 64, 48);
             """,
             new Dictionary<string, object?>
             {
@@ -144,6 +146,43 @@ internal sealed class TestDatabase : IDisposable
                 ["@grade"] = grade,
                 ["@metadata"] = """{"FileName":"C:\\Images\\m31-001.fits"}""",
                 ["@reason"] = rejectReason,
+            });
+    }
+
+    public void DeleteCaptures()
+    {
+        using var connection = Open();
+        connection.Execute(
+            """
+            DELETE FROM imagedata;
+            DELETE FROM acquiredimage;
+            UPDATE exposureplan SET acquired = 0, accepted = 0;
+            """);
+    }
+
+    public void AddImageData(
+        long id,
+        long acquiredImageId,
+        string? tag,
+        byte[] data,
+        int width = 64,
+        int height = 48)
+    {
+        using var connection = Open();
+        connection.Execute(
+            """
+            INSERT INTO imagedata
+                (Id, tag, imagedata, acquiredimageid, width, height)
+                VALUES (@id, @tag, @data, @acquiredImageId, @width, @height)
+            """,
+            new Dictionary<string, object?>
+            {
+                ["@id"] = id,
+                ["@tag"] = tag,
+                ["@data"] = data,
+                ["@acquiredImageId"] = acquiredImageId,
+                ["@width"] = width,
+                ["@height"] = height,
             });
     }
 

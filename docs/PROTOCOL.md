@@ -29,7 +29,7 @@ GET /api/sync/v1/capabilities
   "protocol_version": 1,
   "product": "psf-guard",
   "product_version": "0.6.0",
-  "capabilities": ["merge", "push_planning", "push_grades", "preview_apply", "preview_refresh", "async_preview_jobs", "exports", "image_upload"],
+  "capabilities": ["merge", "push_planning", "push_grades", "preview_apply", "preview_refresh", "async_preview_jobs", "exports", "merge_export_without_image_data", "image_upload"],
   "catalogs": [
     {
       "id": "review",
@@ -129,10 +129,16 @@ POST /api/sync/v1/exports
 {
   "protocol_version": 1,
   "catalog_id": "review",
-  "operation": "push_grades",
-  "reviewed_only": true
+  "operation": "merge",
+  "reviewed_only": false,
+  "with_image_data": false
 }
 ```
+
+For a full `merge` export, `with_image_data: false` requires the
+`merge_export_without_image_data` capability. A client must check the capability
+before requesting a thumbnail-free round trip because an older server may ignore
+the field and return `imagedata`.
 
 The server may return a ready export immediately:
 
@@ -152,10 +158,13 @@ GET /api/sync/v1/exports/{export_id}
 
 until `ready` or `failed`.
 
-The plugin accepts only:
+The plugin accepts these export operations:
 
 - `push_planning` for a local planning apply
 - `push_grades` for a local grade apply
+- `merge` for a transactional full-catalog apply after the server advertises
+  `merge_export_without_image_data`; the bundle must contain the planning and
+  `acquiredimage` tables and must not contain `imagedata`
 
 It does not accept remote SQL, table names outside its allowlist, deletes, or
 an arbitrary local database path.

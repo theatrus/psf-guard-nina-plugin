@@ -50,8 +50,9 @@ public sealed class PsfGuardSyncClientTests
             bundle.BundleId.ToString("D"),
             captured.Headers.GetValues("Idempotency-Key").Single());
         Assert.Equal("respond-async", captured.Headers.GetValues("Prefer").Single());
+        Assert.Equal("application/json", captured.Content!.Headers.ContentType!.MediaType);
 
-        var body = await captured.Content!.ReadAsStringAsync();
+        var body = await captured.Content.ReadAsStringAsync();
         using var json = JsonDocument.Parse(body);
         Assert.Equal(
             "review",
@@ -104,6 +105,88 @@ public sealed class PsfGuardSyncClientTests
     }
 
     [Fact]
+    public async Task PreviewReportsUploadBytesAndAsyncJobIdentity()
+    {
+        var calls = 0;
+        var uploadedBytes = 0L;
+        var updates = new List<SyncProgress>();
+        var handler = new StubHandler(
+            async request =>
+            {
+                calls++;
+                if (request.Method == HttpMethod.Post)
+                {
+                    uploadedBytes = (await request.Content!.ReadAsByteArrayAsync()).LongLength;
+                    return Json(
+                        """{"job_id":"job-visible","state":"running"}""",
+                        HttpStatusCode.Accepted);
+                }
+
+                return Json(
+                    """
+                    {
+                      "job_id":"job-visible",
+                      "state":"ready",
+                      "preview":{
+                        "preview_id":"preview-visible",
+                        "state":"ready",
+                        "expires_at":"2026-08-18T04:00:00Z"
+                      }
+                    }
+                    """);
+            });
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(handler),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        var preview = await client.CreatePreviewAsync(
+            "review",
+            Bundle(),
+            CancellationToken.None,
+            new RecordingProgress<SyncProgress>(updates.Add));
+
+        Assert.Equal(2, calls);
+        Assert.Equal("preview-visible", preview.PreviewId);
+        Assert.Equal(
+            DateTimeOffset.Parse("2026-08-18T04:00:00Z"),
+            preview.ExpiresAt);
+        var byteUpdates = updates
+            .Where(update => update.BytesTransferred.HasValue)
+            .ToList();
+        Assert.NotEmpty(byteUpdates);
+        Assert.Equal(uploadedBytes, byteUpdates[^1].BytesTransferred);
+        Assert.Contains(
+            updates,
+            update => update.Stage == SyncProgressStage.WaitingForPreview
+                && update.JobId == "job-visible");
+    }
+
+    [Fact]
+    public async Task FailedPreviewUploadDoesNotReportThatPsfGuardAcceptedIt()
+    {
+        var updates = new List<SyncProgress>();
+        var handler = new StubHandler(
+            _ => Task.FromResult(
+                Json("""{"error":"nope"}""", HttpStatusCode.Unauthorized)));
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(handler),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        await Assert.ThrowsAsync<HttpRequestException>(
+            () => client.CreatePreviewAsync(
+                "review",
+                Bundle(),
+                CancellationToken.None,
+                new RecordingProgress<SyncProgress>(updates.Add)));
+
+        Assert.DoesNotContain(
+            updates,
+            update => update.Message.Contains("accepted", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task RefreshPostsToTheExistingPreview()
     {
         HttpRequestMessage? captured = null;
@@ -130,22 +213,27 @@ public sealed class PsfGuardSyncClientTests
     public async Task DownloadExportPollsUntilReady()
     {
         var calls = 0;
+        string? requestBody = null;
         var bundle = Bundle();
         var handler = new StubHandler(
-            request =>
+            async request =>
             {
                 calls++;
-                return Task.FromResult(
-                    calls == 1
-                        ? Json("""{"export_id":"export-1","state":"running"}""")
-                        : Json(
-                            $$"""
-                            {
-                              "export_id": "export-1",
-                              "state": "ready",
-                              "bundle": {{ProtocolJson.Serialize(bundle)}}
-                            }
-                            """));
+                if (request.Content is not null)
+                {
+                    requestBody = await request.Content.ReadAsStringAsync();
+                }
+
+                return calls == 1
+                    ? Json("""{"export_id":"export-1","state":"running"}""")
+                    : Json(
+                        $$"""
+                        {
+                          "export_id": "export-1",
+                          "state": "ready",
+                          "bundle": {{ProtocolJson.Serialize(bundle)}}
+                        }
+                        """);
             });
         using var client = new PsfGuardSyncClient(
             new HttpClient(handler),
@@ -160,6 +248,40 @@ public sealed class PsfGuardSyncClientTests
 
         Assert.Equal(bundle.BundleId, downloaded.BundleId);
         Assert.Equal(2, calls);
+        using var json = JsonDocument.Parse(requestBody!);
+        Assert.False(json.RootElement.TryGetProperty("with_image_data", out _));
+    }
+
+    [Fact]
+    public async Task MergeExportExplicitlyExcludesImageData()
+    {
+        string? requestBody = null;
+        var bundle = Bundle() with { Operation = SyncOperation.Merge };
+        bundle.Seal();
+        var handler = new StubHandler(
+            async request =>
+            {
+                requestBody = await request.Content!.ReadAsStringAsync();
+                return Json(
+                    $$"""
+                    {"export_id":"export-merge","state":"ready","bundle":{{ProtocolJson.Serialize(bundle)}}}
+                    """);
+            });
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(handler),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        var downloaded = await client.DownloadExportAsync(
+            "review",
+            SyncOperation.Merge,
+            reviewedOnly: false,
+            withImageData: false,
+            CancellationToken.None);
+
+        Assert.Equal(SyncOperation.Merge, downloaded.Operation);
+        using var json = JsonDocument.Parse(requestBody!);
+        Assert.False(json.RootElement.GetProperty("with_image_data").GetBoolean());
     }
 
     [Fact]
@@ -368,5 +490,10 @@ public sealed class PsfGuardSyncClientTests
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken) => send(request);
+    }
+
+    private sealed class RecordingProgress<T>(Action<T> record) : IProgress<T>
+    {
+        public void Report(T value) => record(value);
     }
 }

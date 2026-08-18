@@ -7,7 +7,7 @@ using NINA.Sequencer.SequenceItem;
 namespace PsfGuard.Nina.Plugin.Sequence;
 
 [ExportMetadata("Name", "Push PSF Guard grades")]
-[ExportMetadata("Description", "Push reviewed Target Scheduler grades and rejection reasons to PSF Guard")]
+[ExportMetadata("Description", "Push and apply reviewed Target Scheduler grades and rejection reasons")]
 [ExportMetadata("Icon", "LoopSVG")]
 [ExportMetadata("Category", "PSF Guard Sync")]
 [Export(typeof(ISequenceItem))]
@@ -32,7 +32,7 @@ public sealed class PushPsfGuardGrades : PsfGuardSequenceItemBase
         using var status = BeginStatus(progress);
         Report(progress, "Pushing grades...");
         await CreateOrchestrator()
-            .PushGradesAsync(AutoApplyPushes, token)
+            .PushGradesAsync(RequireAutomaticApply(), token)
             .ConfigureAwait(false);
     }
 
@@ -40,4 +40,6 @@ public sealed class PushPsfGuardGrades : PsfGuardSequenceItemBase
 
     public override string ToString() =>
         $"Category: {Category}, Item: {nameof(PushPsfGuardGrades)}";
+
+    protected override bool RequiresAutomaticApply => true;
 }
