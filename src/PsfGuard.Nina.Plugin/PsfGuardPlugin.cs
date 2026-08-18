@@ -75,6 +75,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
 
         TestConnectionCommand = CreateManualCommand(
             () => RunCommandAsync(TestConnectionAsync, "Testing the PSF Guard connection..."));
+        PairCommand = CreateManualCommand(
+            () => RunCommandAsync(PairAsync, "Pairing with PSF Guard..."));
         PushAllCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
@@ -218,6 +220,22 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
 
     public ICommand TestConnectionCommand { get; }
+
+    public ICommand PairCommand { get; }
+
+    private string pairingCode = string.Empty;
+
+    /// <summary>One-time code from PSF Guard Settings. Never persisted —
+    /// pairing consumes it and stores the returned credential instead.</summary>
+    public string PairingCode
+    {
+        get => pairingCode;
+        set
+        {
+            pairingCode = value ?? string.Empty;
+            RaisePropertyChanged();
+        }
+    }
 
     public ICommand PushAllCommand { get; }
 
@@ -554,6 +572,34 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
             CatalogId = CatalogId,
             CredentialReference = settings.CredentialReference,
         };
+    }
+
+    private async Task<string> PairAsync(CancellationToken cancellationToken)
+    {
+        if (!Uri.TryCreate(ServerUrl, UriKind.Absolute, out var serverUri))
+        {
+            throw new InvalidOperationException("Enter a valid absolute PSF Guard server URL.");
+        }
+        if (string.IsNullOrWhiteSpace(PairingCode))
+        {
+            throw new InvalidOperationException(
+                "Enter the pairing code from PSF Guard Settings (Pair a client).");
+        }
+
+        // No API token: the pairing code is the entire authorization.
+        using var client = CreateClient(serverUri, apiToken: string.Empty);
+        var paired = await client.PairAsync(
+                PairingCode,
+                $"{Environment.MachineName} · {settings.ProfileName}",
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        CatalogId = paired.CatalogId;
+        ApiToken = paired.Token;
+        PairingCode = string.Empty;
+        return $"Paired with {paired.Product} {paired.ProductVersion}; "
+            + $"catalog {paired.CatalogName} ({paired.CatalogId}). "
+            + "The credential is stored — the code is now used up.";
     }
 
     private async Task<string> TestConnectionAsync(CancellationToken cancellationToken)

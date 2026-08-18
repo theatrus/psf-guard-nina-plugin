@@ -213,6 +213,53 @@ public sealed class PsfGuardSyncClientTests
     }
 
     [Fact]
+    public async Task PairExchangesTheCodeForACredential()
+    {
+        HttpRequestMessage? captured = null;
+        var handler = new StubHandler(
+            async request =>
+            {
+                captured = await CloneAsync(request);
+                return Json(
+                    """
+                    {
+                      "success": true,
+                      "data": {
+                        "catalog_id": "review",
+                        "catalog_name": "Review copy",
+                        "client_uuid": "client-1",
+                        "token": "psfrc_secret",
+                        "product": "PSF Guard",
+                        "product_version": "0.8.0"
+                      }
+                    }
+                    """);
+            });
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(handler),
+            new Uri("https://psf.example/"),
+            apiToken: null);
+
+        var paired = await client.PairAsync(
+            " psfpt_code ",
+            "OBSERVATORY-PC",
+            CancellationToken.None);
+
+        Assert.Equal("review", paired.CatalogId);
+        Assert.Equal("psfrc_secret", paired.Token);
+        Assert.Equal("client-1", paired.ClientUuid);
+        Assert.Equal(
+            "https://psf.example/api/sync/v1/pair",
+            captured!.RequestUri!.AbsoluteUri);
+        Assert.Null(captured.Headers.Authorization);
+        var body = await captured.Content!.ReadAsStringAsync();
+        using var json = JsonDocument.Parse(body);
+        Assert.Equal(1, json.RootElement.GetProperty("protocol_version").GetInt32());
+        Assert.Equal("psfpt_code", json.RootElement.GetProperty("pairing_token").GetString());
+        Assert.Equal("OBSERVATORY-PC", json.RootElement.GetProperty("client_name").GetString());
+    }
+
+    [Fact]
     public async Task DownloadExportPollsUntilReady()
     {
         var calls = 0;

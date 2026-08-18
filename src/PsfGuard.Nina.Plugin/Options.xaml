@@ -49,11 +49,25 @@
                 Text="{Binding CatalogId, UpdateSourceTrigger=LostFocus}" />
 
             <TextBlock Grid.Row="3" Margin="0,4,12,4" VerticalAlignment="Center" Text="Remote API key" />
-            <TextBox
-                Grid.Row="3"
-                Grid.Column="1"
-                Margin="0,4"
-                Text="{Binding ApiToken, UpdateSourceTrigger=LostFocus}" />
+            <StackPanel Grid.Row="3" Grid.Column="1" Margin="0,4" Orientation="Vertical">
+                <TextBox Text="{Binding ApiToken, UpdateSourceTrigger=LostFocus}" />
+                <StackPanel Margin="0,6,0,0" Orientation="Horizontal">
+                    <TextBox
+                        MinWidth="320"
+                        VerticalAlignment="Center"
+                        Text="{Binding PairingCode, UpdateSourceTrigger=PropertyChanged}" />
+                    <Button
+                        Margin="8,0,0,0"
+                        Padding="10,2"
+                        Command="{Binding PairCommand}"
+                        Content="Pair" />
+                    <TextBlock
+                        Margin="8,0,0,0"
+                        VerticalAlignment="Center"
+                        Opacity="0.7"
+                        Text="Paste a one-time pairing code from PSF Guard Settings; it fills the key and catalog for you." />
+                </StackPanel>
+            </StackPanel>
 
             <TextBlock Grid.Row="4" Margin="0,4,12,4" VerticalAlignment="Center" Text="Scheduler database (optional)" />
             <TextBox

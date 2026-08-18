@@ -91,4 +91,8 @@ internal sealed class PluginSettings
 
     public string CredentialReference =>
         $"PSFGuard.Nina.Plugin/{profileService.ActiveProfile.Id:D}";
+
+    /// <summary>Active profile name, for the operator-facing client label
+    /// a pairing sends ("MACHINE · Profile").</summary>
+    public string ProfileName => profileService.ActiveProfile?.Name ?? "N.I.N.A.";
 }
