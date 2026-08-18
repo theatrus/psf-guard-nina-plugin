@@ -1,6 +1,8 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using PsfGuard.Nina.Sync.Client;
+using PsfGuard.Nina.Sync.Protocol;
 using PsfGuard.Nina.Sync.TargetScheduler;
 
 namespace PsfGuard.Nina.Sync.Tests;
@@ -89,6 +91,131 @@ public sealed class SyncOrchestratorTests
         Assert.Contains("expected 'applied'", exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task ManualReconcileReportsStagesAndCanApplyItsPendingPreview()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0, grade: 2, rejectReason: "Clouds");
+        var calls = 0;
+        var updates = new List<SyncProgress>();
+        var orchestrator = Orchestrator(
+            database.Path,
+            request =>
+            {
+                calls++;
+                return request.RequestUri!.AbsolutePath.EndsWith("/apply", StringComparison.Ordinal)
+                    ? Json(
+                        """
+                        {"state":"applied","summary":{"total_inserted":5,"total_updated":6}}
+                        """)
+                    : Json(
+                        """
+                        {
+                          "preview_id":"preview-pending",
+                          "state":"ready",
+                          "expires_at":"2100-01-01T00:00:00Z",
+                          "summary":{"total_inserted":1,"total_updated":2}
+                        }
+                        """);
+            });
+        var progress = new RecordingProgress<SyncProgress>(updates.Add);
+
+        var pending = await orchestrator.ReconcileCatalogAsync(
+            apply: false,
+            CancellationToken.None,
+            progress);
+        var applied = await orchestrator.ApplyPreviewAsync(
+            pending,
+            CancellationToken.None,
+            progress);
+
+        Assert.Equal(2, calls);
+        Assert.False(pending.Applied);
+        Assert.Equal(
+            DateTimeOffset.Parse("2100-01-01T00:00:00Z"),
+            pending.ExpiresAt);
+        Assert.True(applied.Applied);
+        Assert.True(applied.TryGetChangeCounts(out var inserted, out var updated));
+        Assert.Equal(5, inserted);
+        Assert.Equal(6, updated);
+        Assert.Contains(updates, update => update.Stage == SyncProgressStage.ReadingCatalog);
+        Assert.Contains(updates, update => update.Stage == SyncProgressStage.BundleReady);
+        Assert.Contains(updates, update => update.Stage == SyncProgressStage.UploadingBundle);
+        Assert.Contains(updates, update => update.Stage == SyncProgressStage.WaitingForPreview);
+        Assert.Contains(updates, update => update.Stage == SyncProgressStage.ApplyingPreview);
+        Assert.Contains(updates, update => update.Stage == SyncProgressStage.Completed);
+    }
+
+    [Fact]
+    public async Task RoundTripPreflightRequiresCatalogExports()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0);
+        var calls = 0;
+        var orchestrator = Orchestrator(
+            database.Path,
+            _ =>
+            {
+                calls++;
+                return Capabilities([]);
+            });
+
+        var exception = await Assert.ThrowsAsync<NotSupportedException>(
+            () => orchestrator.EnsureRoundTripSupportedAsync(CancellationToken.None));
+
+        Assert.Equal(1, calls);
+        Assert.Contains("catalog exports", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task PullMergedCatalogRequestsNoImageDataAndAppliesTheExport()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0, grade: 2, rejectReason: "Clouds");
+        destination.Seed(100, grade: 0);
+        var sourceReader = new TargetSchedulerCatalogReader(source.Path, "5.9.6.0");
+        var bundle = await sourceReader.BuildFullMergeBundleAsync(
+            includeThumbnails: false,
+            CancellationToken.None);
+        string? exportRequest = null;
+        var updates = new List<SyncProgress>();
+        var orchestrator = Orchestrator(
+            destination.Path,
+            request =>
+            {
+                if (request.Method == HttpMethod.Get)
+                {
+                    return Capabilities([SyncOrchestrator.ExportsCapability]);
+                }
+
+                exportRequest = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+                return Json(
+                    $$"""
+                    {"export_id":"export-merge","state":"ready","bundle":{{ProtocolJson.Serialize(bundle)}}}
+                    """);
+            });
+
+        var result = await orchestrator.PullMergedCatalogAsync(
+            CancellationToken.None,
+            new RecordingProgress<SyncProgress>(updates.Add));
+
+        Assert.True(result.Updated > 0);
+        using var requestJson = JsonDocument.Parse(exportRequest!);
+        Assert.False(requestJson.RootElement.GetProperty("include_thumbnails").GetBoolean());
+        using var connection = destination.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT gradingStatus, rejectreason FROM acquiredimage WHERE guid = 'image-guid'";
+        using var row = command.ExecuteReader();
+        Assert.True(row.Read());
+        Assert.Equal(2, row.GetInt32(0));
+        Assert.Equal("Clouds", row.GetString(1));
+        Assert.Contains(updates, update => update.Stage == SyncProgressStage.DownloadingCatalog);
+        Assert.Contains(updates, update => update.Stage == SyncProgressStage.ApplyingCatalog);
+        Assert.Contains(updates, update => update.Stage == SyncProgressStage.Completed);
+    }
+
     private static SyncOrchestrator Orchestrator(
         string databasePath,
         Func<HttpRequestMessage, HttpResponseMessage> send) => new(
@@ -107,11 +234,28 @@ public sealed class SyncOrchestratorTests
         Content = new StringContent(body, Encoding.UTF8, "application/json"),
     };
 
+    private static HttpResponseMessage Capabilities(IReadOnlyList<string> capabilities) =>
+        Json(
+            $$"""
+            {
+              "protocol_version":1,
+              "product":"PSF Guard",
+              "product_version":"1.0.0",
+              "capabilities":{{JsonSerializer.Serialize(capabilities)}},
+              "catalogs":[{"id":"catalog-a","name":"Catalog A","readable":true,"writable":true}]
+            }
+            """);
+
     private sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> send)
         : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
             CancellationToken cancellationToken) => Task.FromResult(send(request));
+    }
+
+    private sealed class RecordingProgress<T>(Action<T> record) : IProgress<T>
+    {
+        public void Report(T value) => record(value);
     }
 }

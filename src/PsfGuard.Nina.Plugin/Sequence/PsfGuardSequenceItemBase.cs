@@ -41,19 +41,26 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
     }
 
     protected bool AutoApplyPushes => settings.AutoApplyPushes;
+    protected bool RoundTripReconcile => settings.RoundTripReconcile;
     protected virtual bool RequiresTargetScheduler => true;
 
     protected SyncOrchestrator CreateOrchestrator()
     {
+        var serverUri = new Uri(settings.ServerUrl, UriKind.Absolute);
+        var apiToken = settings.ApiToken;
+        var catalogId = settings.CatalogId;
+        var autoApplyPushes = settings.AutoApplyPushes;
+        var includeThumbnails = settings.IncludeThumbnails;
+        var targetSchedulerDatabase = settings.TargetSchedulerDatabase;
         var reader = new TargetSchedulerCatalogReader(
-            settings.TargetSchedulerDatabase,
+            targetSchedulerDatabase,
             TargetSchedulerVersion());
-        var writer = new TargetSchedulerCatalogWriter(settings.TargetSchedulerDatabase);
+        var writer = new TargetSchedulerCatalogWriter(targetSchedulerDatabase);
         return new SyncOrchestrator(
-            settings.CatalogId,
-            settings.AutoApplyPushes,
-            settings.IncludeThumbnails,
-            CreateClient,
+            catalogId,
+            autoApplyPushes,
+            includeThumbnails,
+            () => CreateClient(serverUri, apiToken),
             reader,
             writer);
     }
@@ -107,6 +114,14 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
         PsfGuardStatus.Report(progress, status);
     }
 
+    protected static IProgress<SyncProgress> CreateSyncProgress(
+        IProgress<ApplicationStatus>? progress) =>
+        PsfGuardStatus.CreateSyncProgress(progress);
+
+    protected virtual void AddValidationIssues(List<string> validationIssues)
+    {
+    }
+
     public bool Validate()
     {
         var validationIssues = new List<string>();
@@ -143,15 +158,13 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
             validationIssues.Add("Configure an existing Target Scheduler database.");
         }
 
+        AddValidationIssues(validationIssues);
         Issues = validationIssues;
         return validationIssues.Count == 0;
     }
 
-    private PsfGuardSyncClient CreateClient()
-    {
-        var uri = new Uri(settings.ServerUrl, UriKind.Absolute);
-        return new PsfGuardSyncClient(new HttpClient(), uri, settings.ApiToken);
-    }
+    private static PsfGuardSyncClient CreateClient(Uri serverUri, string apiToken) =>
+        new(new HttpClient(), serverUri, apiToken);
 
     private static string TargetSchedulerVersion()
     {
@@ -164,4 +177,5 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
             ?? assembly?.GetName().Version?.ToString()
             ?? "unknown";
     }
+
 }

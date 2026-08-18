@@ -88,12 +88,17 @@ public sealed class ReconcilePsfGuardTargetAfterExposures : PsfGuardSequenceTrig
         CancellationToken token)
     {
         using var status = BeginStatus(progress);
+        var autoApply = AutoApplyPushes;
         var targetName = currentTargetName ?? RequireCurrentTargetName(context);
         Report(progress, "Waiting for scheduler...");
         await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
         Report(progress, $"Reconciling {targetName}...");
         await CreateOrchestrator()
-            .ReconcileTargetAsync(targetName, AutoApplyPushes, token)
+            .ReconcileTargetAsync(
+                targetName,
+                autoApply,
+                token,
+                CreateSyncProgress(progress))
             .ConfigureAwait(false);
     }
 

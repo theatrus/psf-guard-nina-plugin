@@ -85,12 +85,13 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
             .ConfigureAwait(false);
         if (!globalSync)
         {
+            var autoApply = AutoApplyPushes;
             Report(progress, "Waiting for scheduler...");
             await CreateOrchestrator()
                 .PushCapturedImageAsync(
                     capture.ImagePath,
                     capture.ExposureStart,
-                    AutoApplyPushes,
+                    autoApply,
                     token)
                 .ConfigureAwait(false);
         }

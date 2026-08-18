@@ -113,9 +113,21 @@ has enabled its separate upload gate.
 Use **Reconcile** for an immediate full Target Scheduler snapshot. It waits for
 PSF Guard to create the preview and follows **Apply remote previews
 automatically**; when automatic apply is off, the status reports the preview ID
-left ready for review. The completion status uses PSF Guard's apply result and
-reports inserted and updated counts when the server supplies them. **Push all**
-remains the durable queue-based equivalent.
+left ready for review. The plugin keeps that manual preview available beside the
+status area so it can be applied or forgotten before its server expiry. Reconcile
+reports catalog-read, upload, remote-job, and apply phases in both the settings
+status and the N.I.N.A. log. The completion status uses PSF Guard's apply result
+and reports inserted and updated counts when the server supplies them. **Push
+all** remains the durable queue-based equivalent.
+
+Enable **Pull merged catalog back after full reconcile** for a round trip: after
+PSF Guard applies the incoming snapshot, the plugin downloads the resulting
+catalog with `include_thumbnails: false` and transactionally merges it back into
+Target Scheduler. This requires the thumbnail export option introduced by
+[PSF Guard #353](https://github.com/theatrus/psf-guard/pull/353). The plugin
+rejects a legacy response that still contains `imagedata`. Sequencer round trips
+require automatic preview apply; ordinary sequencer pushes may leave a staged
+preview for PSF Guard #353's Data Transfer UI.
 
 Queue records retain their original server, catalog, and profile-specific
 Credential Manager reference. They never store the API key itself and never
@@ -170,9 +182,8 @@ policy for those exposures.
 Reconciliation instructions wait two seconds for final Target Scheduler image
 transactions before taking one consistent, read-only SQLite snapshot. They then
 await the remote preview, making them actual sequence barriers rather than
-queue-only actions.
-**Apply remote previews automatically** controls whether the barrier also
-applies the preview or leaves it ready for review in PSF Guard. Automatic
+queue-only actions. **Apply remote previews automatically** controls whether the
+barrier also applies the preview or leaves it staged in PSF Guard. Automatic
 per-capture pushes remain durably queued and retry independently.
 
 Current-target reconciliation matches the enclosing N.I.N.A. target name

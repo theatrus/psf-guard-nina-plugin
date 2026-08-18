@@ -56,15 +56,21 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
 
     protected SyncOrchestrator CreateOrchestrator()
     {
+        var serverUri = new Uri(settings.ServerUrl, UriKind.Absolute);
+        var apiToken = settings.ApiToken;
+        var catalogId = settings.CatalogId;
+        var autoApplyPushes = settings.AutoApplyPushes;
+        var includeThumbnails = settings.IncludeThumbnails;
+        var targetSchedulerDatabase = settings.TargetSchedulerDatabase;
         var reader = new TargetSchedulerCatalogReader(
-            settings.TargetSchedulerDatabase,
+            targetSchedulerDatabase,
             TargetSchedulerVersion());
-        var writer = new TargetSchedulerCatalogWriter(settings.TargetSchedulerDatabase);
+        var writer = new TargetSchedulerCatalogWriter(targetSchedulerDatabase);
         return new SyncOrchestrator(
-            settings.CatalogId,
-            settings.AutoApplyPushes,
-            settings.IncludeThumbnails,
-            CreateClient,
+            catalogId,
+            autoApplyPushes,
+            includeThumbnails,
+            () => CreateClient(serverUri, apiToken),
             reader,
             writer);
     }
@@ -92,8 +98,11 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
         string imagePath,
         CancellationToken cancellationToken)
     {
-        using var client = CreateClient();
-        await client.UploadImageAsync(settings.CatalogId, imagePath, cancellationToken)
+        var serverUri = new Uri(settings.ServerUrl, UriKind.Absolute);
+        var apiToken = settings.ApiToken;
+        var catalogId = settings.CatalogId;
+        using var client = CreateClient(serverUri, apiToken);
+        await client.UploadImageAsync(catalogId, imagePath, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -107,6 +116,10 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
     {
         PsfGuardStatus.Report(progress, status);
     }
+
+    protected static IProgress<SyncProgress> CreateSyncProgress(
+        IProgress<ApplicationStatus>? progress) =>
+        PsfGuardStatus.CreateSyncProgress(progress);
 
     protected virtual void AddValidationIssues(List<string> validationIssues)
     {
@@ -153,11 +166,8 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
         return validationIssues.Count == 0;
     }
 
-    private PsfGuardSyncClient CreateClient()
-    {
-        var uri = new Uri(settings.ServerUrl, UriKind.Absolute);
-        return new PsfGuardSyncClient(new HttpClient(), uri, settings.ApiToken);
-    }
+    private static PsfGuardSyncClient CreateClient(Uri serverUri, string apiToken) =>
+        new(new HttpClient(), serverUri, apiToken);
 
     private static string TargetSchedulerVersion()
     {

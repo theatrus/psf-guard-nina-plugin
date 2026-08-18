@@ -183,6 +183,200 @@ public sealed class TargetSchedulerCatalogTests
     }
 
     [Fact]
+    public async Task MergePullAppliesFullCaptureRowsAndAuthoritativeGrades()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0, grade: 2, rejectReason: "Clouds", acquired: 12, accepted: 10, desired: 40);
+        destination.Seed(100, grade: 1, rejectReason: "Keep", acquired: 4, accepted: 12);
+        using (var connection = source.Open())
+        {
+            connection.Execute(
+                """
+                UPDATE acquiredimage
+                SET acquireddate = 1234,
+                    filtername = 'Ha',
+                    metadata = '{"FileName":"C:\\Images\\remote.fits"}',
+                    profileId = 'remote-profile'
+                WHERE guid = 'image-guid';
+                """);
+        }
+
+        using (var connection = destination.Open())
+        {
+            connection.Execute(
+                """
+                INSERT INTO acquiredimage
+                    (Id, projectId, targetId, acquireddate, filtername, gradingStatus, metadata,
+                     rejectreason, profileId, exposureId, guid)
+                VALUES
+                    (206, 101, 102, 1235, 'L', 1, '{"FileName":"local-only.fits"}',
+                     NULL, 'profile', 104, 'local-only-image-guid');
+                """);
+        }
+
+        var reader = new TargetSchedulerCatalogReader(source.Path, "5.9.6.0");
+        var bundle = await reader.BuildFullMergeBundleAsync(
+            includeThumbnails: false,
+            CancellationToken.None);
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+        var result = await writer.ApplyMergeAsync(bundle, CancellationToken.None);
+
+        Assert.True(result.Updated > 0);
+        Assert.DoesNotContain("imagedata", bundle.Tables.Keys);
+        using var destinationConnection = destination.Open();
+        using var command = destinationConnection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT ai.Id, ai.projectId, ai.targetId, ai.exposureId,
+                   ai.acquireddate, ai.filtername, ai.metadata, ai.profileId,
+                   ai.gradingStatus, ai.rejectreason,
+                   ep.desired, ep.acquired, ep.accepted
+            FROM acquiredimage ai
+            JOIN exposureplan ep ON ep.Id = ai.exposureId
+            WHERE ai.guid = 'image-guid'
+            """;
+        using var row = command.ExecuteReader();
+        Assert.True(row.Read());
+        Assert.Equal(105, row.GetInt64(0));
+        Assert.Equal(101, row.GetInt64(1));
+        Assert.Equal(102, row.GetInt64(2));
+        Assert.Equal(104, row.GetInt64(3));
+        Assert.Equal(1234, row.GetInt64(4));
+        Assert.Equal("Ha", row.GetString(5));
+        Assert.Contains("remote.fits", row.GetString(6), StringComparison.Ordinal);
+        Assert.Equal("remote-profile", row.GetString(7));
+        Assert.Equal(2, row.GetInt32(8));
+        Assert.Equal("Clouds", row.GetString(9));
+        Assert.Equal(40, row.GetInt32(10));
+        Assert.Equal(2, row.GetInt32(11));
+        Assert.Equal(1, row.GetInt32(12));
+        Assert.Equal(
+            1,
+            Scalar(
+                destinationConnection,
+                "SELECT gradingStatus FROM acquiredimage WHERE guid = 'local-only-image-guid'"));
+        Assert.Equal(1, Scalar(destinationConnection, "SELECT COUNT(*) FROM imagedata"));
+    }
+
+    [Fact]
+    public async Task MergePullInsertsCaptureAndDeduplicatesOptionalImageData()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0, grade: 1, acquired: 1, accepted: 1);
+        source.AddImageData(8, 5, string.Empty, [9, 8, 7]);
+        destination.Seed(100);
+        destination.DeleteCaptures();
+
+        var reader = new TargetSchedulerCatalogReader(source.Path, "5.9.6.0");
+        var bundle = await reader.BuildFullMergeBundleAsync(
+            includeThumbnails: true,
+            CancellationToken.None);
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+        var first = await writer.ApplyMergeAsync(bundle, CancellationToken.None);
+        var second = await writer.ApplyMergeAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(2, first.Inserted);
+        Assert.Equal(0, second.Inserted);
+        using var connection = destination.Open();
+        Assert.Equal(1, Scalar(connection, "SELECT COUNT(*) FROM acquiredimage"));
+        Assert.Equal(1, Scalar(connection, "SELECT COUNT(*) FROM imagedata"));
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT ai.projectId, ai.targetId, ai.exposureId, ai.gradingStatus,
+                   d.acquiredimageid, d.width, d.height, ep.acquired, ep.accepted
+            FROM acquiredimage ai
+            JOIN imagedata d ON d.acquiredimageid = ai.Id
+            JOIN exposureplan ep ON ep.Id = ai.exposureId
+            WHERE ai.guid = 'image-guid'
+            """;
+        using var row = command.ExecuteReader();
+        Assert.True(row.Read());
+        Assert.Equal(101, row.GetInt64(0));
+        Assert.Equal(102, row.GetInt64(1));
+        Assert.Equal(104, row.GetInt64(2));
+        Assert.Equal(1, row.GetInt32(3));
+        Assert.True(row.GetInt64(4) > 0);
+        Assert.Equal(64, row.GetInt32(5));
+        Assert.Equal(48, row.GetInt32(6));
+        Assert.Equal(1, row.GetInt32(7));
+        Assert.Equal(1, row.GetInt32(8));
+    }
+
+    [Fact]
+    public async Task MergePullSkipsAnAmbiguousDestinationCaptureGuid()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0, grade: 2, rejectReason: "Clouds");
+        destination.Seed(100, grade: 0);
+        using (var connection = destination.Open())
+        {
+            connection.Execute(
+                """
+                INSERT INTO acquiredimage
+                    (Id, projectId, targetId, acquireddate, filtername, gradingStatus, metadata,
+                     rejectreason, profileId, exposureId, guid)
+                SELECT 205, projectId, targetId, acquireddate, filtername, 1, metadata,
+                       NULL, profileId, exposureId, guid
+                FROM acquiredimage WHERE Id = 105;
+                """);
+        }
+
+        var reader = new TargetSchedulerCatalogReader(source.Path, "5.9.6.0");
+        var bundle = await reader.BuildFullMergeBundleAsync(
+            includeThumbnails: false,
+            CancellationToken.None);
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+        var result = await writer.ApplyMergeAsync(bundle, CancellationToken.None);
+
+        Assert.True(result.Skipped > 0);
+        using var destinationConnection = destination.Open();
+        using var command = destinationConnection.CreateCommand();
+        command.CommandText =
+            "SELECT gradingStatus FROM acquiredimage WHERE guid = 'image-guid' ORDER BY Id";
+        using var rows = command.ExecuteReader();
+        Assert.True(rows.Read());
+        Assert.Equal(0, rows.GetInt32(0));
+        Assert.True(rows.Read());
+        Assert.Equal(1, rows.GetInt32(0));
+        Assert.False(rows.Read());
+    }
+
+    [Fact]
+    public async Task MergePullRollsBackPlanningWhenACaptureCannotBeApplied()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0);
+        destination.Seed(100);
+        using (var connection = source.Open())
+        {
+            connection.Execute("UPDATE project SET name = 'Remote name' WHERE guid = 'project-guid'");
+        }
+
+        var reader = new TargetSchedulerCatalogReader(source.Path, "5.9.6.0");
+        var bundle = await reader.BuildFullMergeBundleAsync(
+            includeThumbnails: false,
+            CancellationToken.None);
+        bundle.Tables["acquiredimage"] = ReplaceValue(
+            bundle.Tables["acquiredimage"],
+            "projectId",
+            WireValue.Text("not-an-id"));
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+
+        await Assert.ThrowsAsync<FormatException>(
+            () => writer.ApplyMergeAsync(bundle, CancellationToken.None));
+
+        using var destinationConnection = destination.Open();
+        using var command = destinationConnection.CreateCommand();
+        command.CommandText = "SELECT name FROM project WHERE guid = 'project-guid'";
+        Assert.Equal("M 31", command.ExecuteScalar());
+    }
+
+    [Fact]
     public async Task PlanningPullRemapsIdsAndPreservesDestinationProgress()
     {
         using var source = new TestDatabase();
@@ -371,6 +565,30 @@ public sealed class TargetSchedulerCatalogTests
         using var command = connection.CreateCommand();
         command.CommandText = "SELECT accepted FROM exposureplan";
         return (long)(command.ExecuteScalar() ?? throw new InvalidOperationException());
+    }
+
+    private static long Scalar(System.Data.SQLite.SQLiteConnection connection, string sql)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return Convert.ToInt64(command.ExecuteScalar());
+    }
+
+    private static BundleTable ReplaceValue(
+        BundleTable table,
+        string column,
+        WireValue replacement)
+    {
+        var index = table.Columns
+            .Select((item, index) => (item, index))
+            .Single(item => item.item.Name.Equals(column, StringComparison.OrdinalIgnoreCase))
+            .index;
+        var values = table.Rows.Single().Values.ToArray();
+        values[index] = replacement;
+        return table with
+        {
+            Rows = [new BundleRow { Values = values }],
+        };
     }
 
     private static string TextValue(BundleTable table, string column)

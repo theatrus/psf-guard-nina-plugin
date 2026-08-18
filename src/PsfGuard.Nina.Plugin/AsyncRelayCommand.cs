@@ -18,6 +18,8 @@ internal sealed class AsyncRelayCommand : ICommand
 
     public bool CanExecute(object? parameter) => !running && (canExecute?.Invoke() ?? true);
 
+    public void RaiseCanExecuteChanged() => CanExecuteChanged?.Invoke(this, EventArgs.Empty);
+
     public async void Execute(object? parameter)
     {
         if (!CanExecute(parameter))

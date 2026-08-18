@@ -77,6 +77,12 @@ internal sealed class PluginSettings
         set => options.SetValueBoolean(nameof(IncludeThumbnails), value);
     }
 
+    public bool RoundTripReconcile
+    {
+        get => options.GetValueBoolean(nameof(RoundTripReconcile), false);
+        set => options.SetValueBoolean(nameof(RoundTripReconcile), value);
+    }
+
     public string ApiToken
     {
         get => WindowsCredentialStore.Read(CredentialReference) ?? string.Empty;

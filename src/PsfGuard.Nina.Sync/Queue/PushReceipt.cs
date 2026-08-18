@@ -8,6 +8,8 @@ public sealed record PushReceipt
 
     public required string State { get; init; }
 
+    public DateTimeOffset? ExpiresAt { get; init; }
+
     public IReadOnlyDictionary<string, long>? Summary { get; init; }
 
     public bool Applied => string.Equals(State, "applied", StringComparison.OrdinalIgnoreCase);

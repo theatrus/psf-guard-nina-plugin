@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace PsfGuard.Nina.Sync.Protocol;
 
 public sealed record SyncCatalogCapability
@@ -52,6 +54,8 @@ public sealed record SyncPreviewJob
 
     public required string State { get; init; }
 
+    public string? Phase { get; init; }
+
     public SyncPreview? Preview { get; init; }
 
     public string? Error { get; init; }
@@ -73,6 +77,9 @@ public sealed record CreateExportRequest
     public required SyncOperation Operation { get; init; }
 
     public bool ReviewedOnly { get; init; } = true;
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? IncludeThumbnails { get; init; }
 }
 
 public sealed record SyncExport

@@ -30,16 +30,44 @@ public sealed class ReconcilePsfGuardCatalog : PsfGuardSequenceItemBase
         CancellationToken token)
     {
         using var status = BeginStatus(progress);
+        var autoApply = AutoApplyPushes;
+        var roundTrip = RoundTripReconcile;
+        if (roundTrip && !autoApply)
+        {
+            throw new InvalidOperationException(
+                "Full round-trip reconcile requires automatic preview apply for sequencer use.");
+        }
         Report(progress, "Waiting for scheduler...");
         await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
         Report(progress, "Reconciling catalog...");
-        await CreateOrchestrator()
-            .ReconcileCatalogAsync(AutoApplyPushes, token)
+        var orchestrator = CreateOrchestrator();
+        if (roundTrip)
+        {
+            await orchestrator.EnsureRoundTripSupportedAsync(token).ConfigureAwait(false);
+        }
+
+        var receipt = await orchestrator
+            .ReconcileCatalogAsync(autoApply, token, CreateSyncProgress(progress))
             .ConfigureAwait(false);
+        if (roundTrip && receipt.Applied)
+        {
+            await orchestrator
+                .PullMergedCatalogAsync(token, CreateSyncProgress(progress))
+                .ConfigureAwait(false);
+        }
     }
 
     public override object Clone() => new ReconcilePsfGuardCatalog(this);
 
     public override string ToString() =>
         $"Category: {Category}, Item: {nameof(ReconcilePsfGuardCatalog)}";
+
+    protected override void AddValidationIssues(List<string> validationIssues)
+    {
+        if (RoundTripReconcile && !AutoApplyPushes)
+        {
+            validationIssues.Add(
+                "Full round-trip reconcile requires automatic preview apply for sequencer use.");
+        }
+    }
 }
