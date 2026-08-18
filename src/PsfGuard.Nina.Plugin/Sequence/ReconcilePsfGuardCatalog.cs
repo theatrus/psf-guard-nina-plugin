@@ -41,13 +41,18 @@ public sealed class ReconcilePsfGuardCatalog : PsfGuardSequenceItemBase
         await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
         Report(progress, "Reconciling catalog...");
         var orchestrator = CreateOrchestrator();
+        var reconcileProgress = CreateSyncProgress(
+            progress,
+            suppressCompleted: roundTrip);
         if (roundTrip)
         {
-            await orchestrator.EnsureRoundTripSupportedAsync(token).ConfigureAwait(false);
+            await orchestrator
+                .EnsureRoundTripSupportedAsync(token, reconcileProgress)
+                .ConfigureAwait(false);
         }
 
         var receipt = await orchestrator
-            .ReconcileCatalogAsync(autoApply, token, CreateSyncProgress(progress))
+            .ReconcileCatalogAsync(autoApply, token, reconcileProgress)
             .ConfigureAwait(false);
         if (roundTrip && receipt.Applied)
         {

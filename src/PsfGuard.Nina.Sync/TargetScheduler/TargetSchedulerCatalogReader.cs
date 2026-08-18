@@ -1,5 +1,6 @@
 using System.Data;
 using System.Data.SQLite;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -10,6 +11,8 @@ namespace PsfGuard.Nina.Sync.TargetScheduler;
 public sealed class TargetSchedulerCatalogReader
 {
     internal const long DefaultMaximumThumbnailBytes = 256L * 1024 * 1024;
+
+    private const int RowProgressInterval = 1_000;
 
     private static readonly string[] PlanningTables =
     [
@@ -117,12 +120,24 @@ public sealed class TargetSchedulerCatalogReader
         bool includeThumbnails,
         CancellationToken cancellationToken)
     {
+        return BuildFullMergeBundleAsync(
+            includeThumbnails,
+            cancellationToken,
+            progress: null);
+    }
+
+    public Task<CatalogBundle> BuildFullMergeBundleAsync(
+        bool includeThumbnails,
+        CancellationToken cancellationToken,
+        IProgress<SyncProgress>? progress)
+    {
         return Task.Run(
             () => BuildBundle(
                 SyncOperation.Merge,
                 includeThumbnails ? MergeTables : MergeTables[..^1],
                 [],
-                cancellationToken),
+                cancellationToken,
+                progress),
             cancellationToken);
     }
 
@@ -131,12 +146,26 @@ public sealed class TargetSchedulerCatalogReader
         bool includeThumbnails,
         CancellationToken cancellationToken)
     {
+        return BuildTargetMergeBundleAsync(
+            targetName,
+            includeThumbnails,
+            cancellationToken,
+            progress: null);
+    }
+
+    public Task<CatalogBundle> BuildTargetMergeBundleAsync(
+        string targetName,
+        bool includeThumbnails,
+        CancellationToken cancellationToken,
+        IProgress<SyncProgress>? progress)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(targetName);
         return Task.Run(
             () => BuildTargetMergeBundle(
                 targetName.Trim(),
                 includeThumbnails,
-                cancellationToken),
+                cancellationToken,
+                progress),
             cancellationToken);
     }
 
@@ -313,7 +342,8 @@ public sealed class TargetSchedulerCatalogReader
     private CatalogBundle BuildTargetMergeBundle(
         string targetName,
         bool includeThumbnails,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<SyncProgress>? progress)
     {
         var snapshot = ReadSnapshot(
             (connection, transaction, schemaVersion) =>
@@ -324,7 +354,8 @@ public sealed class TargetSchedulerCatalogReader
                     "target",
                     "WHERE name = @targetName COLLATE NOCASE",
                     [new SQLiteParameter("@targetName", targetName)],
-                    cancellationToken);
+                    cancellationToken,
+                    progress: progress);
                 if (target.Rows.Count == 0)
                 {
                     throw new InvalidOperationException(
@@ -351,34 +382,39 @@ public sealed class TargetSchedulerCatalogReader
                         "acquiredimage",
                         "WHERE targetId = @targetId",
                         [targetParameter],
-                        cancellationToken),
+                        cancellationToken,
+                        progress: progress),
                     ["exposureplan"] = ReadTable(
                         connection,
                         transaction,
                         "exposureplan",
                         "WHERE targetId = @targetId",
                         [targetParameter],
-                        cancellationToken),
+                        cancellationToken,
+                        progress: progress),
                     ["exposuretemplate"] = ReadTable(
                         connection,
                         transaction,
                         "exposuretemplate",
                         "WHERE Id IN (SELECT exposureTemplateId FROM exposureplan WHERE targetId = @targetId)",
                         [targetParameter],
-                        cancellationToken),
+                        cancellationToken,
+                        progress: progress),
                     ["project"] = ReadById(
                         connection,
                         transaction,
                         "project",
                         projectId,
-                        cancellationToken),
+                        cancellationToken,
+                        progress),
                     ["ruleweight"] = ReadTable(
                         connection,
                         transaction,
                         "ruleweight",
                         "WHERE projectId = @projectId",
                         [projectParameter],
-                        cancellationToken),
+                        cancellationToken,
+                        progress: progress),
                     ["target"] = target,
                 };
 
@@ -399,7 +435,8 @@ public sealed class TargetSchedulerCatalogReader
                         "imagedata",
                         thumbnailWhere,
                         [targetParameter],
-                        cancellationToken);
+                        cancellationToken,
+                        progress: progress);
                 }
 
                 return new BundleSnapshot(schemaVersion, tables);
@@ -409,14 +446,16 @@ public sealed class TargetSchedulerCatalogReader
         return CreateBundle(
             SyncOperation.Merge,
             snapshot,
-            cancellationToken);
+            cancellationToken,
+            progress);
     }
 
     private CatalogBundle BuildBundle(
         SyncOperation operation,
         IEnumerable<string> tableNames,
         IReadOnlyCollection<SQLiteParameter> parameters,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<SyncProgress>? progress = null)
     {
         var snapshot = ReadSnapshot(
             (connection, transaction, schemaVersion) =>
@@ -441,20 +480,22 @@ public sealed class TargetSchedulerCatalogReader
                         tableName,
                         whereClause: null,
                         parameters,
-                        cancellationToken);
+                        cancellationToken,
+                        progress: progress);
                 }
 
                 return new BundleSnapshot(schemaVersion, tables);
             },
             cancellationToken);
 
-        return CreateBundle(operation, snapshot, cancellationToken);
+        return CreateBundle(operation, snapshot, cancellationToken, progress);
     }
 
     private CatalogBundle CreateBundle(
         SyncOperation operation,
         BundleSnapshot snapshot,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<SyncProgress>? progress = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var bundle = new CatalogBundle
@@ -471,6 +512,16 @@ public sealed class TargetSchedulerCatalogReader
             },
             Tables = snapshot.Tables,
         };
+        var rowCount = snapshot.Tables.Sum(table => (long)table.Value.Rows.Count);
+        SyncProgressReporter.Report(
+            progress,
+            new SyncProgress
+            {
+                Stage = SyncProgressStage.PreparingBundle,
+                Message = $"Preparing {rowCount:N0} Target Scheduler rows for upload...",
+                Rows = rowCount,
+            });
+        cancellationToken.ThrowIfCancellationRequested();
         bundle.Seal(cancellationToken);
         return bundle;
     }
@@ -507,7 +558,8 @@ public sealed class TargetSchedulerCatalogReader
         SQLiteTransaction transaction,
         string table,
         long id,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<SyncProgress>? progress = null)
     {
         return ReadTable(
             connection,
@@ -515,7 +567,8 @@ public sealed class TargetSchedulerCatalogReader
             table,
             "WHERE Id = @id",
             [new SQLiteParameter("@id", id)],
-            cancellationToken);
+            cancellationToken,
+            progress: progress);
     }
 
     private BundleTable ReadTable(
@@ -525,10 +578,14 @@ public sealed class TargetSchedulerCatalogReader
         string? whereClause,
         IReadOnlyCollection<SQLiteParameter> parameters,
         CancellationToken cancellationToken,
-        IReadOnlyCollection<string>? selectedColumns = null)
+        IReadOnlyCollection<string>? selectedColumns = null,
+        IProgress<SyncProgress>? progress = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ValidateTable(table);
+        ReportTableProgress(progress, table, rows: 0, completed: false, TimeSpan.Zero);
+        var tableStarted = Stopwatch.StartNew();
+        var lastProgressAt = TimeSpan.Zero;
         var schema = ReadColumns(connection, transaction, table, cancellationToken);
         if (selectedColumns is not null)
         {
@@ -567,6 +624,17 @@ public sealed class TargetSchedulerCatalogReader
             }
 
             rows.Add(new BundleRow { Values = values });
+            if (rows.Count % RowProgressInterval == 0
+                && tableStarted.Elapsed - lastProgressAt >= TimeSpan.FromSeconds(1))
+            {
+                ReportTableProgress(
+                    progress,
+                    table,
+                    rows.Count,
+                    completed: false,
+                    tableStarted.Elapsed);
+                lastProgressAt = tableStarted.Elapsed;
+            }
         }
 
         var result = new BundleTable
@@ -575,8 +643,45 @@ public sealed class TargetSchedulerCatalogReader
             Rows = rows,
         };
         tableReadObserver?.Invoke(table);
+        cancellationToken.ThrowIfCancellationRequested();
+        ReportTableProgress(
+            progress,
+            table,
+            rows.Count,
+            completed: true,
+            tableStarted.Elapsed);
         return result;
     }
+
+    private static void ReportTableProgress(
+        IProgress<SyncProgress>? progress,
+        string table,
+        long rows,
+        bool completed,
+        TimeSpan elapsed)
+    {
+        var message = completed
+            ? $"Read {rows:N0} rows from Target Scheduler table {table} "
+                + $"in {FormatElapsed(elapsed)}."
+            : rows == 0
+                ? $"Reading Target Scheduler table {table}..."
+                : $"Reading Target Scheduler table {table}: {rows:N0} rows "
+                    + $"({FormatElapsed(elapsed)})...";
+        SyncProgressReporter.Report(
+            progress,
+            new SyncProgress
+            {
+                Stage = SyncProgressStage.ReadingCatalog,
+                Message = message,
+                Rows = rows,
+                Elapsed = elapsed,
+            });
+    }
+
+    private static string FormatElapsed(TimeSpan elapsed) =>
+        elapsed.TotalMinutes >= 1
+            ? $"{elapsed.TotalMinutes:0.0} min"
+            : $"{elapsed.TotalSeconds:0.0} sec";
 
     private static List<BundleColumn> ReadColumns(
         SQLiteConnection connection,

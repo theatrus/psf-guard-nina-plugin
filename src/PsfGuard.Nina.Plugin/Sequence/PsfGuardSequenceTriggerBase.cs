@@ -118,8 +118,9 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
     }
 
     protected static IProgress<SyncProgress> CreateSyncProgress(
-        IProgress<ApplicationStatus>? progress) =>
-        PsfGuardStatus.CreateSyncProgress(progress);
+        IProgress<ApplicationStatus>? progress,
+        bool suppressCompleted = false) =>
+        PsfGuardStatus.CreateSyncProgress(progress, suppressCompleted);
 
     protected virtual void AddValidationIssues(List<string> validationIssues)
     {

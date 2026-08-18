@@ -288,6 +288,47 @@ public sealed class PsfGuardSyncClientTests
     }
 
     [Fact]
+    public async Task DownloadExportReportsResponseBytesBeforeParsingTheCatalog()
+    {
+        var bundle = Bundle() with { Operation = SyncOperation.Merge };
+        bundle.Seal();
+        var padding = new string('x', 2 * 1024 * 1024);
+        var body = $$"""
+            {
+              "export_id":"export-large",
+              "state":"ready",
+              "padding":"{{padding}}",
+              "bundle":{{ProtocolJson.Serialize(bundle)}}
+            }
+            """;
+        var updates = new List<SyncProgress>();
+        var handler = new StubHandler(_ => Task.FromResult(Json(body)));
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(handler),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        var downloaded = await client.DownloadExportAsync(
+            "review",
+            SyncOperation.Merge,
+            reviewedOnly: false,
+            includeThumbnails: false,
+            cancellationToken: CancellationToken.None,
+            progress: new RecordingProgress<SyncProgress>(updates.Add));
+
+        Assert.Equal(bundle.BundleId, downloaded.BundleId);
+        Assert.Contains(
+            updates,
+            update => update.Stage == SyncProgressStage.DownloadingCatalog
+                && update.BytesTransferred >= 1024 * 1024
+                && update.Message.Contains("received", StringComparison.Ordinal));
+        var parsing = Assert.Single(
+            updates,
+            update => update.Message.EndsWith("parsing catalog...", StringComparison.Ordinal));
+        Assert.Equal(Encoding.UTF8.GetByteCount(body), parsing.BytesTransferred);
+    }
+
+    [Fact]
     public async Task DownloadExportTreatsPayloadDigestAsAdvisory()
     {
         var bundle = Bundle();

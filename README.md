@@ -115,10 +115,13 @@ PSF Guard to create the preview and follows **Apply remote previews
 automatically**; when automatic apply is off, the status reports the preview ID
 left ready for review. The plugin keeps that manual preview available beside the
 status area so it can be applied or forgotten before its server expiry. Reconcile
-reports catalog-read, upload, remote-job, and apply phases in both the settings
-status and the N.I.N.A. log. The completion status uses PSF Guard's apply result
-and reports inserted and updated counts when the server supplies them. **Push
-all** remains the durable queue-based equivalent.
+reports the server check, each Target Scheduler table, row and byte milestones,
+bundle preparation, remote-job heartbeats, and apply phases in both the settings
+status and the N.I.N.A. log. An indeterminate progress bar remains active for
+the whole operation, and background queue messages cannot replace its current
+phase. The completion status uses PSF Guard's apply result and reports inserted
+and updated counts when the server supplies them. **Push all** remains the
+durable queue-based equivalent.
 
 Enable **Pull merged catalog back after full reconcile** for a round trip: after
 PSF Guard applies the incoming snapshot, the plugin downloads the resulting

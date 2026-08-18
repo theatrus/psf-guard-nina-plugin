@@ -2,7 +2,9 @@ namespace PsfGuard.Nina.Sync;
 
 public enum SyncProgressStage
 {
+    CheckingServer,
     ReadingCatalog,
+    PreparingBundle,
     BundleReady,
     UploadingBundle,
     WaitingForPreview,

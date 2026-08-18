@@ -10,6 +10,8 @@ public sealed class SyncOrchestrator
 {
     public const string ExportsCapability = "exports";
 
+    private static readonly TimeSpan ProgressHeartbeatInterval = TimeSpan.FromSeconds(5);
+
     private readonly string destinationCatalogId;
     private readonly bool autoApplyPushes;
     private readonly bool includeThumbnails;
@@ -18,6 +20,7 @@ public sealed class SyncOrchestrator
     private readonly TargetSchedulerCatalogWriter writer;
     private readonly DurablePushQueue? queue;
     private readonly RemoteQueueDestination? queueDestination;
+    private int roundTripSupportConfirmed;
 
     public SyncOrchestrator(
         string destinationCatalogId,
@@ -179,9 +182,35 @@ public sealed class SyncOrchestrator
         return await writer.ApplyPlanningAsync(bundle, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task EnsureRoundTripSupportedAsync(CancellationToken cancellationToken)
+    public Task EnsureRoundTripSupportedAsync(CancellationToken cancellationToken) =>
+        EnsureRoundTripSupportedAsync(cancellationToken, progress: null);
+
+    public async Task EnsureRoundTripSupportedAsync(
+        CancellationToken cancellationToken,
+        IProgress<SyncProgress>? progress)
     {
-        var capabilities = await TestConnectionAsync(cancellationToken).ConfigureAwait(false);
+        if (Volatile.Read(ref roundTripSupportConfirmed) != 0)
+        {
+            return;
+        }
+
+        var activity = TrackProgress(progress);
+        SyncProgressReporter.Report(
+            activity,
+            new SyncProgress
+            {
+                Stage = SyncProgressStage.CheckingServer,
+                Message = "Checking PSF Guard round-trip support...",
+            });
+        var started = Stopwatch.StartNew();
+        var capabilities = await AwaitWithHeartbeatAsync(
+                TestConnectionAsync(cancellationToken),
+                activity,
+                SyncProgressStage.CheckingServer,
+                elapsed => $"Waiting for PSF Guard round-trip support check "
+                    + $"({FormatElapsed(elapsed)})...",
+                cancellationToken)
+            .ConfigureAwait(false);
         if (!capabilities.Capabilities.Contains(
                 ExportsCapability,
                 StringComparer.Ordinal))
@@ -190,28 +219,46 @@ public sealed class SyncOrchestrator
                 "This PSF Guard server does not advertise catalog exports; "
                 + "update PSF Guard before enabling full round-trip reconcile.");
         }
+
+        SyncProgressReporter.Report(
+            activity,
+            new SyncProgress
+            {
+                Stage = SyncProgressStage.CheckingServer,
+                Message = $"PSF Guard round-trip support confirmed "
+                    + $"({FormatElapsed(started.Elapsed)}).",
+                Elapsed = started.Elapsed,
+            });
+        Volatile.Write(ref roundTripSupportConfirmed, 1);
     }
 
     public async Task<ApplyResult> PullMergedCatalogAsync(
         CancellationToken cancellationToken,
         IProgress<SyncProgress>? progress = null)
     {
-        await EnsureRoundTripSupportedAsync(cancellationToken).ConfigureAwait(false);
+        var activity = TrackProgress(progress);
+        await EnsureRoundTripSupportedAsync(cancellationToken, activity).ConfigureAwait(false);
         SyncProgressReporter.Report(
-            progress,
+            activity,
             new SyncProgress
             {
                 Stage = SyncProgressStage.DownloadingCatalog,
                 Message = "Downloading the merged PSF Guard catalog (thumbnails excluded)...",
             });
         var bundle = await WithClientAsync(
-                client => client.DownloadExportAsync(
-                    destinationCatalogId,
-                    SyncOperation.Merge,
-                    reviewedOnly: false,
-                    includeThumbnails: false,
-                    cancellationToken: cancellationToken,
-                    progress: progress))
+                client => AwaitWithHeartbeatAsync(
+                    client.DownloadExportAsync(
+                        destinationCatalogId,
+                        SyncOperation.Merge,
+                        reviewedOnly: false,
+                        includeThumbnails: false,
+                        cancellationToken: cancellationToken,
+                        progress: activity),
+                    activity,
+                    SyncProgressStage.DownloadingCatalog,
+                    elapsed => $"Processing the merged PSF Guard catalog "
+                        + $"({FormatElapsed(elapsed)})...",
+                    cancellationToken))
             .ConfigureAwait(false);
         if (bundle.Tables.ContainsKey("imagedata"))
         {
@@ -220,7 +267,7 @@ public sealed class SyncOrchestrator
         }
 
         SyncProgressReporter.Report(
-            progress,
+            activity,
             new SyncProgress
             {
                 Stage = SyncProgressStage.ApplyingCatalog,
@@ -228,10 +275,16 @@ public sealed class SyncOrchestrator
                     + "to Target Scheduler...",
                 Rows = bundle.RowCount,
             });
-        var result = await writer.ApplyMergeAsync(bundle, cancellationToken)
+        var result = await AwaitWithHeartbeatAsync(
+                writer.ApplyMergeAsync(bundle, cancellationToken),
+                activity,
+                SyncProgressStage.ApplyingCatalog,
+                elapsed => $"Applying {bundle.RowCount:N0} PSF Guard rows to Target Scheduler "
+                    + $"({FormatElapsed(elapsed)})...",
+                cancellationToken)
             .ConfigureAwait(false);
         SyncProgressReporter.Report(
-            progress,
+            activity,
             new SyncProgress
             {
                 Stage = SyncProgressStage.Completed,
@@ -252,9 +305,10 @@ public sealed class SyncOrchestrator
         CancellationToken cancellationToken,
         IProgress<SyncProgress>? progress)
     {
+        var activity = TrackProgress(progress);
         var started = Stopwatch.StartNew();
         SyncProgressReporter.Report(
-            progress,
+            activity,
             new SyncProgress
             {
                 Stage = SyncProgressStage.ReadingCatalog,
@@ -262,12 +316,19 @@ public sealed class SyncOrchestrator
                     ? "Reading Target Scheduler catalog and thumbnails..."
                     : "Reading Target Scheduler catalog (thumbnails excluded)...",
             });
-        var bundle = await reader.BuildFullMergeBundleAsync(
-                includeThumbnails,
+        var bundle = await AwaitWithHeartbeatAsync(
+                reader.BuildFullMergeBundleAsync(
+                    includeThumbnails,
+                    cancellationToken,
+                    activity),
+                activity,
+                SyncProgressStage.ReadingCatalog,
+                elapsed => $"Preparing the Target Scheduler snapshot "
+                    + $"({FormatElapsed(elapsed)})...",
                 cancellationToken)
             .ConfigureAwait(false);
-        ReportBundleReady(progress, bundle, started.Elapsed);
-        return await PushNowAsync(bundle, apply, cancellationToken, progress)
+        ReportBundleReady(activity, bundle, started.Elapsed);
+        return await PushNowAsync(bundle, apply, cancellationToken, activity)
             .ConfigureAwait(false);
     }
 
@@ -283,9 +344,10 @@ public sealed class SyncOrchestrator
         CancellationToken cancellationToken,
         IProgress<SyncProgress>? progress)
     {
+        var activity = TrackProgress(progress);
         var started = Stopwatch.StartNew();
         SyncProgressReporter.Report(
-            progress,
+            activity,
             new SyncProgress
             {
                 Stage = SyncProgressStage.ReadingCatalog,
@@ -293,13 +355,20 @@ public sealed class SyncOrchestrator
                     ? $"Reading Target Scheduler target {targetName} and thumbnails..."
                     : $"Reading Target Scheduler target {targetName} (thumbnails excluded)...",
             });
-        var bundle = await reader.BuildTargetMergeBundleAsync(
-                targetName,
-                includeThumbnails,
+        var bundle = await AwaitWithHeartbeatAsync(
+                reader.BuildTargetMergeBundleAsync(
+                    targetName,
+                    includeThumbnails,
+                    cancellationToken,
+                    activity),
+                activity,
+                SyncProgressStage.ReadingCatalog,
+                elapsed => $"Preparing the Target Scheduler target snapshot "
+                    + $"({FormatElapsed(elapsed)})...",
                 cancellationToken)
             .ConfigureAwait(false);
-        ReportBundleReady(progress, bundle, started.Elapsed);
-        return await PushNowAsync(bundle, apply, cancellationToken, progress)
+        ReportBundleReady(activity, bundle, started.Elapsed);
+        return await PushNowAsync(bundle, apply, cancellationToken, activity)
             .ConfigureAwait(false);
     }
 
@@ -320,15 +389,22 @@ public sealed class SyncOrchestrator
                 $"PSF Guard preview {pending.PreviewId} has expired; reconcile again.");
         }
 
+        var activity = TrackProgress(progress);
         SyncProgressReporter.Report(
-            progress,
+            activity,
             new SyncProgress
             {
                 Stage = SyncProgressStage.ApplyingPreview,
                 Message = $"Applying PSF Guard preview {pending.PreviewId}...",
             });
         var applied = await WithClientAsync(
-                client => client.ApplyPreviewAsync(pending.PreviewId, cancellationToken))
+                client => AwaitWithHeartbeatAsync(
+                    client.ApplyPreviewAsync(pending.PreviewId, cancellationToken),
+                    activity,
+                    SyncProgressStage.ApplyingPreview,
+                    elapsed => $"Applying PSF Guard preview {pending.PreviewId} "
+                        + $"({FormatElapsed(elapsed)})...",
+                    cancellationToken))
             .ConfigureAwait(false);
         RequireState(applied.State, "applied", pending.PreviewId, applying: true);
         var receipt = pending with
@@ -336,7 +412,7 @@ public sealed class SyncOrchestrator
             State = applied.State,
             Summary = applied.Summary ?? pending.Summary,
         };
-        ReportCompleted(progress, receipt);
+        ReportCompleted(activity, receipt);
         return receipt;
     }
 
@@ -346,6 +422,7 @@ public sealed class SyncOrchestrator
         CancellationToken cancellationToken,
         IProgress<SyncProgress>? progress = null)
     {
+        var activity = TrackProgress(progress);
         return await WithClientAsync(
                 async client =>
                 {
@@ -353,20 +430,26 @@ public sealed class SyncOrchestrator
                             destinationCatalogId,
                             bundle,
                             cancellationToken,
-                            progress)
+                            activity)
                         .ConfigureAwait(false);
                     SyncApplyResult? applied = null;
                     if (apply)
                     {
                         SyncProgressReporter.Report(
-                            progress,
+                            activity,
                             new SyncProgress
                             {
                                 Stage = SyncProgressStage.ApplyingPreview,
                                 Message = $"Applying PSF Guard preview {preview.PreviewId}...",
                             });
-                        applied = await client.ApplyPreviewAsync(
-                                preview.PreviewId,
+                        applied = await AwaitWithHeartbeatAsync(
+                                client.ApplyPreviewAsync(
+                                    preview.PreviewId,
+                                    cancellationToken),
+                                activity,
+                                SyncProgressStage.ApplyingPreview,
+                                elapsed => $"Applying PSF Guard preview {preview.PreviewId} "
+                                    + $"({FormatElapsed(elapsed)})...",
                                 cancellationToken)
                             .ConfigureAwait(false);
                     }
@@ -383,7 +466,7 @@ public sealed class SyncOrchestrator
                         ExpiresAt = preview.ExpiresAt,
                         Summary = applied?.Summary ?? preview.Summary,
                     };
-                    ReportCompleted(progress, receipt);
+                    ReportCompleted(activity, receipt);
                     return receipt;
                 })
             .ConfigureAwait(false);
@@ -420,6 +503,54 @@ public sealed class SyncOrchestrator
         using var client = clientFactory();
         return await action(client).ConfigureAwait(false);
     }
+
+    private static async Task<T> AwaitWithHeartbeatAsync<T>(
+        Task<T> operation,
+        IProgress<SyncProgress>? progress,
+        SyncProgressStage stage,
+        Func<TimeSpan, string> message,
+        CancellationToken cancellationToken)
+    {
+        var activity = TrackProgress(progress);
+        if (activity is null)
+        {
+            return await operation.ConfigureAwait(false);
+        }
+
+        var started = Stopwatch.StartNew();
+        while (!operation.IsCompleted)
+        {
+            var delay = Task.Delay(ProgressHeartbeatInterval);
+            if (await Task.WhenAny(operation, delay).ConfigureAwait(false) == operation)
+            {
+                break;
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return await operation.ConfigureAwait(false);
+            }
+
+            activity.ReportHeartbeat(
+                new SyncProgress
+                {
+                    Stage = stage,
+                    Message = message(started.Elapsed),
+                    Elapsed = started.Elapsed,
+                },
+                ProgressHeartbeatInterval);
+        }
+
+        return await operation.ConfigureAwait(false);
+    }
+
+    private static ProgressActivity? TrackProgress(IProgress<SyncProgress>? progress) =>
+        progress switch
+        {
+            null => null,
+            ProgressActivity activity => activity,
+            _ => new ProgressActivity(progress),
+        };
 
     private static void ReportBundleReady(
         IProgress<SyncProgress>? progress,
@@ -476,6 +607,37 @@ public sealed class SyncOrchestrator
             $"PSF Guard returned sync state '{state}' after "
             + (applying ? "applying" : "creating")
             + $" preview {previewId}; expected '{expected}'.");
+    }
+
+    private sealed class ProgressActivity(IProgress<SyncProgress> inner)
+        : IProgress<SyncProgress>
+    {
+        private readonly object gate = new();
+        private long lastReportTimestamp = Stopwatch.GetTimestamp();
+
+        public void Report(SyncProgress value)
+        {
+            lock (gate)
+            {
+                lastReportTimestamp = Stopwatch.GetTimestamp();
+                SyncProgressReporter.Report(inner, value);
+            }
+        }
+
+        public void ReportHeartbeat(SyncProgress value, TimeSpan idleFor)
+        {
+            lock (gate)
+            {
+                var now = Stopwatch.GetTimestamp();
+                if (Stopwatch.GetElapsedTime(lastReportTimestamp, now) < idleFor)
+                {
+                    return;
+                }
+
+                lastReportTimestamp = now;
+                SyncProgressReporter.Report(inner, value);
+            }
+        }
     }
 
     private static string FormatElapsed(TimeSpan elapsed) =>

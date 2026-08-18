@@ -225,7 +225,20 @@
                 Padding="10"
                 BorderBrush="{DynamicResource ControlBorderBrush}"
                 BorderThickness="1">
-                <TextBlock Text="{Binding LastStatus}" TextWrapping="Wrap" />
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <ProgressBar
+                        Height="4"
+                        IsIndeterminate="{Binding IsOperationRunning}" />
+                    <TextBlock
+                        Grid.Row="1"
+                        Margin="0,8,0,0"
+                        Text="{Binding LastStatus}"
+                        TextWrapping="Wrap" />
+                </Grid>
             </Border>
         </Grid>
     </DataTemplate>
