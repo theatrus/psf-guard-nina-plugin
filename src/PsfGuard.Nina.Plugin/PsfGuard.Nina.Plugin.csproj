@@ -9,10 +9,10 @@
     <AssemblyVersion>$(Version)</AssemblyVersion>
     <FileVersion>$(Version)</FileVersion>
     <Title>PSF Guard Sync</Title>
-    <Description>Keeps a running N.I.N.A. Target Scheduler catalog in sync with PSF Guard.</Description>
-    <Company>theatrus</Company>
+    <Description>Synchronizes N.I.N.A. Target Scheduler catalogs and captured images with PSF Guard.</Description>
+    <Company>Yann Ramin</Company>
     <Product>PSF Guard Sync</Product>
-    <Copyright>Copyright (c) 2026 theatrus</Copyright>
+    <Copyright>Copyright (c) 2026 Yann Ramin</Copyright>
     <UseWPF>true</UseWPF>
     <ImportWindowsDesktopTargets>true</ImportWindowsDesktopTargets>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
