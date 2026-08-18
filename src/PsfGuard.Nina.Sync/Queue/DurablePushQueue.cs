@@ -1,6 +1,7 @@
 using PsfGuard.Nina.Sync.Client;
 using PsfGuard.Nina.Sync.Protocol;
 using PsfGuard.Nina.Sync.TargetScheduler;
+using System.Text.Json;
 
 namespace PsfGuard.Nina.Sync.Queue;
 
@@ -41,7 +42,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(bundle);
-        if (!bundle.VerifyDigest())
+        if (!bundle.VerifyDigest(cancellationToken))
         {
             throw new InvalidDataException("Cannot queue a bundle with an invalid digest.");
         }
@@ -258,27 +259,39 @@ public sealed class DurablePushQueue : IAsyncDisposable
                         bundle,
                         cancellationToken)
                     .ConfigureAwait(false);
+                SyncApplyResult? applied = null;
                 if (job.AutoApply)
                 {
-                    await client.ApplyPreviewAsync(preview.PreviewId, cancellationToken)
+                    applied = await client.ApplyPreviewAsync(
+                            preview.PreviewId,
+                            cancellationToken)
                         .ConfigureAwait(false);
                 }
+
+                var state = applied?.State ?? preview.State;
+                var expectedState = job.AutoApply ? "applied" : "ready";
+                if (!string.Equals(state, expectedState, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException(
+                        $"PSF Guard returned sync state '{state}' after "
+                        + (job.AutoApply ? "applying" : "creating")
+                        + $" preview {preview.PreviewId}; expected '{expectedState}'.");
+                }
+
+                var receipt = new PushReceipt
+                {
+                    BundleId = bundle.BundleId,
+                    PreviewId = preview.PreviewId,
+                    State = state,
+                    Summary = applied?.Summary ?? preview.Summary,
+                };
 
                 job.Completed = true;
                 job.LastError = null;
                 await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
                 TryDeleteJob(file);
-                ReportStatus(
-                    job.AutoApply
-                        ? $"Applied bundle {bundle.BundleId}."
-                        : $"Preview {preview.PreviewId} is ready in PSF Guard.");
-                PublishPushed(
-                    new PushReceipt
-                    {
-                        BundleId = bundle.BundleId,
-                        PreviewId = preview.PreviewId,
-                        Applied = job.AutoApply,
-                    });
+                ReportStatus(FormatPushStatus(receipt));
+                PublishPushed(receipt);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -370,8 +383,19 @@ public sealed class DurablePushQueue : IAsyncDisposable
     {
         try
         {
-            return ProtocolJson.Deserialize<QueuedBundleJob>(
-                await File.ReadAllTextAsync(file, cancellationToken).ConfigureAwait(false));
+            await using var input = new FileStream(
+                file,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 64 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            return await JsonSerializer.DeserializeAsync<QueuedBundleJob>(
+                    input,
+                    ProtocolJson.Options,
+                    cancellationToken)
+                .ConfigureAwait(false)
+                ?? throw new InvalidDataException("Queued sync job is empty.");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -381,7 +405,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
             exception is IOException
             or UnauthorizedAccessException
             or InvalidDataException
-            or System.Text.Json.JsonException
+            or JsonException
             or NotSupportedException)
         {
             QuarantineUnreadableJob(file, exception);
@@ -397,11 +421,24 @@ public sealed class DurablePushQueue : IAsyncDisposable
         var temporary = $"{path}.{Guid.NewGuid():N}.tmp";
         try
         {
-            await File.WriteAllTextAsync(
-                    temporary,
-                    ProtocolJson.Serialize(job),
-                    cancellationToken)
-                .ConfigureAwait(false);
+            await using (var output = new FileStream(
+                temporary,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 64 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan))
+            {
+                await JsonSerializer.SerializeAsync(
+                        output,
+                        job,
+                        ProtocolJson.Options,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                await output.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
             File.Move(temporary, path, overwrite: true);
         }
         finally
@@ -486,6 +523,22 @@ public sealed class DurablePushQueue : IAsyncDisposable
         catch (Exception)
         {
         }
+    }
+
+    private static string FormatPushStatus(PushReceipt receipt)
+    {
+        var message = receipt.Applied
+            ? $"Applied bundle {receipt.BundleId}."
+            : $"Preview {receipt.PreviewId} is ready in PSF Guard.";
+        if (!receipt.TryGetChangeCounts(out var inserted, out var updated))
+        {
+            return message;
+        }
+
+        return message.TrimEnd('.')
+            + (receipt.Applied
+                ? $": {inserted} inserted, {updated} updated."
+                : $": {inserted} to insert, {updated} to update.");
     }
 
     private void Wake()

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using PsfGuard.Nina.Sync.Client;
 using PsfGuard.Nina.Sync.Protocol;
 using PsfGuard.Nina.Sync.Queue;
@@ -10,6 +11,38 @@ namespace PsfGuard.Nina.Sync.Tests;
 
 public sealed class DurableQueueTests
 {
+    [Fact]
+    public async Task BundleQueueStreamsBlobPayloadsAndRestoresBinaryValues()
+    {
+        using var directory = new TestDirectory();
+        await using var queue = new DurablePushQueue(
+            directory.Child("queue"),
+            _ => throw new InvalidOperationException("The worker is not started."));
+        var blobs = Enumerable.Range(0, 256)
+            .Select(index => Enumerable.Repeat((byte)index, 8 * 1024).ToArray())
+            .ToArray();
+
+        await queue.EnqueueAsync(
+            Destination(),
+            BundleWithBlobs(blobs),
+            autoApply: false,
+            CancellationToken.None);
+
+        var file = Assert.Single(Directory.GetFiles(directory.Child("queue"), "*.json"));
+        await using var input = File.OpenRead(file);
+        var job = await JsonSerializer.DeserializeAsync<QueuedBundleJob>(
+            input,
+            ProtocolJson.Options);
+        var values = job!.Bundle!.Tables["imagedata"].Rows
+            .Select(row => Assert.IsType<byte[]>(row.Values.Single().Value))
+            .ToArray();
+        Assert.Equal(blobs.Length, values.Length);
+        for (var index = 0; index < blobs.Length; index++)
+        {
+            Assert.Equal(blobs[index], values[index]);
+        }
+    }
+
     [Fact]
     public async Task ConcurrentImageEnqueuesDoNotLoseWakeSignals()
     {
@@ -164,6 +197,75 @@ public sealed class DurableQueueTests
     }
 
     [Fact]
+    public async Task AppliedPushPublishesTheServerApplySummary()
+    {
+        using var directory = new TestDirectory();
+        var completed = new TaskCompletionSource<PushReceipt>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var queue = new DurablePushQueue(
+            directory.Child("queue"),
+            destination => Client(
+                destination,
+                request => request.RequestUri!.AbsolutePath.EndsWith(
+                    "/apply",
+                    StringComparison.Ordinal)
+                    ? Json(
+                        """
+                        {"state":"applied","summary":{"total_inserted":11,"total_updated":12}}
+                        """)
+                    : Json(
+                        """
+                        {"preview_id":"preview-1","state":"ready","summary":{"total_inserted":1,"total_updated":2}}
+                        """)));
+        queue.Pushed += (_, receipt) => completed.TrySetResult(receipt);
+        queue.Start();
+
+        await queue.EnqueueAsync(
+            Destination(),
+            Bundle(),
+            autoApply: true,
+            CancellationToken.None);
+        var receipt = await completed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.True(receipt.Applied);
+        Assert.True(receipt.TryGetChangeCounts(out var inserted, out var updated));
+        Assert.Equal(11, inserted);
+        Assert.Equal(12, updated);
+        Assert.Empty(Directory.GetFiles(directory.Child("queue"), "*.json"));
+    }
+
+    [Fact]
+    public async Task UnexpectedApplyStateBlocksTheJobInsteadOfDeletingIt()
+    {
+        using var directory = new TestDirectory();
+        var statuses = new ConcurrentQueue<string>();
+        await using var queue = new DurablePushQueue(
+            directory.Child("queue"),
+            destination => Client(
+                destination,
+                request => request.RequestUri!.AbsolutePath.EndsWith(
+                    "/apply",
+                    StringComparison.Ordinal)
+                    ? Json("""{"state":"ready"}""")
+                    : Json("""{"preview_id":"preview-1","state":"ready"}""")),
+            statuses.Enqueue);
+        queue.Start();
+
+        await queue.EnqueueAsync(
+            Destination(),
+            Bundle(),
+            autoApply: true,
+            CancellationToken.None);
+        await WaitUntilAsync(
+            () => statuses.Any(status => status.StartsWith(
+                "Sync job blocked:",
+                StringComparison.Ordinal)),
+            TimeSpan.FromSeconds(2));
+
+        Assert.Single(Directory.GetFiles(directory.Child("queue"), "*.json"));
+    }
+
+    [Fact]
     public async Task SchedulerCaptureIsDurableBeforeItsDatabaseRowExists()
     {
         using var directory = new TestDirectory();
@@ -266,6 +368,44 @@ public sealed class DurableQueueTests
                 SchemaVersion = 23,
             },
             Tables = new SortedDictionary<string, BundleTable>(),
+        };
+        bundle.Seal();
+        return bundle;
+    }
+
+    private static CatalogBundle BundleWithBlobs(IReadOnlyList<byte[]> blobs)
+    {
+        var bundle = new CatalogBundle
+        {
+            BundleId = Guid.NewGuid(),
+            CreatedAtUtc = DateTimeOffset.UtcNow,
+            Operation = SyncOperation.Merge,
+            Source = new CatalogIdentity
+            {
+                Id = "source",
+                Product = "Target Scheduler",
+                ProductVersion = "5.9.6.0",
+                SchemaVersion = 23,
+            },
+            Tables = new SortedDictionary<string, BundleTable>
+            {
+                ["imagedata"] = new()
+                {
+                    Columns =
+                    [
+                        new BundleColumn
+                        {
+                            Name = "imagedata",
+                            DeclaredType = "BLOB",
+                        },
+                    ],
+                    Rows =
+                        blobs.Select(bytes => new BundleRow
+                        {
+                            Values = [WireValue.Blob(bytes)],
+                        }).ToArray(),
+                },
+            },
         };
         bundle.Seal();
         return bundle;

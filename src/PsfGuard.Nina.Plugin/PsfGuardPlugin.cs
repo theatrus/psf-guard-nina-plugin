@@ -81,9 +81,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                     var receipt = await CreateOrchestrator()
                         .ReconcileCatalogAsync(AutoApplyPushes, token)
                         .ConfigureAwait(false);
-                    return receipt.Applied
-                        ? "Catalog reconcile applied in PSF Guard."
-                        : $"Catalog reconcile preview {receipt.PreviewId} is ready in PSF Guard.";
+                    return FormatPushReceipt("Catalog reconcile", receipt);
                 }));
         PushPlanningCommand = new AsyncRelayCommand(
             () => RunCommandAsync(
@@ -612,6 +610,22 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
     private static string FormatApplyResult(string label, ApplyResult result) =>
         $"{label}: {result.Inserted} inserted, {result.Updated} updated, "
         + $"{result.Unchanged} unchanged, {result.Skipped} skipped.";
+
+    private static string FormatPushReceipt(string label, PushReceipt receipt)
+    {
+        var message = receipt.Applied
+            ? $"{label} applied in PSF Guard"
+            : $"{label} preview {receipt.PreviewId} is ready in PSF Guard";
+        if (!receipt.TryGetChangeCounts(out var inserted, out var updated))
+        {
+            return $"{message}.";
+        }
+
+        return message
+            + (receipt.Applied
+                ? $": {inserted} inserted, {updated} updated."
+                : $": {inserted} to insert, {updated} to update.");
+    }
 
     private void RaisePropertyChanged([CallerMemberName] string? propertyName = null)
     {

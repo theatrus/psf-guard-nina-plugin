@@ -92,6 +92,12 @@ catalog. Calibration frames enter PSF Guard's calibration library and never
 create `acquiredimage` rows. Reconcile operations transfer scheduler rows and
 optional thumbnails, never image bytes.
 
+Thumbnail transfer defaults off. When enabled, the plugin keeps thumbnail
+BLOBs binary in memory and streams bundle hashing, queue persistence, and HTTP
+serialization. A reconcile refuses more than 256 MiB of raw thumbnails before
+loading them; disable thumbnails or reconcile a smaller target when a catalog
+exceeds that limit.
+
 All profile-wide capture automation defaults off, including scheduler-row
 pushes and both image-upload switches. For sequence-local control, leave them
 off and add **PSF Guard image upload** to the applicable
@@ -107,7 +113,9 @@ has enabled its separate upload gate.
 Use **Reconcile** for an immediate full Target Scheduler snapshot. It waits for
 PSF Guard to create the preview and follows **Apply remote previews
 automatically**; when automatic apply is off, the status reports the preview ID
-left ready for review. **Push all** remains the durable queue-based equivalent.
+left ready for review. The completion status uses PSF Guard's apply result and
+reports inserted and updated counts when the server supplies them. **Push all**
+remains the durable queue-based equivalent.
 
 Queue records retain their original server, catalog, and profile-specific
 Credential Manager reference. They never store the API key itself and never
@@ -160,8 +168,9 @@ queue; disable that setting when the trigger should be the only catalog-sync
 policy for those exposures.
 
 Reconciliation instructions wait two seconds for final Target Scheduler image
-transactions before taking their read-only snapshot. They then await the remote
-preview, making them actual sequence barriers rather than queue-only actions.
+transactions before taking one consistent, read-only SQLite snapshot. They then
+await the remote preview, making them actual sequence barriers rather than
+queue-only actions.
 **Apply remote previews automatically** controls whether the barrier also
 applies the preview or leaves it ready for review in PSF Guard. Automatic
 per-capture pushes remain durably queued and retry independently.

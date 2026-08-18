@@ -73,7 +73,7 @@ internal sealed class PluginSettings
 
     public bool IncludeThumbnails
     {
-        get => options.GetValueBoolean(nameof(IncludeThumbnails), true);
+        get => options.GetValueBoolean(nameof(IncludeThumbnails), false);
         set => options.SetValueBoolean(nameof(IncludeThumbnails), value);
     }
 
