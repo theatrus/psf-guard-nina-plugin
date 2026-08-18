@@ -30,7 +30,8 @@ expose arbitrary SQL.
   Target Scheduler.
 - Destination-bound, durable, idempotent sync and image queues below
   `%LOCALAPPDATA%\NINA\PsfGuardSync`.
-- Manual full merge, planning push, and reviewed-grade push.
+- Manual full merge, blocking catalog reconcile, planning push, and
+  reviewed-grade push.
 - Manual planning and reviewed-grade pull.
 - GUID-based identity and Target Scheduler schema 22+ checks.
 - Parent-ID remapping for projects, targets, templates, and plans.
@@ -102,6 +103,11 @@ durable global queue owns the file and does not send it twice.
 Use **Test connection** before enabling automatic work. When direct image
 upload is selected, the check also verifies that the chosen PSF Guard database
 has enabled its separate upload gate.
+
+Use **Reconcile** for an immediate full Target Scheduler snapshot. It waits for
+PSF Guard to create the preview and follows **Apply remote previews
+automatically**; when automatic apply is off, the status reports the preview ID
+left ready for review. **Push all** remains the durable queue-based equivalent.
 
 Queue records retain their original server, catalog, and profile-specific
 Credential Manager reference. They never store the API key itself and never
