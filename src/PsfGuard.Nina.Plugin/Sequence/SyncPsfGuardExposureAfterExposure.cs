@@ -70,8 +70,27 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
     {
         using var status = BeginStatus(progress);
         var globalSync = IsGlobalCapturePushEnabled;
-        var globalUpload = UploadImage
-            && IsGlobalUploadEnabledFor(CaptureImageKind.Light);
+        var globalUpload = IsGlobalUploadEnabledFor(CaptureImageKind.Light);
+        if (!globalSync && globalUpload)
+        {
+            throw new InvalidOperationException(
+                "Enable automatic scheduler push or disable automatic saved-light upload "
+                + "before using the exposure sync trigger.");
+        }
+
+        if (UploadImage && globalSync && (!globalUpload || !AutoApplyPushes))
+        {
+            throw new InvalidOperationException(
+                "Use automatic saved-light upload with automatic preview apply so "
+                + "the scheduler row reaches PSF Guard before its image.");
+        }
+
+        if (UploadImage && !globalSync && !AutoApplyPushes)
+        {
+            throw new InvalidOperationException(
+                "Image upload after scheduler sync requires automatic preview apply.");
+        }
+
         if (globalSync && (!UploadImage || globalUpload))
         {
             return;
@@ -117,6 +136,48 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
 
     public override string ToString() =>
         $"Trigger: {nameof(SyncPsfGuardExposureAfterExposure)}, UploadImage: {UploadImage}";
+
+    protected override void AddValidationIssues(List<string> validationIssues)
+    {
+        if (!UploadImage)
+        {
+            if (!IsGlobalCapturePushEnabled
+                && IsGlobalUploadEnabledFor(CaptureImageKind.Light))
+            {
+                validationIssues.Add(
+                    "Enable automatic scheduler push or disable automatic saved-light upload.");
+            }
+
+            return;
+        }
+
+        if (!IsGlobalCapturePushEnabled
+            && IsGlobalUploadEnabledFor(CaptureImageKind.Light))
+        {
+            validationIssues.Add(
+                "Enable automatic scheduler push or disable automatic saved-light upload.");
+        }
+
+        if (IsGlobalCapturePushEnabled)
+        {
+            if (!IsGlobalUploadEnabledFor(CaptureImageKind.Light))
+            {
+                validationIssues.Add(
+                    "Enable automatic saved-light upload when global scheduler push is active.");
+            }
+
+            if (!AutoApplyPushes)
+            {
+                validationIssues.Add(
+                    "Enable automatic preview apply before combining scheduler sync and image upload.");
+            }
+        }
+        else if (!AutoApplyPushes)
+        {
+            validationIssues.Add(
+                "Enable automatic preview apply before uploading an image after scheduler sync.");
+        }
+    }
 
     private void ImageSaved(object? sender, ImageSavedEventArgs args)
     {

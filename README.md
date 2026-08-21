@@ -228,6 +228,23 @@ Target Scheduler catalog mode:
 7. It creates a PSF Guard preview using the bundle ID as the idempotency key.
 8. When automatic apply is enabled, it applies that exact preview.
 
+When both automatic scheduler push and saved-light upload are enabled, they
+use one durable job. The plugin applies the scheduler row first, records that
+phase on disk, and only then uploads the image. This prevents the image import
+from creating a second acquired-image row with a different GUID. The combined
+mode requires automatic apply; without it, the scheduler preview is queued but
+the dependent image upload is withheld.
+
+For sequencer-driven light delivery, use the exposure sync trigger's own image
+option. Do not combine separate scheduler-sync and image-upload triggers for
+the same light; independent triggers cannot guarantee which request arrives
+first.
+
+Scheduler sync does not wait for the image to exist on PSF Guard's storage.
+This supports an external copy process that publishes the file later. Preserve
+the basename and publish through a temporary name followed by an atomic rename
+so PSF Guard never opens a partial frame.
+
 If N.I.N.A., Target Scheduler, or the network stops after step 2, the queue
 resumes after the next plugin start.
 

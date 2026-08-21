@@ -483,9 +483,12 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                 && CaptureImageTypes.ShouldDirectUpload(imageType, UploadCalibrationImages);
             var schedulerPushRequested = AutoPushCaptures
                 && CaptureImageTypes.IsLight(imageType);
+            var schedulerDatabaseConfigured = !string.IsNullOrWhiteSpace(
+                TargetSchedulerDatabase);
             var shouldPushScheduler = schedulerPushRequested
-                && HasTargetSchedulerDatabase();
-            var missingSchedulerDatabase = schedulerPushRequested && !shouldPushScheduler;
+                && schedulerDatabaseConfigured;
+            var missingSchedulerDatabase = schedulerPushRequested
+                && !HasTargetSchedulerDatabase();
 
             if (!shouldUpload && !shouldPushScheduler)
             {
@@ -715,24 +718,12 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
         {
             var queued = new List<string>(2);
             var errors = new List<string>(2);
-            if (work.UploadImage)
-            {
-                try
-                {
-                    await imageUploadQueue.EnqueueAsync(
-                            work.Destination,
-                            work.ImagePath,
-                            CancellationToken.None)
-                        .ConfigureAwait(false);
-                    queued.Add("image upload");
-                }
-                catch (Exception exception)
-                {
-                    Logger.Error(exception);
-                    errors.Add($"image upload: {exception.Message}");
-                }
-            }
-
+            var dependentUpload = work.UploadImage
+                && work.PushScheduler
+                && work.AutoApplyPushes;
+            var withheldUpload = work.UploadImage
+                && work.PushScheduler
+                && !work.AutoApplyPushes;
             if (work.PushScheduler)
             {
                 try
@@ -754,15 +745,41 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                     await orchestrator.QueueCapturedImageAsync(
                             work.ImagePath,
                             work.ExposureStart,
+                            dependentUpload,
                             CancellationToken.None)
                         .ConfigureAwait(false);
-                    queued.Add("scheduler sync");
+                    queued.Add(dependentUpload
+                        ? "scheduler sync with dependent image upload"
+                        : "scheduler sync");
                 }
                 catch (Exception exception)
                 {
                     Logger.Error(exception);
                     errors.Add($"scheduler sync: {exception.Message}");
                 }
+            }
+            else if (work.UploadImage && !work.MissingSchedulerDatabase)
+            {
+                try
+                {
+                    await imageUploadQueue.EnqueueAsync(
+                            work.Destination,
+                            work.ImagePath,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    queued.Add("image upload");
+                }
+                catch (Exception exception)
+                {
+                    Logger.Error(exception);
+                    errors.Add($"image upload: {exception.Message}");
+                }
+            }
+
+            if (withheldUpload)
+            {
+                errors.Add(
+                    "image upload: enable automatic preview apply when scheduler sync is enabled");
             }
 
             var result = queued.Count > 0
@@ -775,7 +792,15 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
 
             if (work.MissingSchedulerDatabase)
             {
-                errors.Add("scheduler sync: configured scheduler database was not found");
+                if (work.PushScheduler)
+                {
+                    result += " Waiting for the configured scheduler database.";
+                }
+                else
+                {
+                    errors.Add(
+                        "scheduler sync and dependent image upload: configure a scheduler database");
+                }
             }
 
             if (errors.Count > 0)

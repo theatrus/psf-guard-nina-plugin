@@ -41,10 +41,6 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
         destination.Validate();
         ArgumentException.ThrowIfNullOrWhiteSpace(imagePath);
         var fullPath = Path.GetFullPath(imagePath);
-        if (!File.Exists(fullPath))
-        {
-            throw new FileNotFoundException("Saved image was not found.", fullPath);
-        }
 
         var job = new QueuedImageUploadJob
         {
@@ -84,6 +80,7 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
 
             job.Blocked = false;
             job.Attempts = 0;
+            job.PrerequisiteAttempts = 0;
             job.LastError = null;
             job.NextAttemptUtc = DateTimeOffset.UtcNow;
             await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
@@ -193,6 +190,19 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
             try
             {
                 job.Destination.Validate();
+                if (!File.Exists(job.ImagePath))
+                {
+                    var delay = await RecordPendingImageAsync(job, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (delay < soonest)
+                    {
+                        soonest = delay;
+                    }
+
+                    continue;
+                }
+
+                job.PrerequisiteAttempts = 0;
                 ReportStatus($"Uploading {Path.GetFileName(job.ImagePath)}...");
                 using var client = clientFactory(job.Destination);
                 await client.UploadImageAsync(
@@ -207,8 +217,10 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
             }
             catch (Exception exception)
             {
-                var delay = await RecordFailureAsync(job, exception, cancellationToken)
-                    .ConfigureAwait(false);
+                var delay = exception is FileNotFoundException or DirectoryNotFoundException
+                    ? await RecordPendingImageAsync(job, cancellationToken).ConfigureAwait(false)
+                    : await RecordFailureAsync(job, exception, cancellationToken)
+                        .ConfigureAwait(false);
                 if (delay.HasValue && delay.Value < soonest)
                 {
                     soonest = delay.Value;
@@ -234,7 +246,7 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
         Exception exception,
         CancellationToken cancellationToken)
     {
-        job.Attempts++;
+        job.Attempts = QueueFailurePolicy.IncrementAttempts(job.Attempts);
         job.LastError = exception.Message;
         var retry = job.Attempts < QueueFailurePolicy.MaximumAttempts
             && QueueFailurePolicy.ShouldRetry(exception);
@@ -251,6 +263,22 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
         await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
         ReportStatus(
             $"Image upload failed; retrying in {delay.TotalSeconds:0} seconds: {exception.Message}");
+        return delay;
+    }
+
+    private async Task<TimeSpan> RecordPendingImageAsync(
+        QueuedImageUploadJob job,
+        CancellationToken cancellationToken)
+    {
+        job.PrerequisiteAttempts = QueueFailurePolicy.IncrementAttempts(
+            job.PrerequisiteAttempts);
+        job.LastError = $"Saved image {Path.GetFileName(job.ImagePath)} is not available yet.";
+        var delay = QueueFailurePolicy.RetryDelay(job.PrerequisiteAttempts);
+        job.NextAttemptUtc = DateTimeOffset.UtcNow + delay;
+        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        ReportStatus(
+            $"Waiting for {Path.GetFileName(job.ImagePath)} before upload; "
+            + $"checking again in {delay.TotalSeconds:0} seconds.");
         return delay;
     }
 

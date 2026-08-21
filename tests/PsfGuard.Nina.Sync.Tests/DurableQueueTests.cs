@@ -299,6 +299,129 @@ public sealed class DurableQueueTests
     }
 
     [Fact]
+    public async Task MissingImageRemainsPendingAndUploadsAfterRestart()
+    {
+        using var directory = new TestDirectory();
+        var queuePath = directory.Child("queue");
+        var imagePath = directory.Child("delayed.fit");
+        var destination = Destination();
+        var statuses = new ConcurrentQueue<string>();
+        Guid jobId;
+        await using (var waitingQueue = new DurableImageUploadQueue(
+            queuePath,
+            _ => throw new InvalidOperationException("A missing file must not be uploaded."),
+            statuses.Enqueue))
+        {
+            jobId = await waitingQueue.EnqueueAsync(
+                destination,
+                imagePath,
+                CancellationToken.None);
+            var jobPath = Path.Combine(queuePath, $"{jobId:N}.json");
+            var queued = await ReadJobAsync<QueuedImageUploadJob>(jobPath);
+            queued.Attempts = QueueFailurePolicy.MaximumAttempts - 1;
+            await WriteJobAsync(jobPath, queued);
+
+            waitingQueue.Start();
+            await WaitUntilAsync(
+                () => statuses.Any(status => status.StartsWith(
+                    "Waiting for delayed.fit before upload",
+                    StringComparison.Ordinal)),
+                TimeSpan.FromSeconds(2));
+        }
+
+        var pendingPath = Path.Combine(queuePath, $"{jobId:N}.json");
+        var pending = await ReadJobAsync<QueuedImageUploadJob>(pendingPath);
+        Assert.False(pending.Blocked);
+        Assert.Equal(QueueFailurePolicy.MaximumAttempts - 1, pending.Attempts);
+        Assert.Equal(1, pending.PrerequisiteAttempts);
+
+        await File.WriteAllTextAsync(imagePath, "test image");
+        pending.NextAttemptUtc = DateTimeOffset.UtcNow;
+        await WriteJobAsync(pendingPath, pending);
+        var requests = 0;
+        await using var uploadQueue = new DurableImageUploadQueue(
+            queuePath,
+            actualDestination => Client(
+                actualDestination,
+                _ =>
+                {
+                    Interlocked.Increment(ref requests);
+                    return Json("""{"success":true,"data":{}}""");
+                }));
+        uploadQueue.Start();
+
+        await WaitUntilAsync(
+            () => Volatile.Read(ref requests) == 1 && !File.Exists(pendingPath),
+            TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task MissingSchedulerRowRemainsPendingAndPushesAfterRestart()
+    {
+        using var directory = new TestDirectory();
+        using var database = new TestDatabase();
+        database.Seed(0);
+        var queuePath = Directory.CreateDirectory(directory.Child("queue")).FullName;
+        var jobId = Guid.NewGuid();
+        var imagePath = @"c:\images\delayed.fits";
+        var statuses = new ConcurrentQueue<string>();
+        await WriteCaptureJobAsync(
+            queuePath,
+            jobId,
+            database.Path,
+            imagePath,
+            default,
+            attempts: QueueFailurePolicy.MaximumAttempts - 1);
+        await using (var waitingQueue = new DurablePushQueue(
+            queuePath,
+            _ => throw new InvalidOperationException("An unresolved capture must not be pushed."),
+            statuses.Enqueue))
+        {
+            waitingQueue.Start();
+            await WaitUntilAsync(
+                () => statuses.Any(status => status.StartsWith(
+                    "Waiting for Target Scheduler to record delayed.fits",
+                    StringComparison.Ordinal)),
+                TimeSpan.FromSeconds(2));
+        }
+
+        var pendingPath = Path.Combine(queuePath, $"{jobId:N}.json");
+        var pending = await ReadJobAsync<QueuedBundleJob>(pendingPath);
+        Assert.False(pending.Blocked);
+        Assert.Equal(QueueFailurePolicy.MaximumAttempts - 1, pending.Attempts);
+        Assert.Equal(1, pending.PrerequisiteAttempts);
+        Assert.Null(pending.Bundle);
+
+        using (var connection = database.Open())
+        {
+            connection.Execute(
+                "UPDATE acquiredimage SET metadata = @metadata WHERE Id = 5",
+                new Dictionary<string, object?>
+                {
+                    ["@metadata"] = """{"FileName":"C:\\images\\delayed.fits"}""",
+                });
+        }
+
+        pending.NextAttemptUtc = DateTimeOffset.UtcNow;
+        await WriteJobAsync(pendingPath, pending);
+        var requests = 0;
+        await using var pushQueue = new DurablePushQueue(
+            queuePath,
+            destination => Client(
+                destination,
+                _ =>
+                {
+                    Interlocked.Increment(ref requests);
+                    return Json("""{"preview_id":"preview-1","state":"ready"}""");
+                }));
+        pushQueue.Start();
+
+        await WaitUntilAsync(
+            () => Volatile.Read(ref requests) == 1 && !File.Exists(pendingPath),
+            TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
     public async Task UnresolvedSchedulerCaptureDoesNotDelayLaterCapture()
     {
         using var directory = new TestDirectory();
@@ -526,6 +649,19 @@ public sealed class DurableQueueTests
             NextAttemptUtc = DateTimeOffset.UtcNow,
         };
         await using var output = File.Create(Path.Combine(queuePath, $"{jobId:N}.json"));
+        await JsonSerializer.SerializeAsync(output, job, ProtocolJson.Options);
+    }
+
+    private static async Task<T> ReadJobAsync<T>(string path)
+    {
+        await using var input = File.OpenRead(path);
+        return await JsonSerializer.DeserializeAsync<T>(input, ProtocolJson.Options)
+            ?? throw new InvalidDataException("Queued test job was empty.");
+    }
+
+    private static async Task WriteJobAsync<T>(string path, T job)
+    {
+        await using var output = File.Create(path);
         await JsonSerializer.SerializeAsync(output, job, ProtocolJson.Options);
     }
 
