@@ -88,6 +88,7 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
                 <TextBlock
@@ -115,42 +116,53 @@
                     Grid.Row="2"
                     Margin="0,5,0,0"
                     VerticalAlignment="Center"
-                    Text="Push each saved light's Target Scheduler record" />
+                    Text="Defer image uploads" />
                 <CheckBox
                     Grid.Row="2"
                     Grid.Column="1"
                     Margin="0,5,0,0"
                     HorizontalAlignment="Left"
-                    IsChecked="{Binding AutoPushCaptures}" />
+                    IsChecked="{Binding DeferImageUploads}" />
                 <TextBlock
                     Grid.Row="3"
                     Margin="0,5,0,0"
                     VerticalAlignment="Center"
-                    Text="Apply remote previews automatically" />
+                    Text="Push each saved light's Target Scheduler record" />
                 <CheckBox
                     Grid.Row="3"
+                    Grid.Column="1"
+                    Margin="0,5,0,0"
+                    HorizontalAlignment="Left"
+                    IsChecked="{Binding AutoPushCaptures}" />
+                <TextBlock
+                    Grid.Row="4"
+                    Margin="0,5,0,0"
+                    VerticalAlignment="Center"
+                    Text="Apply remote previews automatically" />
+                <CheckBox
+                    Grid.Row="4"
                     Grid.Column="1"
                     Margin="0,5,0,0"
                     HorizontalAlignment="Left"
                     IsChecked="{Binding AutoApplyPushes}" />
                 <TextBlock
-                    Grid.Row="4"
+                    Grid.Row="5"
                     Margin="0,5,0,0"
                     VerticalAlignment="Center"
                     Text="Include Target Scheduler thumbnails" />
                 <CheckBox
-                    Grid.Row="4"
+                    Grid.Row="5"
                     Grid.Column="1"
                     Margin="0,5,0,0"
                     HorizontalAlignment="Left"
                     IsChecked="{Binding IncludeThumbnails}" />
                 <TextBlock
-                    Grid.Row="5"
+                    Grid.Row="6"
                     Margin="0,5,0,0"
                     VerticalAlignment="Center"
                     Text="Pull merged catalog back after full reconcile" />
                 <CheckBox
-                    Grid.Row="5"
+                    Grid.Row="6"
                     Grid.Column="1"
                     Margin="0,5,0,0"
                     HorizontalAlignment="Left"
@@ -173,6 +185,11 @@
                     Margin="0,0,8,0"
                     Command="{Binding ReconcileCommand}"
                     Content="Reconcile" />
+                <Button
+                    MinWidth="120"
+                    Margin="0,0,8,0"
+                    Command="{Binding StartQueuedUploadsCommand}"
+                    Content="Start queued uploads" />
                 <Button
                     MinWidth="120"
                     Command="{Binding PullPlanningCommand}"

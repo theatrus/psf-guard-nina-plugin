@@ -22,6 +22,7 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
 {
     private static readonly TimeSpan ImageSaveTimeout = TimeSpan.FromMinutes(2);
     private readonly IImageSaveMediator imageSaveMediator;
+    private readonly IDeferredUploadController deferredUploadController;
     private readonly SavedCaptureInbox inbox = new();
     private bool subscribed;
     private bool uploadImage;
@@ -29,16 +30,19 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
     [ImportingConstructor]
     public SyncPsfGuardExposureAfterExposure(
         IProfileService profileService,
-        IImageSaveMediator imageSaveMediator)
+        IImageSaveMediator imageSaveMediator,
+        IDeferredUploadController deferredUploadController)
         : base(profileService)
     {
         this.imageSaveMediator = imageSaveMediator;
+        this.deferredUploadController = deferredUploadController;
     }
 
     private SyncPsfGuardExposureAfterExposure(SyncPsfGuardExposureAfterExposure copy)
         : base(copy)
     {
         imageSaveMediator = copy.imageSaveMediator;
+        deferredUploadController = copy.deferredUploadController;
         UploadImage = copy.UploadImage;
     }
 
@@ -117,8 +121,18 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
 
         if (UploadImage && !globalUpload)
         {
-            Report(progress, "Uploading image...");
-            await UploadImageAsync(capture.ImagePath, token).ConfigureAwait(false);
+            if (DeferImageUploads)
+            {
+                Report(progress, "Queueing deferred image...");
+                await deferredUploadController
+                    .QueueDeferredImageUploadAsync(capture.ImagePath, token)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                Report(progress, "Uploading image...");
+                await UploadImageAsync(capture.ImagePath, token).ConfigureAwait(false);
+            }
         }
     }
 

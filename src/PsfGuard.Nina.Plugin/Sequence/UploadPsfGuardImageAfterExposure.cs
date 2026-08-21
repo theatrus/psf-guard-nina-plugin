@@ -23,6 +23,7 @@ public sealed class UploadPsfGuardImageAfterExposure : PsfGuardSequenceTriggerBa
 {
     private static readonly TimeSpan ImageSaveTimeout = TimeSpan.FromMinutes(2);
     private readonly IImageSaveMediator imageSaveMediator;
+    private readonly IDeferredUploadController deferredUploadController;
     private readonly SavedCaptureInbox inbox = new();
     private bool subscribed;
     private bool uploadLights = true;
@@ -32,16 +33,19 @@ public sealed class UploadPsfGuardImageAfterExposure : PsfGuardSequenceTriggerBa
     [ImportingConstructor]
     public UploadPsfGuardImageAfterExposure(
         IProfileService profileService,
-        IImageSaveMediator imageSaveMediator)
+        IImageSaveMediator imageSaveMediator,
+        IDeferredUploadController deferredUploadController)
         : base(profileService)
     {
         this.imageSaveMediator = imageSaveMediator;
+        this.deferredUploadController = deferredUploadController;
     }
 
     private UploadPsfGuardImageAfterExposure(UploadPsfGuardImageAfterExposure copy)
         : base(copy)
     {
         imageSaveMediator = copy.imageSaveMediator;
+        deferredUploadController = copy.deferredUploadController;
         UploadLights = copy.UploadLights;
         UploadCalibrationFrames = copy.UploadCalibrationFrames;
     }
@@ -127,6 +131,15 @@ public sealed class UploadPsfGuardImageAfterExposure : PsfGuardSequenceTriggerBa
 
         if (globalUpload)
         {
+            return;
+        }
+
+        if (DeferImageUploads)
+        {
+            Report(progress, "Queueing deferred image...");
+            await deferredUploadController
+                .QueueDeferredImageUploadAsync(capture.ImagePath, token)
+                .ConfigureAwait(false);
             return;
         }
 

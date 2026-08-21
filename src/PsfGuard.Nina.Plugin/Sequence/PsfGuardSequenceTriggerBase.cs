@@ -41,6 +41,7 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
     }
 
     protected bool AutoApplyPushes => settings.AutoApplyPushes;
+    protected bool DeferImageUploads => settings.DeferImageUploads;
     protected virtual bool RequiresTargetScheduler => true;
 
     protected bool IsGlobalCapturePushEnabled =>

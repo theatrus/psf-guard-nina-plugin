@@ -65,6 +65,12 @@ internal sealed class PluginSettings
         set => options.SetValueBoolean(nameof(UploadCalibrationImages), value);
     }
 
+    public bool DeferImageUploads
+    {
+        get => options.GetValueBoolean(nameof(DeferImageUploads), false);
+        set => options.SetValueBoolean(nameof(DeferImageUploads), value);
+    }
+
     public bool AutoApplyPushes
     {
         get => options.GetValueBoolean(nameof(AutoApplyPushes), true);

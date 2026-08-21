@@ -9,6 +9,7 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
     private readonly string queueDirectory;
     private readonly Func<RemoteQueueDestination, PsfGuardSyncClient> clientFactory;
     private readonly Action<string>? statusSink;
+    private readonly SemaphoreSlim mutationGate = new(1, 1);
     private readonly SemaphoreSlim signal = new(0, 1);
     private readonly CancellationTokenSource stopping = new();
     private Task? worker;
@@ -31,9 +32,22 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
         Wake();
     }
 
+    public Task<Guid> EnqueueAsync(
+        RemoteQueueDestination destination,
+        string imagePath,
+        CancellationToken cancellationToken)
+    {
+        return EnqueueAsync(
+            destination,
+            imagePath,
+            deferImageUpload: false,
+            cancellationToken);
+    }
+
     public async Task<Guid> EnqueueAsync(
         RemoteQueueDestination destination,
         string imagePath,
+        bool deferImageUpload,
         CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
@@ -47,6 +61,7 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
             JobId = Guid.NewGuid(),
             Destination = destination,
             ImagePath = fullPath,
+            ImageUploadDeferred = deferImageUpload,
             Attempts = 0,
             NextAttemptUtc = DateTimeOffset.UtcNow,
         };
@@ -54,6 +69,51 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
         await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
         Wake();
         return job.JobId;
+    }
+
+    public async Task<int> ReleaseDeferredAsync(
+        RemoteQueueDestination destination,
+        CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(destination);
+        destination.Validate();
+        if (!Directory.Exists(queueDirectory))
+        {
+            return 0;
+        }
+
+        var released = 0;
+        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            foreach (var file in QueueFiles())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
+                if (job is null
+                    || !job.ImageUploadDeferred
+                    || job.Destination != destination)
+                {
+                    continue;
+                }
+
+                job.ImageUploadDeferred = false;
+                job.NextAttemptUtc = DateTimeOffset.UtcNow;
+                await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+                released++;
+            }
+        }
+        finally
+        {
+            mutationGate.Release();
+            if (released > 0)
+            {
+                Wake();
+            }
+        }
+
+        return released;
     }
 
     public async Task<int> RetryBlockedAsync(
@@ -69,22 +129,30 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
         }
 
         var retried = 0;
-        foreach (var file in QueueFiles())
+        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
-            if (job is null || !job.Blocked || job.Destination != destination)
+            foreach (var file in QueueFiles())
             {
-                continue;
-            }
+                cancellationToken.ThrowIfCancellationRequested();
+                var job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
+                if (job is null || !job.Blocked || job.Destination != destination)
+                {
+                    continue;
+                }
 
-            job.Blocked = false;
-            job.Attempts = 0;
-            job.PrerequisiteAttempts = 0;
-            job.LastError = null;
-            job.NextAttemptUtc = DateTimeOffset.UtcNow;
-            await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
-            retried++;
+                job.Blocked = false;
+                job.Attempts = 0;
+                job.PrerequisiteAttempts = 0;
+                job.LastError = null;
+                job.NextAttemptUtc = DateTimeOffset.UtcNow;
+                await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+                retried++;
+            }
+        }
+        finally
+        {
+            mutationGate.Release();
         }
 
         if (retried > 0)
@@ -117,6 +185,7 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
         }
 
         stopping.Dispose();
+        mutationGate.Dispose();
         signal.Dispose();
     }
 
@@ -157,83 +226,91 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
         foreach (var file in QueueFiles())
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
-            if (job is null)
-            {
-                continue;
-            }
-
-            if (job.Completed)
-            {
-                TryDeleteJob(file);
-                continue;
-            }
-
-            if (job.Blocked)
-            {
-                continue;
-            }
-
-            if (job.Destination is null)
-            {
-                await BlockLegacyJobAsync(job, cancellationToken).ConfigureAwait(false);
-                continue;
-            }
-
-            var wait = job.NextAttemptUtc - DateTimeOffset.UtcNow;
-            if (wait > TimeSpan.Zero)
-            {
-                soonest = wait < soonest ? wait : soonest;
-                continue;
-            }
-
+            await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                job.Destination.Validate();
-                if (!File.Exists(job.ImagePath))
+                var job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
+                if (job is null)
                 {
-                    var delay = await RecordPendingImageAsync(job, cancellationToken)
-                        .ConfigureAwait(false);
-                    if (delay < soonest)
+                    continue;
+                }
+
+                if (job.Completed)
+                {
+                    TryDeleteJob(file);
+                    continue;
+                }
+
+                if (job.ImageUploadDeferred || job.Blocked)
+                {
+                    continue;
+                }
+
+                if (job.Destination is null)
+                {
+                    await BlockLegacyJobAsync(job, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+
+                var wait = job.NextAttemptUtc - DateTimeOffset.UtcNow;
+                if (wait > TimeSpan.Zero)
+                {
+                    soonest = wait < soonest ? wait : soonest;
+                    continue;
+                }
+
+                try
+                {
+                    job.Destination.Validate();
+                    if (!File.Exists(job.ImagePath))
                     {
-                        soonest = delay;
+                        var delay = await RecordPendingImageAsync(job, cancellationToken)
+                            .ConfigureAwait(false);
+                        if (delay < soonest)
+                        {
+                            soonest = delay;
+                        }
+
+                        continue;
+                    }
+
+                    job.PrerequisiteAttempts = 0;
+                    ReportStatus($"Uploading {Path.GetFileName(job.ImagePath)}...");
+                    using var client = clientFactory(job.Destination);
+                    await client.UploadImageAsync(
+                            job.Destination.CatalogId,
+                            job.ImagePath,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    var delay = exception is FileNotFoundException or DirectoryNotFoundException
+                        ? await RecordPendingImageAsync(job, cancellationToken).ConfigureAwait(false)
+                        : await RecordFailureAsync(job, exception, cancellationToken)
+                            .ConfigureAwait(false);
+                    if (delay.HasValue && delay.Value < soonest)
+                    {
+                        soonest = delay.Value;
                     }
 
                     continue;
                 }
 
-                job.PrerequisiteAttempts = 0;
-                ReportStatus($"Uploading {Path.GetFileName(job.ImagePath)}...");
-                using var client = clientFactory(job.Destination);
-                await client.UploadImageAsync(
-                        job.Destination.CatalogId,
-                        job.ImagePath,
-                        cancellationToken)
-                    .ConfigureAwait(false);
+                job.Completed = true;
+                job.LastError = null;
+                await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+                TryDeleteJob(file);
+                ReportStatus($"Uploaded {Path.GetFileName(job.ImagePath)} to PSF Guard.");
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            finally
             {
-                throw;
+                mutationGate.Release();
             }
-            catch (Exception exception)
-            {
-                var delay = exception is FileNotFoundException or DirectoryNotFoundException
-                    ? await RecordPendingImageAsync(job, cancellationToken).ConfigureAwait(false)
-                    : await RecordFailureAsync(job, exception, cancellationToken)
-                        .ConfigureAwait(false);
-                if (delay.HasValue && delay.Value < soonest)
-                {
-                    soonest = delay.Value;
-                }
-
-                continue;
-            }
-
-            job.Completed = true;
-            job.LastError = null;
-            await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
-            TryDeleteJob(file);
-            ReportStatus($"Uploaded {Path.GetFileName(job.ImagePath)} to PSF Guard.");
         }
 
         return soonest < TimeSpan.FromMilliseconds(100)
