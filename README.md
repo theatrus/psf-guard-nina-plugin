@@ -30,6 +30,8 @@ expose arbitrary SQL.
   Target Scheduler.
 - Destination-bound, durable, idempotent sync and image queues below
   `%LOCALAPPDATA%\NINA\PsfGuardSync`.
+- Optional deferred image transfer with settings and sequencer actions to start
+  the queued uploads at the end of a target or session.
 - Manual full merge, blocking catalog reconcile, planning push, and
   reviewed-grade push.
 - Manual planning and reviewed-grade pull.
@@ -92,6 +94,16 @@ catalog. Calibration frames enter PSF Guard's calibration library and never
 create `acquiredimage` rows. Reconcile operations transfer scheduler rows and
 optional thumbnails, never image bytes.
 
+Enable **Defer image uploads** to persist requested image transfers without
+starting them. Target Scheduler records still sync immediately. Select **Start
+queued uploads** in plugin settings, or run **Start PSF Guard uploads** in the
+Advanced Sequencer, to release the deferred bundle and standalone-image jobs
+for the active server, catalog, and profile credential. The action starts the
+background transfers and does not wait for every upload to finish. It includes
+all image-save work queued before the action; captures that arrive after that
+barrier remain deferred for the next run. Keep each source FITS or XISF file at
+its original path until its upload completes.
+
 Thumbnail transfer defaults off. When enabled, the plugin keeps thumbnail
 BLOBs binary in memory and streams bundle hashing, queue persistence, and HTTP
 serialization. A reconcile refuses more than 256 MiB of raw thumbnails before
@@ -150,6 +162,10 @@ advanced sequencer:
 - **Check PSF Guard connection** verifies the server, API token, and selected
   catalog. Put it near the beginning of a session when a remote outage should
   follow the instruction's configured error behavior.
+- **Start PSF Guard uploads** releases image jobs deferred for the active
+  destination. Put it at the end of a target or session. It starts the durable
+  queue and reports how many uploads were released without waiting for them to
+  finish.
 - **Pull PSF Guard planning** applies remote projects, targets, templates, and
   plans to Target Scheduler. Run it before a Target Scheduler container starts;
   an already-running container may retain its in-memory plan.
@@ -173,10 +189,10 @@ advanced sequencer:
 - **PSF Guard exposure sync** waits for the completed save and Target Scheduler
   commit, then pushes only that acquired-image row and its required parent
   records. Its optional **Upload image** switch sends the same saved file after
-  the capture sync. Use it when each exposure should sync without reconciling
-  the whole target.
+  the capture sync, or queues it when deferred uploads are enabled. Use it when
+  each exposure should sync without reconciling the whole target.
 - **PSF Guard image upload** waits for N.I.N.A.'s completed
-  save and uploads the resulting FITS or XISF file. Its own light and
+  save and uploads or defers the resulting FITS or XISF file. Its own light and
   calibration switches are serialized with the sequence, so it works without
   enabling profile-wide automatic uploads or installing Target Scheduler.
 
@@ -201,16 +217,19 @@ of guessing.
 Global direct image mode:
 
 1. N.I.N.A. saves a FITS or XISF light, or an opted-in calibration frame.
-2. The plugin persists an image-upload job and returns immediately.
+2. The plugin persists an image-upload job and returns immediately. With
+   deferred uploads enabled, the job remains held until a settings or
+   sequencer action releases it.
 3. Its background worker hashes and streams the file to the selected PSF Guard
    database.
 4. PSF Guard verifies the digest and imports the image. Lights resolve or
    create a target and exposure plan; calibration frames enter its calibration
    library.
 
-Sequence-triggered image mode follows the same server path but uploads as a
-blocking trigger after each selected exposure. A failed upload therefore uses
-the trigger's configured sequence error behavior instead of remaining in the
+Sequence-triggered image mode follows the same server path. Without deferral,
+it uploads as a blocking trigger after each selected exposure, and a failure
+uses the trigger's configured sequence error behavior. With deferral, the
+trigger returns after persisting a held job; later delivery and retries use the
 durable background queue.
 
 Target Scheduler catalog mode:

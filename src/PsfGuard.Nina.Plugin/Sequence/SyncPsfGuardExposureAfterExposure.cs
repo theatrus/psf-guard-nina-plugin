@@ -22,23 +22,27 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
 {
     private static readonly TimeSpan ImageSaveTimeout = TimeSpan.FromMinutes(2);
     private readonly IImageSaveMediator imageSaveMediator;
-    private readonly SavedCaptureInbox inbox = new();
+    private readonly IDeferredUploadController deferredUploadController;
+    private readonly SavedCaptureInbox<PluginSettingsCapture> inbox = new();
     private bool subscribed;
     private bool uploadImage;
 
     [ImportingConstructor]
     public SyncPsfGuardExposureAfterExposure(
         IProfileService profileService,
-        IImageSaveMediator imageSaveMediator)
+        IImageSaveMediator imageSaveMediator,
+        IDeferredUploadController deferredUploadController)
         : base(profileService)
     {
         this.imageSaveMediator = imageSaveMediator;
+        this.deferredUploadController = deferredUploadController;
     }
 
     private SyncPsfGuardExposureAfterExposure(SyncPsfGuardExposureAfterExposure copy)
         : base(copy)
     {
         imageSaveMediator = copy.imageSaveMediator;
+        deferredUploadController = copy.deferredUploadController;
         UploadImage = copy.UploadImage;
     }
 
@@ -69,8 +73,17 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
         CancellationToken token)
     {
         using var status = BeginStatus(progress);
-        var globalSync = IsGlobalCapturePushEnabled;
-        var globalUpload = IsGlobalUploadEnabledFor(CaptureImageKind.Light);
+        Report(progress, "Waiting for image save...");
+        var capture = await inbox.WaitForNextAsync(
+                CaptureImageKind.Light,
+                ImageSaveTimeout,
+                token)
+            .ConfigureAwait(false);
+        var captureSettings = capture.Context.RequireSnapshot();
+        var globalSync = WasGlobalCapturePushEnabled(captureSettings);
+        var globalUpload = WasGlobalUploadEnabledFor(
+            captureSettings,
+            CaptureImageKind.Light);
         if (!globalSync && globalUpload)
         {
             throw new InvalidOperationException(
@@ -78,14 +91,16 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
                 + "before using the exposure sync trigger.");
         }
 
-        if (UploadImage && globalSync && (!globalUpload || !AutoApplyPushes))
+        if (UploadImage
+            && globalSync
+            && (!globalUpload || !captureSettings.AutoApplyPushes))
         {
             throw new InvalidOperationException(
                 "Use automatic saved-light upload with automatic preview apply so "
                 + "the scheduler row reaches PSF Guard before its image.");
         }
 
-        if (UploadImage && !globalSync && !AutoApplyPushes)
+        if (UploadImage && !globalSync && !captureSettings.AutoApplyPushes)
         {
             throw new InvalidOperationException(
                 "Image upload after scheduler sync requires automatic preview apply.");
@@ -96,29 +111,39 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
             return;
         }
 
-        Report(progress, "Waiting for image save...");
-        var capture = await inbox.WaitForNextAsync(
-                CaptureImageKind.Light,
-                ImageSaveTimeout,
-                token)
-            .ConfigureAwait(false);
         if (!globalSync)
         {
-            var autoApply = AutoApplyPushes;
             Report(progress, "Waiting for scheduler...");
-            await CreateOrchestrator()
+            await CreateOrchestrator(captureSettings)
                 .PushCapturedImageAsync(
                     capture.ImagePath,
                     capture.ExposureStart,
-                    autoApply,
+                    captureSettings.AutoApplyPushes,
                     token)
                 .ConfigureAwait(false);
         }
 
         if (UploadImage && !globalUpload)
         {
-            Report(progress, "Uploading image...");
-            await UploadImageAsync(capture.ImagePath, token).ConfigureAwait(false);
+            if (captureSettings.DeferImageUploads)
+            {
+                Report(progress, "Queueing deferred image...");
+                await deferredUploadController
+                    .QueueDeferredImageUploadAsync(
+                        captureSettings.RequireQueueDestination(),
+                        capture.ImagePath,
+                        token)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                Report(progress, "Uploading image...");
+                await UploadImageAsync(
+                        captureSettings,
+                        capture.ImagePath,
+                        token)
+                    .ConfigureAwait(false);
+            }
         }
     }
 
@@ -187,9 +212,10 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
             return;
         }
 
-        inbox.Add(new SavedCapture(
+        inbox.Add(new SavedCapture<PluginSettingsCapture>(
             args.PathToImage.LocalPath,
             CaptureImageKind.Light,
+            CaptureProfileSettings(),
             args.MetaData?.Image?.ExposureStart ?? default));
     }
 

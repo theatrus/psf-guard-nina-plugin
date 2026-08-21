@@ -12,6 +12,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
     private readonly string queueDirectory;
     private readonly Func<RemoteQueueDestination, PsfGuardSyncClient> clientFactory;
     private readonly Action<string>? statusSink;
+    private readonly SemaphoreSlim mutationGate = new(1, 1);
     private readonly SemaphoreSlim signal = new(0, 1);
     private readonly CancellationTokenSource stopping = new();
     private Task? worker;
@@ -53,6 +54,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
             bundle,
             capture: null,
             autoApply,
+            imageUploadDeferred: false,
             cancellationToken);
     }
 
@@ -75,6 +77,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
             includeThumbnail,
             autoApply,
             uploadImageAfterApply: false,
+            deferImageUpload: false,
             cancellationToken);
     }
 
@@ -89,6 +92,31 @@ public sealed class DurablePushQueue : IAsyncDisposable
         bool uploadImageAfterApply,
         CancellationToken cancellationToken)
     {
+        return EnqueueCaptureAsync(
+            destination,
+            databasePath,
+            productVersion,
+            imagePath,
+            exposureStart,
+            includeThumbnail,
+            autoApply,
+            uploadImageAfterApply,
+            deferImageUpload: false,
+            cancellationToken);
+    }
+
+    public Task<Guid> EnqueueCaptureAsync(
+        RemoteQueueDestination destination,
+        string databasePath,
+        string productVersion,
+        string imagePath,
+        DateTime exposureStart,
+        bool includeThumbnail,
+        bool autoApply,
+        bool uploadImageAfterApply,
+        bool deferImageUpload,
+        CancellationToken cancellationToken)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(productVersion);
         ArgumentException.ThrowIfNullOrWhiteSpace(imagePath);
@@ -96,6 +124,12 @@ public sealed class DurablePushQueue : IAsyncDisposable
         {
             throw new InvalidOperationException(
                 "A dependent image upload requires automatic preview apply.");
+        }
+
+        if (deferImageUpload && !uploadImageAfterApply)
+        {
+            throw new InvalidOperationException(
+                "A deferred image upload requires dependent image upload.");
         }
 
         return EnqueueJobAsync(
@@ -111,7 +145,53 @@ public sealed class DurablePushQueue : IAsyncDisposable
                 UploadImageAfterApply = uploadImageAfterApply,
             },
             autoApply,
+            deferImageUpload,
             cancellationToken);
+    }
+
+    public async Task<int> ReleaseDeferredAsync(
+        RemoteQueueDestination destination,
+        CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(destination);
+        destination.Validate();
+        if (!Directory.Exists(queueDirectory))
+        {
+            return 0;
+        }
+
+        var released = 0;
+        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            foreach (var file in QueueFiles())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
+                if (job is null
+                    || !job.ImageUploadDeferred
+                    || job.Destination != destination)
+                {
+                    continue;
+                }
+
+                job.ImageUploadDeferred = false;
+                job.NextAttemptUtc = DateTimeOffset.UtcNow;
+                await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+                released++;
+            }
+        }
+        finally
+        {
+            mutationGate.Release();
+            if (released > 0)
+            {
+                Wake();
+            }
+        }
+
+        return released;
     }
 
     public async Task<int> RetryBlockedAsync(
@@ -127,22 +207,30 @@ public sealed class DurablePushQueue : IAsyncDisposable
         }
 
         var retried = 0;
-        foreach (var file in QueueFiles())
+        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
-            if (job is null || !job.Blocked || job.Destination != destination)
+            foreach (var file in QueueFiles())
             {
-                continue;
-            }
+                cancellationToken.ThrowIfCancellationRequested();
+                var job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
+                if (job is null || !job.Blocked || job.Destination != destination)
+                {
+                    continue;
+                }
 
-            job.Blocked = false;
-            job.Attempts = 0;
-            job.PrerequisiteAttempts = 0;
-            job.LastError = null;
-            job.NextAttemptUtc = DateTimeOffset.UtcNow;
-            await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
-            retried++;
+                job.Blocked = false;
+                job.Attempts = 0;
+                job.PrerequisiteAttempts = 0;
+                job.LastError = null;
+                job.NextAttemptUtc = DateTimeOffset.UtcNow;
+                await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+                retried++;
+            }
+        }
+        finally
+        {
+            mutationGate.Release();
         }
 
         if (retried > 0)
@@ -175,6 +263,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
         }
 
         stopping.Dispose();
+        mutationGate.Dispose();
         signal.Dispose();
     }
 
@@ -183,6 +272,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
         CatalogBundle? bundle,
         QueuedCaptureSource? capture,
         bool autoApply,
+        bool imageUploadDeferred,
         CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
@@ -195,11 +285,21 @@ public sealed class DurablePushQueue : IAsyncDisposable
             AutoApply = autoApply,
             Bundle = bundle,
             Capture = capture,
+            ImageUploadDeferred = imageUploadDeferred,
             Attempts = 0,
             NextAttemptUtc = DateTimeOffset.UtcNow,
         };
         Directory.CreateDirectory(queueDirectory);
-        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            mutationGate.Release();
+        }
+
         Wake();
         return job.JobId;
     }
@@ -241,16 +341,25 @@ public sealed class DurablePushQueue : IAsyncDisposable
         foreach (var file in QueueFiles())
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
-            if (job is null)
+            QueuedBundleJob? job;
+            await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
-                continue;
-            }
+                job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
+                if (job is null)
+                {
+                    continue;
+                }
 
-            if (job.Completed)
+                if (job.Completed)
+                {
+                    TryDeleteJob(file);
+                    continue;
+                }
+            }
+            finally
             {
-                TryDeleteJob(file);
-                continue;
+                mutationGate.Release();
             }
 
             if (job.Blocked)
@@ -261,6 +370,11 @@ public sealed class DurablePushQueue : IAsyncDisposable
             if (job.Destination is null)
             {
                 await BlockLegacyJobAsync(job, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            if (job.ImageUploadDeferred && job.SchedulerApplied)
+            {
                 continue;
             }
 
@@ -323,7 +437,14 @@ public sealed class DurablePushQueue : IAsyncDisposable
                     job.PrerequisiteAttempts = 0;
                     job.LastError = null;
                     job.NextAttemptUtc = DateTimeOffset.UtcNow;
-                    await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+                    await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
+                    if (job.ImageUploadDeferred)
+                    {
+                        ReportStatus(
+                            $"Applied scheduler sync for {Path.GetFileName(job.Capture.ImagePath)}; "
+                            + "image upload is deferred.");
+                        continue;
+                    }
                 }
                 else
                 {
@@ -522,7 +643,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
         if (job.Attempts >= QueueFailurePolicy.MaximumAttempts)
         {
             job.Blocked = true;
-            await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+            await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
             ReportStatus($"Sync job blocked: {exception.Message}");
             return null;
         }
@@ -537,7 +658,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
         job.Bundle = renewed;
         var delay = QueueFailurePolicy.RetryDelay(job.Attempts);
         job.NextAttemptUtc = DateTimeOffset.UtcNow + delay;
-        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
         ReportStatus(
             $"{exception.Message} "
             + $"retrying with a fresh preview in {delay.TotalSeconds:0} seconds.");
@@ -553,8 +674,8 @@ public sealed class DurablePushQueue : IAsyncDisposable
     {
         job.Completed = true;
         job.LastError = null;
-        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
-        TryDeleteJob(file);
+        await PersistAndDeleteWorkerJobAsync(job, file, cancellationToken)
+            .ConfigureAwait(false);
         var status = FormatPushStatus(receipt);
         if (!string.IsNullOrWhiteSpace(uploadedImage))
         {
@@ -598,7 +719,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
         job.PrerequisiteAttempts = 0;
         job.LastError = null;
         job.NextAttemptUtc = DateTimeOffset.UtcNow;
-        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
         return true;
     }
 
@@ -614,7 +735,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
             + $"{Path.GetFileName(capture.ImagePath)} yet.";
         var delay = QueueFailurePolicy.RetryDelay(job.PrerequisiteAttempts);
         job.NextAttemptUtc = DateTimeOffset.UtcNow + delay;
-        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
         ReportStatus(
             $"Waiting for Target Scheduler to record {Path.GetFileName(capture.ImagePath)}; "
             + $"checking again in {delay.TotalSeconds:0} seconds.");
@@ -632,7 +753,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
         job.LastError = $"Saved image {Path.GetFileName(capture.ImagePath)} is not available yet.";
         var delay = QueueFailurePolicy.RetryDelay(job.PrerequisiteAttempts);
         job.NextAttemptUtc = DateTimeOffset.UtcNow + delay;
-        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
         ReportStatus(
             $"Scheduler sync is applied; waiting for {Path.GetFileName(capture.ImagePath)} "
             + $"before upload ({delay.TotalSeconds:0} seconds).");
@@ -652,14 +773,14 @@ public sealed class DurablePushQueue : IAsyncDisposable
         if (!retry)
         {
             job.Blocked = true;
-            await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+            await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
             ReportStatus($"Sync job blocked: {exception.Message}");
             return null;
         }
 
         var delay = QueueFailurePolicy.RetryDelay(job.Attempts);
         job.NextAttemptUtc = DateTimeOffset.UtcNow + delay;
-        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
         ReportStatus(
             $"Sync job failed; retrying in {delay.TotalSeconds:0} seconds: {exception.Message}");
         return delay;
@@ -671,8 +792,62 @@ public sealed class DurablePushQueue : IAsyncDisposable
     {
         job.Blocked = true;
         job.LastError = "This job predates destination-bound queues and must be queued again.";
-        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
         ReportStatus($"Sync job blocked: {job.LastError}");
+    }
+
+    private async Task PersistWorkerJobAsync(
+        QueuedBundleJob job,
+        CancellationToken cancellationToken)
+    {
+        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await MergeDeferredStateAsync(job, cancellationToken).ConfigureAwait(false);
+            await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            mutationGate.Release();
+        }
+    }
+
+    private async Task PersistAndDeleteWorkerJobAsync(
+        QueuedBundleJob job,
+        string file,
+        CancellationToken cancellationToken)
+    {
+        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await MergeDeferredStateAsync(job, cancellationToken).ConfigureAwait(false);
+            await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+            TryDeleteJob(file);
+        }
+        finally
+        {
+            mutationGate.Release();
+        }
+    }
+
+    private async Task MergeDeferredStateAsync(
+        QueuedBundleJob job,
+        CancellationToken cancellationToken)
+    {
+        if (!job.ImageUploadDeferred)
+        {
+            return;
+        }
+
+        var path = JobPath(job.JobId);
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException("Queued sync state disappeared.", path);
+        }
+
+        var current = await TryReadJobAsync(path, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidDataException("Queued sync state became unreadable.");
+        job.ImageUploadDeferred = current.ImageUploadDeferred;
     }
 
     private async Task<QueuedBundleJob?> TryReadJobAsync(

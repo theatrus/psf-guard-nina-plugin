@@ -23,7 +23,8 @@ public sealed class UploadPsfGuardImageAfterExposure : PsfGuardSequenceTriggerBa
 {
     private static readonly TimeSpan ImageSaveTimeout = TimeSpan.FromMinutes(2);
     private readonly IImageSaveMediator imageSaveMediator;
-    private readonly SavedCaptureInbox inbox = new();
+    private readonly IDeferredUploadController deferredUploadController;
+    private readonly SavedCaptureInbox<PluginSettingsCapture> inbox = new();
     private bool subscribed;
     private bool uploadLights = true;
     private bool uploadCalibrationFrames;
@@ -32,16 +33,19 @@ public sealed class UploadPsfGuardImageAfterExposure : PsfGuardSequenceTriggerBa
     [ImportingConstructor]
     public UploadPsfGuardImageAfterExposure(
         IProfileService profileService,
-        IImageSaveMediator imageSaveMediator)
+        IImageSaveMediator imageSaveMediator,
+        IDeferredUploadController deferredUploadController)
         : base(profileService)
     {
         this.imageSaveMediator = imageSaveMediator;
+        this.deferredUploadController = deferredUploadController;
     }
 
     private UploadPsfGuardImageAfterExposure(UploadPsfGuardImageAfterExposure copy)
         : base(copy)
     {
         imageSaveMediator = copy.imageSaveMediator;
+        deferredUploadController = copy.deferredUploadController;
         UploadLights = copy.UploadLights;
         UploadCalibrationFrames = copy.UploadCalibrationFrames;
     }
@@ -112,10 +116,12 @@ public sealed class UploadPsfGuardImageAfterExposure : PsfGuardSequenceTriggerBa
                 $"PSF Guard accepts FITS and XISF files, not {Path.GetExtension(capture.ImagePath)}.");
         }
 
-        var globalUpload = IsGlobalUploadEnabledFor(capture.Kind);
-        if (capture.Kind == CaptureImageKind.Light && IsGlobalCapturePushEnabled)
+        var captureSettings = capture.Context.RequireSnapshot();
+        var globalUpload = WasGlobalUploadEnabledFor(captureSettings, capture.Kind);
+        if (capture.Kind == CaptureImageKind.Light
+            && WasGlobalCapturePushEnabled(captureSettings))
         {
-            if (!globalUpload || !AutoApplyPushes)
+            if (!globalUpload || !captureSettings.AutoApplyPushes)
             {
                 throw new InvalidOperationException(
                     "Use automatic saved-light upload with automatic preview apply so "
@@ -130,8 +136,21 @@ public sealed class UploadPsfGuardImageAfterExposure : PsfGuardSequenceTriggerBa
             return;
         }
 
+        if (captureSettings.DeferImageUploads)
+        {
+            Report(progress, "Queueing deferred image...");
+            await deferredUploadController
+                .QueueDeferredImageUploadAsync(
+                    captureSettings.RequireQueueDestination(),
+                    capture.ImagePath,
+                    token)
+                .ConfigureAwait(false);
+            return;
+        }
+
         Report(progress, "Uploading image...");
-        await UploadImageAsync(capture.ImagePath, token).ConfigureAwait(false);
+        await UploadImageAsync(captureSettings, capture.ImagePath, token)
+            .ConfigureAwait(false);
     }
 
     public override object Clone() => new UploadPsfGuardImageAfterExposure(this);
@@ -185,9 +204,10 @@ public sealed class UploadPsfGuardImageAfterExposure : PsfGuardSequenceTriggerBa
             UploadLights,
             UploadCalibrationFrames))
         {
-            inbox.Add(new SavedCapture(
+            inbox.Add(new SavedCapture<PluginSettingsCapture>(
                 args.PathToImage.LocalPath,
                 kind,
+                CaptureProfileSettings(),
                 args.MetaData?.Image?.ExposureStart ?? default));
         }
     }

@@ -14,6 +14,14 @@
         </nina:SequenceBlockView>
     </DataTemplate>
 
+    <DataTemplate DataType="{x:Type local:StartPsfGuardUploads}">
+        <nina:SequenceBlockView>
+            <nina:SequenceBlockView.SequenceItemContent>
+                <TextBlock Text="Release deferred image jobs" />
+            </nina:SequenceBlockView.SequenceItemContent>
+        </nina:SequenceBlockView>
+    </DataTemplate>
+
     <DataTemplate DataType="{x:Type local:PullPsfGuardPlanning}">
         <nina:SequenceBlockView>
             <nina:SequenceBlockView.SequenceItemContent>
@@ -124,6 +132,14 @@
         <mini:MiniSequenceItem>
             <mini:MiniSequenceItem.SequenceItemContent>
                 <TextBlock Text="Check PSF Guard" />
+            </mini:MiniSequenceItem.SequenceItemContent>
+        </mini:MiniSequenceItem>
+    </DataTemplate>
+
+    <DataTemplate x:Key="PsfGuard.Nina.Plugin.Sequence.StartPsfGuardUploads_Mini">
+        <mini:MiniSequenceItem>
+            <mini:MiniSequenceItem.SequenceItemContent>
+                <TextBlock Text="Start queued uploads" />
             </mini:MiniSequenceItem.SequenceItemContent>
         </mini:MiniSequenceItem>
     </DataTemplate>

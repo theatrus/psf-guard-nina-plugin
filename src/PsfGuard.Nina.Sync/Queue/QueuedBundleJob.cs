@@ -18,6 +18,8 @@ internal sealed record QueuedBundleJob
 
     public PushReceipt? SchedulerReceipt { get; set; }
 
+    public bool ImageUploadDeferred { get; set; }
+
     public int Attempts { get; set; }
 
     public int PrerequisiteAttempts { get; set; }

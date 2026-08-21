@@ -8,6 +8,8 @@ internal sealed record QueuedImageUploadJob
 
     public required string ImagePath { get; init; }
 
+    public bool ImageUploadDeferred { get; set; }
+
     public int Attempts { get; set; }
 
     public int PrerequisiteAttempts { get; set; }

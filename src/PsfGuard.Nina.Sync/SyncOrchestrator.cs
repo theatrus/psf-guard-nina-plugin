@@ -86,6 +86,22 @@ public sealed class SyncOrchestrator
         bool uploadImageAfterApply,
         CancellationToken cancellationToken)
     {
+        await QueueCapturedImageAsync(
+                imagePath,
+                exposureStart,
+                uploadImageAfterApply,
+                deferImageUpload: false,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task QueueCapturedImageAsync(
+        string imagePath,
+        DateTime exposureStart,
+        bool uploadImageAfterApply,
+        bool deferImageUpload,
+        CancellationToken cancellationToken)
+    {
         await RequireQueue().EnqueueCaptureAsync(
                 RequireQueueDestination(),
                 reader.DatabasePath,
@@ -95,6 +111,7 @@ public sealed class SyncOrchestrator
                 includeThumbnails,
                 autoApplyPushes,
                 uploadImageAfterApply,
+                deferImageUpload,
                 cancellationToken)
             .ConfigureAwait(false);
     }
