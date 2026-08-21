@@ -44,7 +44,12 @@ public sealed class StartPsfGuardUploads : PsfGuardSequenceItemBase
             .ConfigureAwait(false);
         Report(
             progress,
-            count == 0 ? "No deferred uploads." : $"Released {count} deferred uploads.");
+            count switch
+            {
+                0 => "No deferred uploads.",
+                1 => "Released 1 deferred upload.",
+                _ => $"Released {count} deferred uploads.",
+            });
     }
 
     public override object Clone() => new StartPsfGuardUploads(this);

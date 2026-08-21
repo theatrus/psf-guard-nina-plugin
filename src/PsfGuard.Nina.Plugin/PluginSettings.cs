@@ -1,6 +1,7 @@
 using NINA.Plugin;
 using NINA.Profile;
 using NINA.Profile.Interfaces;
+using PsfGuard.Nina.Sync.Queue;
 using PsfGuard.Nina.Sync.TargetScheduler;
 
 namespace PsfGuard.Nina.Plugin;
@@ -96,9 +97,110 @@ internal sealed class PluginSettings
     }
 
     public string CredentialReference =>
-        $"PSFGuard.Nina.Plugin/{profileService.ActiveProfile.Id:D}";
+        CredentialReferenceFor(profileService.ActiveProfile.Id);
+
+    public PluginSettingsSnapshot CaptureSnapshot()
+    {
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var profileId = profileService.ActiveProfile.Id;
+            var credentialReference = CredentialReferenceFor(profileId);
+            var snapshot = new PluginSettingsSnapshot(
+                profileId,
+                ServerUrl,
+                CatalogId,
+                credentialReference,
+                TargetSchedulerDatabase,
+                Enabled,
+                AutoPushCaptures,
+                UploadCapturedImages,
+                UploadCalibrationImages,
+                DeferImageUploads,
+                AutoApplyPushes,
+                IncludeThumbnails);
+            if (profileService.ActiveProfile.Id == profileId)
+            {
+                return snapshot;
+            }
+        }
+
+        throw new InvalidOperationException(
+            "The active N.I.N.A. profile changed while PSF Guard captured its settings.");
+    }
 
     /// <summary>Active profile name, for the operator-facing client label
     /// a pairing sends ("MACHINE · Profile").</summary>
     public string ProfileName => profileService.ActiveProfile?.Name ?? "N.I.N.A.";
+
+    private static string CredentialReferenceFor(Guid profileId) =>
+        $"PSFGuard.Nina.Plugin/{profileId:D}";
+}
+
+internal sealed record PluginSettingsSnapshot(
+    Guid ProfileId,
+    string ServerUrl,
+    string CatalogId,
+    string CredentialReference,
+    string TargetSchedulerDatabase,
+    bool Enabled,
+    bool AutoPushCaptures,
+    bool UploadCapturedImages,
+    bool UploadCalibrationImages,
+    bool DeferImageUploads,
+    bool AutoApplyPushes,
+    bool IncludeThumbnails)
+{
+    public Uri RequireServerUri()
+    {
+        if (!Uri.TryCreate(ServerUrl, UriKind.Absolute, out var serverUri))
+        {
+            throw new InvalidOperationException("Enter a valid absolute PSF Guard server URL.");
+        }
+
+        return serverUri;
+    }
+
+    public RemoteQueueDestination RequireQueueDestination()
+    {
+        if (string.IsNullOrWhiteSpace(ServerUrl))
+        {
+            throw new InvalidOperationException("PSF Guard server URL is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(CatalogId))
+        {
+            throw new InvalidOperationException("Destination catalog ID is required.");
+        }
+
+        _ = RequireApiToken();
+
+        return new RemoteQueueDestination
+        {
+            ServerUrl = RequireServerUri().AbsoluteUri,
+            CatalogId = CatalogId,
+            CredentialReference = CredentialReference,
+        };
+    }
+
+    public string RequireApiToken()
+    {
+        var apiToken = WindowsCredentialStore.Read(CredentialReference);
+        if (string.IsNullOrWhiteSpace(apiToken))
+        {
+            throw new InvalidOperationException("Remote API key is required.");
+        }
+
+        return apiToken;
+    }
+}
+
+internal sealed record PluginSettingsCapture(
+    PluginSettingsSnapshot? Snapshot,
+    Exception? Failure)
+{
+    public PluginSettingsSnapshot RequireSnapshot() =>
+        Snapshot
+        ?? throw new InvalidOperationException(
+            "Could not capture PSF Guard settings when N.I.N.A. saved the image.",
+            Failure);
 }

@@ -80,4 +80,26 @@ public sealed class SavedCaptureInboxTests
 
         Assert.Equal("new-flat.fits", capture.ImagePath);
     }
+
+    [Fact]
+    public async Task ContextualInboxKeepsContextWithTheMatchingCapture()
+    {
+        var inbox = new SavedCaptureInbox<string>();
+        inbox.Add(new SavedCapture<string>(
+            "earlier-light.fits",
+            CaptureImageKind.Light,
+            "earlier-profile"));
+        inbox.Add(new SavedCapture<string>(
+            "flat.fits",
+            CaptureImageKind.Flat,
+            "event-time-profile"));
+
+        var capture = await inbox.WaitForNextAsync(
+            CaptureImageKind.Flat,
+            TimeSpan.FromSeconds(1),
+            CancellationToken.None);
+
+        Assert.Equal("flat.fits", capture.ImagePath);
+        Assert.Equal("event-time-profile", capture.Context);
+    }
 }

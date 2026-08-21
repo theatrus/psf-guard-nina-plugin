@@ -55,6 +55,32 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
             includeLights: true,
             includeCalibration: settings.UploadCalibrationImages);
 
+    private protected PluginSettingsCapture CaptureProfileSettings()
+    {
+        try
+        {
+            return new PluginSettingsCapture(settings.CaptureSnapshot(), null);
+        }
+        catch (Exception exception)
+        {
+            return new PluginSettingsCapture(null, exception);
+        }
+    }
+
+    private protected static bool WasGlobalCapturePushEnabled(
+        PluginSettingsSnapshot captureSettings) =>
+        captureSettings.Enabled && captureSettings.AutoPushCaptures;
+
+    private protected static bool WasGlobalUploadEnabledFor(
+        PluginSettingsSnapshot captureSettings,
+        CaptureImageKind kind) =>
+        captureSettings.Enabled
+        && captureSettings.UploadCapturedImages
+        && CaptureImageTypes.ShouldUpload(
+            kind,
+            includeLights: true,
+            includeCalibration: captureSettings.UploadCalibrationImages);
+
     protected SyncOrchestrator CreateOrchestrator()
     {
         var serverUri = new Uri(settings.ServerUrl, UriKind.Absolute);
@@ -72,6 +98,25 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
             autoApplyPushes,
             includeThumbnails,
             () => CreateClient(serverUri, apiToken),
+            reader,
+            writer);
+    }
+
+    private protected SyncOrchestrator CreateOrchestrator(
+        PluginSettingsSnapshot captureSettings)
+    {
+        var destination = captureSettings.RequireQueueDestination();
+        var serverUri = new Uri(destination.ServerUrl, UriKind.Absolute);
+        var reader = new TargetSchedulerCatalogReader(
+            captureSettings.TargetSchedulerDatabase,
+            TargetSchedulerVersion());
+        var writer = new TargetSchedulerCatalogWriter(
+            captureSettings.TargetSchedulerDatabase);
+        return new SyncOrchestrator(
+            destination.CatalogId,
+            captureSettings.AutoApplyPushes,
+            captureSettings.IncludeThumbnails,
+            () => CreateClient(serverUri, captureSettings.RequireApiToken()),
             reader,
             writer);
     }
@@ -104,6 +149,22 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
         var catalogId = settings.CatalogId;
         using var client = CreateClient(serverUri, apiToken);
         await client.UploadImageAsync(catalogId, imagePath, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private protected async Task UploadImageAsync(
+        PluginSettingsSnapshot captureSettings,
+        string imagePath,
+        CancellationToken cancellationToken)
+    {
+        var destination = captureSettings.RequireQueueDestination();
+        using var client = CreateClient(
+            new Uri(destination.ServerUrl, UriKind.Absolute),
+            captureSettings.RequireApiToken());
+        await client.UploadImageAsync(
+                destination.CatalogId,
+                imagePath,
+                cancellationToken)
             .ConfigureAwait(false);
     }
 

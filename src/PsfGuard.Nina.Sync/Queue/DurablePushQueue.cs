@@ -290,7 +290,16 @@ public sealed class DurablePushQueue : IAsyncDisposable
             NextAttemptUtc = DateTimeOffset.UtcNow,
         };
         Directory.CreateDirectory(queueDirectory);
-        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            mutationGate.Release();
+        }
+
         Wake();
         return job.JobId;
     }
@@ -332,10 +341,11 @@ public sealed class DurablePushQueue : IAsyncDisposable
         foreach (var file in QueueFiles())
         {
             cancellationToken.ThrowIfCancellationRequested();
+            QueuedBundleJob? job;
             await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                var job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
+                job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
                 if (job is null)
                 {
                     continue;
@@ -346,105 +356,46 @@ public sealed class DurablePushQueue : IAsyncDisposable
                     TryDeleteJob(file);
                     continue;
                 }
+            }
+            finally
+            {
+                mutationGate.Release();
+            }
 
-                if (job.Blocked)
-                {
-                    continue;
-                }
+            if (job.Blocked)
+            {
+                continue;
+            }
 
-                if (job.Destination is null)
-                {
-                    await BlockLegacyJobAsync(job, cancellationToken).ConfigureAwait(false);
-                    continue;
-                }
+            if (job.Destination is null)
+            {
+                await BlockLegacyJobAsync(job, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
 
-                if (job.ImageUploadDeferred && job.SchedulerApplied)
-                {
-                    continue;
-                }
+            if (job.ImageUploadDeferred && job.SchedulerApplied)
+            {
+                continue;
+            }
 
-                var wait = job.NextAttemptUtc - DateTimeOffset.UtcNow;
-                if (wait > TimeSpan.Zero)
-                {
-                    soonest = wait < soonest ? wait : soonest;
-                    continue;
-                }
+            var wait = job.NextAttemptUtc - DateTimeOffset.UtcNow;
+            if (wait > TimeSpan.Zero)
+            {
+                soonest = wait < soonest ? wait : soonest;
+                continue;
+            }
 
-                var resolvingCapture = false;
-                var uploadingImage = false;
-                try
+            var resolvingCapture = false;
+            var uploadingImage = false;
+            try
+            {
+                job.Destination.Validate();
+                if (!job.SchedulerApplied && job.Bundle is null)
                 {
-                    job.Destination.Validate();
-                    if (!job.SchedulerApplied && job.Bundle is null)
+                    resolvingCapture = true;
+                    if (!await TryResolveCaptureAsync(job, cancellationToken).ConfigureAwait(false))
                     {
-                        resolvingCapture = true;
-                        if (!await TryResolveCaptureAsync(job, cancellationToken).ConfigureAwait(false))
-                        {
-                            var delay = await RecordPendingCaptureAsync(job, cancellationToken)
-                                .ConfigureAwait(false);
-                            if (delay < soonest)
-                            {
-                                soonest = delay;
-                            }
-
-                            continue;
-                        }
-
-                        resolvingCapture = false;
-                    }
-
-                    PushReceipt receipt;
-                    if (!job.SchedulerApplied)
-                    {
-                        var bundle = job.Bundle
-                            ?? throw new InvalidDataException(
-                                "Queued sync job has no bundle or capture.");
-                        using var client = clientFactory(job.Destination);
-                        receipt = await PushBundleAsync(
-                                client,
-                                job.Destination.CatalogId,
-                                bundle,
-                                job.AutoApply,
-                                cancellationToken)
-                            .ConfigureAwait(false);
-
-                        if (job.Capture?.UploadImageAfterApply != true)
-                        {
-                            await CompleteJobAsync(job, file, receipt, cancellationToken)
-                                .ConfigureAwait(false);
-                            continue;
-                        }
-
-                        job.SchedulerApplied = true;
-                        job.SchedulerReceipt = receipt;
-                        job.Bundle = null;
-                        job.Attempts = 0;
-                        job.PrerequisiteAttempts = 0;
-                        job.LastError = null;
-                        job.NextAttemptUtc = DateTimeOffset.UtcNow;
-                        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
-                        if (job.ImageUploadDeferred)
-                        {
-                            ReportStatus(
-                                $"Applied scheduler sync for {Path.GetFileName(job.Capture.ImagePath)}; "
-                                + "image upload is deferred.");
-                            continue;
-                        }
-                    }
-                    else
-                    {
-                        receipt = job.SchedulerReceipt
-                            ?? throw new InvalidDataException(
-                                "Queued capture records an applied scheduler phase without its receipt.");
-                    }
-
-                    var uploadPath = job.Capture?.UploadImageAfterApply == true
-                        ? job.Capture.ImagePath
-                        : throw new InvalidDataException(
-                            "Queued capture records an applied scheduler phase without an image upload.");
-                    if (!File.Exists(uploadPath))
-                    {
-                        var delay = await RecordPendingImageAsync(job, cancellationToken)
+                        var delay = await RecordPendingCaptureAsync(job, cancellationToken)
                             .ConfigureAwait(false);
                         if (delay < soonest)
                         {
@@ -454,71 +405,130 @@ public sealed class DurablePushQueue : IAsyncDisposable
                         continue;
                     }
 
-                    job.PrerequisiteAttempts = 0;
-                    uploadingImage = true;
-                    ReportStatus($"Uploading {Path.GetFileName(uploadPath)} after scheduler sync...");
-                    using (var client = clientFactory(job.Destination))
-                    {
-                        await client.UploadImageAsync(
-                                job.Destination.CatalogId,
-                                uploadPath,
-                                cancellationToken)
-                            .ConfigureAwait(false);
-                    }
-
-                    uploadingImage = false;
-                    await CompleteJobAsync(
-                            job,
-                            file,
-                            receipt,
-                            cancellationToken,
-                            Path.GetFileName(uploadPath))
-                        .ConfigureAwait(false);
+                    resolvingCapture = false;
                 }
-                catch (PreviewUnavailableException exception)
+
+                PushReceipt receipt;
+                if (!job.SchedulerApplied)
                 {
-                    var delay = await RenewBundleForPreviewAsync(
-                            job,
-                            exception,
+                    var bundle = job.Bundle
+                        ?? throw new InvalidDataException(
+                            "Queued sync job has no bundle or capture.");
+                    using var client = clientFactory(job.Destination);
+                    receipt = await PushBundleAsync(
+                            client,
+                            job.Destination.CatalogId,
+                            bundle,
+                            job.AutoApply,
                             cancellationToken)
                         .ConfigureAwait(false);
-                    if (delay.HasValue && delay.Value < soonest)
+
+                    if (job.Capture?.UploadImageAfterApply != true)
                     {
-                        soonest = delay.Value;
-                    }
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception exception)
-                {
-                    TimeSpan? delay;
-                    if (uploadingImage
-                        && exception is FileNotFoundException or DirectoryNotFoundException)
-                    {
-                        delay = await RecordPendingImageAsync(job, cancellationToken)
+                        await CompleteJobAsync(job, file, receipt, cancellationToken)
                             .ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        delay = await RecordFailureAsync(
-                                job,
-                                exception,
-                                resolvingCapture,
-                                cancellationToken)
-                            .ConfigureAwait(false);
+                        continue;
                     }
 
-                    if (delay.HasValue && delay.Value < soonest)
+                    job.SchedulerApplied = true;
+                    job.SchedulerReceipt = receipt;
+                    job.Bundle = null;
+                    job.Attempts = 0;
+                    job.PrerequisiteAttempts = 0;
+                    job.LastError = null;
+                    job.NextAttemptUtc = DateTimeOffset.UtcNow;
+                    await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
+                    if (job.ImageUploadDeferred)
                     {
-                        soonest = delay.Value;
+                        ReportStatus(
+                            $"Applied scheduler sync for {Path.GetFileName(job.Capture.ImagePath)}; "
+                            + "image upload is deferred.");
+                        continue;
                     }
                 }
+                else
+                {
+                    receipt = job.SchedulerReceipt
+                        ?? throw new InvalidDataException(
+                            "Queued capture records an applied scheduler phase without its receipt.");
+                }
+
+                var uploadPath = job.Capture?.UploadImageAfterApply == true
+                    ? job.Capture.ImagePath
+                    : throw new InvalidDataException(
+                        "Queued capture records an applied scheduler phase without an image upload.");
+                if (!File.Exists(uploadPath))
+                {
+                    var delay = await RecordPendingImageAsync(job, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (delay < soonest)
+                    {
+                        soonest = delay;
+                    }
+
+                    continue;
+                }
+
+                job.PrerequisiteAttempts = 0;
+                uploadingImage = true;
+                ReportStatus($"Uploading {Path.GetFileName(uploadPath)} after scheduler sync...");
+                using (var client = clientFactory(job.Destination))
+                {
+                    await client.UploadImageAsync(
+                            job.Destination.CatalogId,
+                            uploadPath,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                uploadingImage = false;
+                await CompleteJobAsync(
+                        job,
+                        file,
+                        receipt,
+                        cancellationToken,
+                        Path.GetFileName(uploadPath))
+                    .ConfigureAwait(false);
             }
-            finally
+            catch (PreviewUnavailableException exception)
             {
-                mutationGate.Release();
+                var delay = await RenewBundleForPreviewAsync(
+                        job,
+                        exception,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (delay.HasValue && delay.Value < soonest)
+                {
+                    soonest = delay.Value;
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                TimeSpan? delay;
+                if (uploadingImage
+                    && exception is FileNotFoundException or DirectoryNotFoundException)
+                {
+                    delay = await RecordPendingImageAsync(job, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    delay = await RecordFailureAsync(
+                            job,
+                            exception,
+                            resolvingCapture,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                if (delay.HasValue && delay.Value < soonest)
+                {
+                    soonest = delay.Value;
+                }
             }
         }
 
@@ -633,7 +643,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
         if (job.Attempts >= QueueFailurePolicy.MaximumAttempts)
         {
             job.Blocked = true;
-            await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+            await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
             ReportStatus($"Sync job blocked: {exception.Message}");
             return null;
         }
@@ -648,7 +658,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
         job.Bundle = renewed;
         var delay = QueueFailurePolicy.RetryDelay(job.Attempts);
         job.NextAttemptUtc = DateTimeOffset.UtcNow + delay;
-        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
         ReportStatus(
             $"{exception.Message} "
             + $"retrying with a fresh preview in {delay.TotalSeconds:0} seconds.");
@@ -664,8 +674,8 @@ public sealed class DurablePushQueue : IAsyncDisposable
     {
         job.Completed = true;
         job.LastError = null;
-        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
-        TryDeleteJob(file);
+        await PersistAndDeleteWorkerJobAsync(job, file, cancellationToken)
+            .ConfigureAwait(false);
         var status = FormatPushStatus(receipt);
         if (!string.IsNullOrWhiteSpace(uploadedImage))
         {
@@ -709,7 +719,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
         job.PrerequisiteAttempts = 0;
         job.LastError = null;
         job.NextAttemptUtc = DateTimeOffset.UtcNow;
-        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
         return true;
     }
 
@@ -725,7 +735,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
             + $"{Path.GetFileName(capture.ImagePath)} yet.";
         var delay = QueueFailurePolicy.RetryDelay(job.PrerequisiteAttempts);
         job.NextAttemptUtc = DateTimeOffset.UtcNow + delay;
-        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
         ReportStatus(
             $"Waiting for Target Scheduler to record {Path.GetFileName(capture.ImagePath)}; "
             + $"checking again in {delay.TotalSeconds:0} seconds.");
@@ -743,7 +753,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
         job.LastError = $"Saved image {Path.GetFileName(capture.ImagePath)} is not available yet.";
         var delay = QueueFailurePolicy.RetryDelay(job.PrerequisiteAttempts);
         job.NextAttemptUtc = DateTimeOffset.UtcNow + delay;
-        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
         ReportStatus(
             $"Scheduler sync is applied; waiting for {Path.GetFileName(capture.ImagePath)} "
             + $"before upload ({delay.TotalSeconds:0} seconds).");
@@ -763,14 +773,14 @@ public sealed class DurablePushQueue : IAsyncDisposable
         if (!retry)
         {
             job.Blocked = true;
-            await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+            await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
             ReportStatus($"Sync job blocked: {exception.Message}");
             return null;
         }
 
         var delay = QueueFailurePolicy.RetryDelay(job.Attempts);
         job.NextAttemptUtc = DateTimeOffset.UtcNow + delay;
-        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
         ReportStatus(
             $"Sync job failed; retrying in {delay.TotalSeconds:0} seconds: {exception.Message}");
         return delay;
@@ -782,8 +792,62 @@ public sealed class DurablePushQueue : IAsyncDisposable
     {
         job.Blocked = true;
         job.LastError = "This job predates destination-bound queues and must be queued again.";
-        await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
         ReportStatus($"Sync job blocked: {job.LastError}");
+    }
+
+    private async Task PersistWorkerJobAsync(
+        QueuedBundleJob job,
+        CancellationToken cancellationToken)
+    {
+        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await MergeDeferredStateAsync(job, cancellationToken).ConfigureAwait(false);
+            await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            mutationGate.Release();
+        }
+    }
+
+    private async Task PersistAndDeleteWorkerJobAsync(
+        QueuedBundleJob job,
+        string file,
+        CancellationToken cancellationToken)
+    {
+        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await MergeDeferredStateAsync(job, cancellationToken).ConfigureAwait(false);
+            await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+            TryDeleteJob(file);
+        }
+        finally
+        {
+            mutationGate.Release();
+        }
+    }
+
+    private async Task MergeDeferredStateAsync(
+        QueuedBundleJob job,
+        CancellationToken cancellationToken)
+    {
+        if (!job.ImageUploadDeferred)
+        {
+            return;
+        }
+
+        var path = JobPath(job.JobId);
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException("Queued sync state disappeared.", path);
+        }
+
+        var current = await TryReadJobAsync(path, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidDataException("Queued sync state became unreadable.");
+        job.ImageUploadDeferred = current.ImageUploadDeferred;
     }
 
     private async Task<QueuedBundleJob?> TryReadJobAsync(

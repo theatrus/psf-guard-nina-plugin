@@ -75,7 +75,7 @@ public sealed class DeferredUploadQueueTests
     }
 
     [Fact]
-    public async Task ReleaseDuringApplyCannotBeOverwrittenByWorkerState()
+    public async Task ReleaseDuringApplyReturnsBeforeApplyAndWorkerPreservesIt()
     {
         using var directory = new TestDirectory();
         using var database = new TestDatabase();
@@ -118,16 +118,86 @@ public sealed class DeferredUploadQueueTests
 
         await applyStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
         var release = queue.ReleaseDeferredAsync(destination, CancellationToken.None);
-        await Task.Delay(100);
-        var waitedForWorkerMutation = !release.IsCompleted;
-        finishApply.TrySetResult();
+        try
+        {
+            Assert.Equal(1, await release.WaitAsync(TimeSpan.FromSeconds(3)));
+            var released = await ReadJobAsync<QueuedBundleJob>(
+                Path.Combine(directory.Child("queue"), $"{jobId:N}.json"));
+            Assert.False(released.ImageUploadDeferred);
+            Assert.False(released.SchedulerApplied);
+        }
+        finally
+        {
+            finishApply.TrySetResult();
+        }
 
-        Assert.True(waitedForWorkerMutation);
-        Assert.Equal(1, await release.WaitAsync(TimeSpan.FromSeconds(3)));
         await WaitUntilAsync(
             () => !File.Exists(Path.Combine(directory.Child("queue"), $"{jobId:N}.json")),
             TimeSpan.FromSeconds(3));
         Assert.Equal([PreviewPath, ApplyPath, UploadPath], requests.ToArray());
+    }
+
+    [Fact]
+    public async Task DirectReleaseReturnsWhileAnUnrelatedUploadIsRunning()
+    {
+        using var directory = new TestDirectory();
+        var queuePath = directory.Child("queue");
+        var destination = Destination();
+        var uploadStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var finishFirstUpload = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var requests = 0;
+        await using var queue = new DurableImageUploadQueue(
+            queuePath,
+            actualDestination => Client(
+                actualDestination,
+                async (_, cancellationToken) =>
+                {
+                    var requestNumber = Interlocked.Increment(ref requests);
+                    if (requestNumber == 1)
+                    {
+                        uploadStarted.TrySetResult();
+                        await finishFirstUpload.Task.WaitAsync(cancellationToken);
+                    }
+
+                    return Json("""{"success":true,"data":{}}""");
+                }));
+
+        var immediateId = await queue.EnqueueAsync(
+            destination,
+            directory.Write("immediate.fit", "first image"),
+            deferImageUpload: false,
+            CancellationToken.None);
+        queue.Start();
+        await uploadStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        var deferredId = await queue.EnqueueAsync(
+            destination,
+            directory.Write("deferred.fit", "second image"),
+            deferImageUpload: true,
+            CancellationToken.None);
+
+        try
+        {
+            Assert.Equal(
+                1,
+                await queue.ReleaseDeferredAsync(destination, CancellationToken.None)
+                    .WaitAsync(TimeSpan.FromSeconds(3)));
+            var released = await ReadJobAsync<QueuedImageUploadJob>(
+                Path.Combine(queuePath, $"{deferredId:N}.json"));
+            Assert.False(released.ImageUploadDeferred);
+            Assert.Equal(1, Volatile.Read(ref requests));
+        }
+        finally
+        {
+            finishFirstUpload.TrySetResult();
+        }
+
+        await WaitUntilAsync(
+            () => Volatile.Read(ref requests) == 2
+                && !File.Exists(Path.Combine(queuePath, $"{immediateId:N}.json"))
+                && !File.Exists(Path.Combine(queuePath, $"{deferredId:N}.json")),
+            TimeSpan.FromSeconds(3));
     }
 
     [Fact]
