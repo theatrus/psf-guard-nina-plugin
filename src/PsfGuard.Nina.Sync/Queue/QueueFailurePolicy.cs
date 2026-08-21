@@ -20,6 +20,7 @@ internal static class QueueFailurePolicy
             return httpException.StatusCode is null
                 or HttpStatusCode.RequestTimeout
                 or HttpStatusCode.TooManyRequests
+                or HttpStatusCode.Conflict
                 || (int)httpException.StatusCode >= 500;
         }
 
@@ -33,4 +34,7 @@ internal static class QueueFailurePolicy
         var seconds = Math.Min(300, Math.Pow(2, Math.Min(attempts, 8)));
         return TimeSpan.FromSeconds(seconds);
     }
+
+    public static int IncrementAttempts(int attempts) =>
+        attempts == int.MaxValue ? attempts : attempts + 1;
 }

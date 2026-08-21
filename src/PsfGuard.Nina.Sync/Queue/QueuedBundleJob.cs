@@ -14,7 +14,13 @@ internal sealed record QueuedBundleJob
 
     public QueuedCaptureSource? Capture { get; init; }
 
+    public bool SchedulerApplied { get; set; }
+
+    public PushReceipt? SchedulerReceipt { get; set; }
+
     public int Attempts { get; set; }
+
+    public int PrerequisiteAttempts { get; set; }
 
     public DateTimeOffset NextAttemptUtc { get; set; }
 
@@ -36,4 +42,6 @@ internal sealed record QueuedCaptureSource
     public required DateTime ExposureStart { get; init; }
 
     public required bool IncludeThumbnail { get; init; }
+
+    public bool UploadImageAfterApply { get; init; }
 }

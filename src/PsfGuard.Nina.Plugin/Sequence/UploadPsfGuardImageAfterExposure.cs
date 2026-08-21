@@ -112,7 +112,20 @@ public sealed class UploadPsfGuardImageAfterExposure : PsfGuardSequenceTriggerBa
                 $"PSF Guard accepts FITS and XISF files, not {Path.GetExtension(capture.ImagePath)}.");
         }
 
-        if (IsGlobalUploadEnabledFor(capture.Kind))
+        var globalUpload = IsGlobalUploadEnabledFor(capture.Kind);
+        if (capture.Kind == CaptureImageKind.Light && IsGlobalCapturePushEnabled)
+        {
+            if (!globalUpload || !AutoApplyPushes)
+            {
+                throw new InvalidOperationException(
+                    "Use automatic saved-light upload with automatic preview apply so "
+                    + "the scheduler row reaches PSF Guard before its image.");
+            }
+
+            return;
+        }
+
+        if (globalUpload)
         {
             return;
         }
@@ -141,6 +154,21 @@ public sealed class UploadPsfGuardImageAfterExposure : PsfGuardSequenceTriggerBa
         if (!UploadLights && !UploadCalibrationFrames)
         {
             validationIssues.Add("Select light or calibration images for PSF Guard upload.");
+        }
+
+        if (UploadLights && IsGlobalCapturePushEnabled)
+        {
+            if (!IsGlobalUploadEnabledFor(CaptureImageKind.Light))
+            {
+                validationIssues.Add(
+                    "Enable automatic saved-light upload when global scheduler push is active.");
+            }
+
+            if (!AutoApplyPushes)
+            {
+                validationIssues.Add(
+                    "Enable automatic preview apply before combining scheduler sync and image upload.");
+            }
         }
     }
 

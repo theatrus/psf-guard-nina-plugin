@@ -50,6 +50,176 @@ public sealed class TargetSchedulerCatalogTests
     }
 
     [Fact]
+    public async Task CaptureLookupWithoutATimestampRefusesDuplicateExactPaths()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0);
+        database.Seed(100);
+        var reader = new TargetSchedulerCatalogReader(database.Path, "5.9.6.0");
+
+        var exception = await Assert.ThrowsAsync<TimeoutException>(
+            () => reader.WaitForCaptureAsync(
+                @"c:\images\M31-001.fits",
+                default,
+                TimeSpan.Zero,
+                CancellationToken.None));
+
+        Assert.Contains("unique record", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CaptureLookupNormalizesFileUrisAndMetadataPropertyCasing()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0);
+        var exposureStart = DateTime.UtcNow;
+        using (var connection = database.Open())
+        {
+            connection.Execute(
+                "UPDATE acquiredimage SET acquireddate = @date, metadata = @metadata WHERE Id = 5",
+                new Dictionary<string, object?>
+                {
+                    ["@date"] = new DateTimeOffset(exposureStart).ToUnixTimeSeconds(),
+                    ["@metadata"] =
+                        $$"""{"fileName":"file:///C:/Images/M31-001.fits","exposureStartTime":"{{exposureStart:O}}"}""",
+                });
+        }
+
+        var reader = new TargetSchedulerCatalogReader(database.Path, "5.9.6.0");
+        var captureId = await reader.WaitForCaptureAsync(
+            @"c:\images\m31-001.fits",
+            exposureStart,
+            TimeSpan.FromSeconds(1),
+            CancellationToken.None);
+
+        Assert.Equal(5, captureId);
+    }
+
+    [Fact]
+    public async Task CaptureLookupUsesUniqueFilenameAndExposureAcrossPathAliases()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0);
+        var exposureStart = DateTime.UtcNow;
+        using (var connection = database.Open())
+        {
+            connection.Execute(
+                "UPDATE acquiredimage SET acquireddate = @date, metadata = @metadata WHERE Id = 5",
+                new Dictionary<string, object?>
+                {
+                    ["@date"] = new DateTimeOffset(exposureStart).ToUnixTimeSeconds(),
+                    ["@metadata"] =
+                        $$"""{"FileName":"D:\\remote-copy\\M31-001.fits","ExposureStartTime":"{{exposureStart:O}}"}""",
+                });
+        }
+
+        var reader = new TargetSchedulerCatalogReader(database.Path, "5.9.6.0");
+        var captureId = await reader.WaitForCaptureAsync(
+            @"c:\images\M31-001.fits",
+            exposureStart,
+            TimeSpan.FromSeconds(1),
+            CancellationToken.None);
+
+        Assert.Equal(5, captureId);
+    }
+
+    [Fact]
+    public async Task CaptureLookupFindsExactPathOutsideTheAcquiredDateWindow()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0);
+        var exposureStart = DateTime.UtcNow;
+        using (var connection = database.Open())
+        {
+            connection.Execute(
+                "UPDATE acquiredimage SET acquireddate = @date, metadata = @metadata WHERE Id = 5",
+                new Dictionary<string, object?>
+                {
+                    ["@date"] = new DateTimeOffset(exposureStart.AddHours(1)).ToUnixTimeSeconds(),
+                    ["@metadata"] =
+                        $$"""{"FileName":"C:\\Images\\M31-001.fits","ExposureStartTime":"{{exposureStart:O}}"}""",
+                });
+        }
+
+        var reader = new TargetSchedulerCatalogReader(database.Path, "5.9.6.0");
+        var captureId = await reader.WaitForCaptureAsync(
+            @"c:\images\M31-001.fits",
+            exposureStart,
+            TimeSpan.FromSeconds(1),
+            CancellationToken.None);
+
+        Assert.Equal(5, captureId);
+    }
+
+    [Fact]
+    public async Task CaptureLookupChecksExactPathUniquenessOutsideTheDateWindow()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0);
+        database.Seed(100);
+        var exposureStart = DateTime.UtcNow;
+        var timestamp = new DateTimeOffset(exposureStart).ToUnixTimeSeconds();
+        var metadata =
+            $$"""{"FileName":"C:\\Images\\M31-001.fits","ExposureStartTime":"{{exposureStart:O}}"}""";
+        using (var connection = database.Open())
+        {
+            connection.Execute(
+                "UPDATE acquiredimage SET acquireddate = @date, metadata = @metadata WHERE Id = 5; "
+                + "UPDATE acquiredimage SET acquireddate = @later, metadata = @metadata WHERE Id = 105",
+                new Dictionary<string, object?>
+                {
+                    ["@date"] = timestamp,
+                    ["@later"] = timestamp + 3_600,
+                    ["@metadata"] = metadata,
+                });
+        }
+
+        var reader = new TargetSchedulerCatalogReader(database.Path, "5.9.6.0");
+        var exception = await Assert.ThrowsAsync<TimeoutException>(
+            () => reader.WaitForCaptureAsync(
+                @"c:\images\M31-001.fits",
+                exposureStart,
+                TimeSpan.Zero,
+                CancellationToken.None));
+
+        Assert.Contains("unique record", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task CaptureLookupRefusesAmbiguousPathAliasMatches()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0);
+        database.Seed(100);
+        var exposureStart = DateTime.UtcNow;
+        var timestamp = new DateTimeOffset(exposureStart).ToUnixTimeSeconds();
+        using (var connection = database.Open())
+        {
+            connection.Execute(
+                "UPDATE acquiredimage SET acquireddate = @date, metadata = @first WHERE Id = 5; "
+                + "UPDATE acquiredimage SET acquireddate = @date, metadata = @second WHERE Id = 105",
+                new Dictionary<string, object?>
+                {
+                    ["@date"] = timestamp,
+                    ["@first"] =
+                        $$"""{"FileName":"D:\\one\\M31-001.fits","ExposureStartTime":"{{exposureStart:O}}"}""",
+                    ["@second"] =
+                        $$"""{"FileName":"E:\\two\\M31-001.fits","ExposureStartTime":"{{exposureStart:O}}"}""",
+                });
+        }
+
+        var reader = new TargetSchedulerCatalogReader(database.Path, "5.9.6.0");
+        var exception = await Assert.ThrowsAsync<TimeoutException>(
+            () => reader.WaitForCaptureAsync(
+                @"c:\images\M31-001.fits",
+                exposureStart,
+                TimeSpan.Zero,
+                CancellationToken.None));
+
+        Assert.Contains("unique record", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task TargetMergeBundleContainsOnlyTheNamedTargetsDependencyChain()
     {
         using var database = new TestDatabase();

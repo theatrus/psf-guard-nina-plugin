@@ -10,6 +10,8 @@ internal sealed record QueuedImageUploadJob
 
     public int Attempts { get; set; }
 
+    public int PrerequisiteAttempts { get; set; }
+
     public DateTimeOffset NextAttemptUtc { get; set; }
 
     public string? LastError { get; set; }

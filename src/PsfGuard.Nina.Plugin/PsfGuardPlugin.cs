@@ -481,11 +481,25 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
 
             var shouldUpload = UploadCapturedImages
                 && CaptureImageTypes.ShouldDirectUpload(imageType, UploadCalibrationImages);
-            var shouldPushScheduler = AutoPushCaptures
-                && CaptureImageTypes.IsLight(imageType)
-                && HasTargetSchedulerDatabase();
+            var schedulerPushRequested = AutoPushCaptures
+                && CaptureImageTypes.IsLight(imageType);
+            var schedulerDatabaseConfigured = !string.IsNullOrWhiteSpace(
+                TargetSchedulerDatabase);
+            var shouldPushScheduler = schedulerPushRequested
+                && schedulerDatabaseConfigured;
+            var missingSchedulerDatabase = schedulerPushRequested
+                && !HasTargetSchedulerDatabase();
+
             if (!shouldUpload && !shouldPushScheduler)
             {
+                if (missingSchedulerDatabase)
+                {
+                    SetBackgroundStatus(
+                        "Could not queue Target Scheduler sync for "
+                        + $"{Path.GetFileName(args.PathToImage.LocalPath)}; "
+                        + "the configured scheduler database was not found.");
+                }
+
                 return;
             }
 
@@ -494,8 +508,13 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                 && CaptureImageTypes.IsSupportedImagePath(imagePath);
             if (shouldUpload && !supportedUpload && !shouldPushScheduler)
             {
-                SetBackgroundStatus(
-                    $"Skipped {Path.GetFileName(imagePath)}; PSF Guard accepts FITS and XISF files.");
+                var result = missingSchedulerDatabase
+                    ? "Could not queue Target Scheduler sync; "
+                        + "the configured scheduler database was not found. "
+                    : string.Empty;
+                result += $"Skipped {Path.GetFileName(imagePath)}; "
+                    + "PSF Guard accepts FITS and XISF files.";
+                SetBackgroundStatus(result);
                 return;
             }
 
@@ -506,6 +525,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                 supportedUpload,
                 shouldUpload && !supportedUpload,
                 shouldPushScheduler,
+                missingSchedulerDatabase,
                 TargetSchedulerDatabase,
                 AutoApplyPushes,
                 IncludeThumbnails,
@@ -698,24 +718,12 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
         {
             var queued = new List<string>(2);
             var errors = new List<string>(2);
-            if (work.UploadImage)
-            {
-                try
-                {
-                    await imageUploadQueue.EnqueueAsync(
-                            work.Destination,
-                            work.ImagePath,
-                            CancellationToken.None)
-                        .ConfigureAwait(false);
-                    queued.Add("image upload");
-                }
-                catch (Exception exception)
-                {
-                    Logger.Error(exception);
-                    errors.Add($"image upload: {exception.Message}");
-                }
-            }
-
+            var dependentUpload = work.UploadImage
+                && work.PushScheduler
+                && work.AutoApplyPushes;
+            var withheldUpload = work.UploadImage
+                && work.PushScheduler
+                && !work.AutoApplyPushes;
             if (work.PushScheduler)
             {
                 try
@@ -737,15 +745,41 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                     await orchestrator.QueueCapturedImageAsync(
                             work.ImagePath,
                             work.ExposureStart,
+                            dependentUpload,
                             CancellationToken.None)
                         .ConfigureAwait(false);
-                    queued.Add("scheduler sync");
+                    queued.Add(dependentUpload
+                        ? "scheduler sync with dependent image upload"
+                        : "scheduler sync");
                 }
                 catch (Exception exception)
                 {
                     Logger.Error(exception);
                     errors.Add($"scheduler sync: {exception.Message}");
                 }
+            }
+            else if (work.UploadImage && !work.MissingSchedulerDatabase)
+            {
+                try
+                {
+                    await imageUploadQueue.EnqueueAsync(
+                            work.Destination,
+                            work.ImagePath,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    queued.Add("image upload");
+                }
+                catch (Exception exception)
+                {
+                    Logger.Error(exception);
+                    errors.Add($"image upload: {exception.Message}");
+                }
+            }
+
+            if (withheldUpload)
+            {
+                errors.Add(
+                    "image upload: enable automatic preview apply when scheduler sync is enabled");
             }
 
             var result = queued.Count > 0
@@ -754,6 +788,19 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
             if (work.SkippedUnsupportedUpload)
             {
                 result += " Skipped unsupported image upload.";
+            }
+
+            if (work.MissingSchedulerDatabase)
+            {
+                if (work.PushScheduler)
+                {
+                    result += " Waiting for the configured scheduler database.";
+                }
+                else
+                {
+                    errors.Add(
+                        "scheduler sync and dependent image upload: configure a scheduler database");
+                }
             }
 
             if (errors.Count > 0)
@@ -1006,6 +1053,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
         bool UploadImage,
         bool SkippedUnsupportedUpload,
         bool PushScheduler,
+        bool MissingSchedulerDatabase,
         string TargetSchedulerDatabase,
         bool AutoApplyPushes,
         bool IncludeThumbnails,
