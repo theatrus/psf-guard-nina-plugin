@@ -299,6 +299,96 @@ public sealed class DurableQueueTests
     }
 
     [Fact]
+    public async Task UnresolvedSchedulerCaptureDoesNotDelayLaterCapture()
+    {
+        using var directory = new TestDirectory();
+        using var database = new TestDatabase();
+        database.Seed(0);
+        var queuePath = Directory.CreateDirectory(directory.Child("queue")).FullName;
+        var unresolvedId = Guid.Parse("00000000-0000-0000-0000-000000000001");
+        var resolvedId = Guid.Parse("ffffffff-ffff-ffff-ffff-ffffffffffff");
+        var exposureStart = DateTime.UtcNow;
+        using (var connection = database.Open())
+        {
+            connection.Execute(
+                "UPDATE acquiredimage SET acquireddate = @date WHERE Id = 5",
+                new Dictionary<string, object?>
+                {
+                    ["@date"] = new DateTimeOffset(exposureStart).ToUnixTimeSeconds(),
+                });
+        }
+
+        await WriteCaptureJobAsync(
+            queuePath,
+            unresolvedId,
+            database.Path,
+            @"c:\images\missing.fits",
+            exposureStart);
+        await WriteCaptureJobAsync(
+            queuePath,
+            resolvedId,
+            database.Path,
+            @"c:\images\M31-001.fits",
+            exposureStart);
+        var requests = 0;
+        await using var queue = new DurablePushQueue(
+            queuePath,
+            destination => Client(
+                destination,
+                _ =>
+                {
+                    Interlocked.Increment(ref requests);
+                    return Json("""{"preview_id":"preview-1","state":"ready"}""");
+                }));
+
+        queue.Start();
+
+        await WaitUntilAsync(
+            () => Volatile.Read(ref requests) == 1
+                && !File.Exists(Path.Combine(queuePath, $"{resolvedId:N}.json")),
+            TimeSpan.FromSeconds(3));
+        Assert.True(File.Exists(Path.Combine(queuePath, $"{unresolvedId:N}.json")));
+    }
+
+    [Fact]
+    public async Task ResolvingACaptureRestoresTheRemoteDeliveryRetryBudget()
+    {
+        using var directory = new TestDirectory();
+        using var database = new TestDatabase();
+        database.Seed(0);
+        var queuePath = Directory.CreateDirectory(directory.Child("queue")).FullName;
+        var jobId = Guid.NewGuid();
+        var statuses = new ConcurrentQueue<string>();
+        await WriteCaptureJobAsync(
+            queuePath,
+            jobId,
+            database.Path,
+            @"c:\images\M31-001.fits",
+            default,
+            attempts: QueueFailurePolicy.MaximumAttempts - 1);
+        await using var queue = new DurablePushQueue(
+            queuePath,
+            destination => Client(
+                destination,
+                _ => Json("""{"error":"try again"}""", HttpStatusCode.ServiceUnavailable)),
+            statuses.Enqueue);
+
+        queue.Start();
+
+        await WaitUntilAsync(
+            () => statuses.Any(status => status.Contains("retrying", StringComparison.Ordinal)),
+            TimeSpan.FromSeconds(3));
+        await using var input = File.OpenRead(Path.Combine(queuePath, $"{jobId:N}.json"));
+        var job = await JsonSerializer.DeserializeAsync<QueuedBundleJob>(
+            input,
+            ProtocolJson.Options);
+        Assert.NotNull(job);
+        Assert.Equal(1, job.Attempts);
+        Assert.False(job.Blocked);
+        Assert.NotNull(job.Bundle);
+    }
+
+    [Fact]
     public async Task LegacyJobIsBlockedInsteadOfUsingTheCurrentDestination()
     {
         using var directory = new TestDirectory();
@@ -409,6 +499,34 @@ public sealed class DurableQueueTests
         };
         bundle.Seal();
         return bundle;
+    }
+
+    private static async Task WriteCaptureJobAsync(
+        string queuePath,
+        Guid jobId,
+        string databasePath,
+        string imagePath,
+        DateTime exposureStart,
+        int attempts = 0)
+    {
+        var job = new QueuedBundleJob
+        {
+            JobId = jobId,
+            Destination = Destination(),
+            AutoApply = false,
+            Capture = new QueuedCaptureSource
+            {
+                DatabasePath = databasePath,
+                ProductVersion = "5.9.6.0",
+                ImagePath = imagePath,
+                ExposureStart = exposureStart,
+                IncludeThumbnail = false,
+            },
+            Attempts = attempts,
+            NextAttemptUtc = DateTimeOffset.UtcNow,
+        };
+        await using var output = File.Create(Path.Combine(queuePath, $"{jobId:N}.json"));
+        await JsonSerializer.SerializeAsync(output, job, ProtocolJson.Options);
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)

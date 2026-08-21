@@ -481,11 +481,22 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
 
             var shouldUpload = UploadCapturedImages
                 && CaptureImageTypes.ShouldDirectUpload(imageType, UploadCalibrationImages);
-            var shouldPushScheduler = AutoPushCaptures
-                && CaptureImageTypes.IsLight(imageType)
+            var schedulerPushRequested = AutoPushCaptures
+                && CaptureImageTypes.IsLight(imageType);
+            var shouldPushScheduler = schedulerPushRequested
                 && HasTargetSchedulerDatabase();
+            var missingSchedulerDatabase = schedulerPushRequested && !shouldPushScheduler;
+
             if (!shouldUpload && !shouldPushScheduler)
             {
+                if (missingSchedulerDatabase)
+                {
+                    SetBackgroundStatus(
+                        "Could not queue Target Scheduler sync for "
+                        + $"{Path.GetFileName(args.PathToImage.LocalPath)}; "
+                        + "the configured scheduler database was not found.");
+                }
+
                 return;
             }
 
@@ -494,8 +505,13 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                 && CaptureImageTypes.IsSupportedImagePath(imagePath);
             if (shouldUpload && !supportedUpload && !shouldPushScheduler)
             {
-                SetBackgroundStatus(
-                    $"Skipped {Path.GetFileName(imagePath)}; PSF Guard accepts FITS and XISF files.");
+                var result = missingSchedulerDatabase
+                    ? "Could not queue Target Scheduler sync; "
+                        + "the configured scheduler database was not found. "
+                    : string.Empty;
+                result += $"Skipped {Path.GetFileName(imagePath)}; "
+                    + "PSF Guard accepts FITS and XISF files.";
+                SetBackgroundStatus(result);
                 return;
             }
 
@@ -506,6 +522,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
                 supportedUpload,
                 shouldUpload && !supportedUpload,
                 shouldPushScheduler,
+                missingSchedulerDatabase,
                 TargetSchedulerDatabase,
                 AutoApplyPushes,
                 IncludeThumbnails,
@@ -754,6 +771,11 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
             if (work.SkippedUnsupportedUpload)
             {
                 result += " Skipped unsupported image upload.";
+            }
+
+            if (work.MissingSchedulerDatabase)
+            {
+                errors.Add("scheduler sync: configured scheduler database was not found");
             }
 
             if (errors.Count > 0)
@@ -1006,6 +1028,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged
         bool UploadImage,
         bool SkippedUnsupportedUpload,
         bool PushScheduler,
+        bool MissingSchedulerDatabase,
         string TargetSchedulerDatabase,
         bool AutoApplyPushes,
         bool IncludeThumbnails,

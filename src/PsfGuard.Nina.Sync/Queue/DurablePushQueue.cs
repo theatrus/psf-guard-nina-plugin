@@ -327,17 +327,26 @@ public sealed class DurablePushQueue : IAsyncDisposable
         var reader = new TargetSchedulerCatalogReader(
             capture.DatabasePath,
             capture.ProductVersion);
-        var acquiredImageId = await reader.WaitForCaptureAsync(
+        var acquiredImageId = await reader.TryFindCaptureAsync(
                 capture.ImagePath,
                 capture.ExposureStart,
-                TimeSpan.FromSeconds(20),
                 cancellationToken)
             .ConfigureAwait(false);
+        if (!acquiredImageId.HasValue)
+        {
+            throw new TimeoutException(
+                "Target Scheduler has not exposed a unique record for saved light "
+                + $"{Path.GetFileName(capture.ImagePath)} yet.");
+        }
+
         job.Bundle = await reader.BuildCaptureBundleAsync(
-                acquiredImageId,
+                acquiredImageId.Value,
                 capture.IncludeThumbnail,
                 cancellationToken)
             .ConfigureAwait(false);
+        job.Attempts = 0;
+        job.LastError = null;
+        job.NextAttemptUtc = DateTimeOffset.UtcNow;
         await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
     }
 

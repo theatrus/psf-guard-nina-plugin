@@ -106,6 +106,9 @@ frames, or both and waits for N.I.N.A. to finish saving before it uploads. When
 a matching global policy is also enabled, the trigger recognizes that the
 durable global queue owns the file and does not send it twice.
 
+Profile-wide capture automation requires **Enable PSF Guard sync**. It does not
+require an Advanced Sequencer trigger.
+
 Use **Test connection** before enabling automatic work. When direct image
 upload is selected, the check also verifies that the chosen PSF Guard database
 has enabled its separate upload gate.
@@ -215,8 +218,10 @@ Target Scheduler catalog mode:
 1. N.I.N.A. saves the image.
 2. The plugin persists a destination-bound pending-capture job.
 3. Target Scheduler's own image-save watcher writes its database transaction.
-4. PSF Guard Sync retries an exact metadata filename match in durable worker
-   attempts, including after N.I.N.A. restarts.
+4. PSF Guard Sync first matches the canonical saved path. When another save
+   plugin or Windows path alias changes the root, it accepts only one row with
+   the same filename and exposure start instead of guessing. Durable attempts
+   continue after N.I.N.A. restarts without holding up later captures.
 5. The plugin reads the capture, thumbnail, and required scheduler parents in a
    read-only connection.
 6. It replaces the pending record with the immutable bundle.

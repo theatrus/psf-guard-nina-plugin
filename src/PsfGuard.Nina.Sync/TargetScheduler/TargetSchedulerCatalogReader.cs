@@ -12,7 +12,9 @@ public sealed class TargetSchedulerCatalogReader
 {
     internal const long DefaultMaximumThumbnailBytes = 256L * 1024 * 1024;
 
+    private const int RecentCaptureLimit = 2_000;
     private const int RowProgressInterval = 1_000;
+    private const long ExposureMatchToleranceSeconds = 2;
 
     private static readonly string[] PlanningTables =
     [
@@ -86,8 +88,10 @@ public sealed class TargetSchedulerCatalogReader
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var match = await Task.Run(
-                    () => FindCapture(normalizedPath, timestamp, cancellationToken),
+            var match = await TryFindCaptureAsync(
+                    normalizedPath,
+                    exposureStart,
+                    timestamp,
                     cancellationToken)
                 .ConfigureAwait(false);
             if (match.HasValue)
@@ -98,12 +102,30 @@ public sealed class TargetSchedulerCatalogReader
             if (DateTimeOffset.UtcNow >= deadline)
             {
                 throw new TimeoutException(
-                    $"Target Scheduler did not record the saved image within {timeout.TotalSeconds:0} seconds.");
+                    "Target Scheduler did not expose a unique record for saved light "
+                    + $"{Path.GetFileName(imagePath)} within {timeout.TotalSeconds:0} seconds.");
             }
 
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
             delay = TimeSpan.FromMilliseconds(Math.Min(delay.TotalMilliseconds * 1.6, 1_000));
         }
+    }
+
+    internal Task<long?> TryFindCaptureAsync(
+        string imagePath,
+        DateTime exposureStart,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(imagePath);
+        var normalizedPath = NormalizePath(imagePath);
+        long? timestamp = exposureStart == default
+            ? null
+            : new DateTimeOffset(exposureStart.ToUniversalTime()).ToUnixTimeSeconds();
+        return TryFindCaptureAsync(
+            normalizedPath,
+            exposureStart,
+            timestamp,
+            cancellationToken);
     }
 
     public Task<CatalogBundle> BuildCaptureBundleAsync(
@@ -189,51 +211,119 @@ public sealed class TargetSchedulerCatalogReader
             cancellationToken);
     }
 
+    private Task<long?> TryFindCaptureAsync(
+        string normalizedPath,
+        DateTime exposureStart,
+        long? timestamp,
+        CancellationToken cancellationToken)
+    {
+        return Task.Run(
+            () => FindCapture(
+                normalizedPath,
+                exposureStart,
+                timestamp,
+                cancellationToken),
+            cancellationToken);
+    }
+
     private long? FindCapture(
         string normalizedPath,
+        DateTime exposureStart,
         long? timestamp,
         CancellationToken cancellationToken)
     {
         return ReadSnapshot(
             (connection, transaction, _) =>
             {
-                using var command = connection.CreateCommand();
-                command.Transaction = transaction;
-                if (timestamp.HasValue)
+                var candidates = ReadCaptureCandidates(
+                    connection,
+                    transaction,
+                    timestamp,
+                    cancellationToken);
+                if (!timestamp.HasValue)
                 {
-                    command.CommandText =
-                        "SELECT Id, metadata FROM acquiredimage "
-                        + "WHERE acquireddate BETWEEN @start AND @end "
-                        + "ORDER BY ABS(acquireddate - @timestamp), Id DESC";
-                    command.Parameters.AddWithValue("@start", timestamp.Value - 600);
-                    command.Parameters.AddWithValue("@end", timestamp.Value + 600);
-                    command.Parameters.AddWithValue("@timestamp", timestamp.Value);
-                }
-                else
-                {
-                    command.CommandText =
-                        "SELECT Id, metadata FROM acquiredimage ORDER BY Id DESC LIMIT 100";
+                    return UniqueCapture(
+                        candidates,
+                        candidate => PathsEqual(candidate.Metadata.FileName, normalizedPath));
                 }
 
-                using var reader = command.ExecuteReader();
-                while (reader.Read())
+                var recent = ReadCaptureCandidates(
+                    connection,
+                    transaction,
+                    timestamp: null,
+                    cancellationToken);
+                var allCandidates = candidates
+                    .Concat(recent)
+                    .DistinctBy(candidate => candidate.Id)
+                    .ToArray();
+                var exactPath = UniqueCapture(
+                    allCandidates,
+                    candidate => PathsEqual(candidate.Metadata.FileName, normalizedPath)
+                        && ExposureMatches(candidate, exposureStart, timestamp.Value));
+                if (exactPath.HasValue)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    var metadata = reader.IsDBNull(1) ? null : reader.GetString(1);
-                    var candidatePath = TryGetMetadataFileName(metadata);
-                    if (candidatePath is not null
-                        && string.Equals(
-                            NormalizePath(candidatePath),
-                            normalizedPath,
-                            StringComparison.OrdinalIgnoreCase))
-                    {
-                        return (long?)reader.GetInt64(0);
-                    }
+                    return exactPath;
                 }
 
-                return null;
+                var fileName = Path.GetFileName(normalizedPath);
+                if (string.IsNullOrWhiteSpace(fileName))
+                {
+                    return null;
+                }
+
+                return UniqueCapture(
+                    allCandidates,
+                    candidate => string.Equals(
+                            FileName(candidate.Metadata.FileName),
+                            fileName,
+                            StringComparison.OrdinalIgnoreCase)
+                        && candidate.Metadata.ExposureStartTime.HasValue
+                        && ExposureTimesMatch(
+                            candidate.Metadata.ExposureStartTime.Value,
+                            exposureStart));
             },
             cancellationToken);
+    }
+
+    private static List<CaptureCandidate> ReadCaptureCandidates(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        long? timestamp,
+        CancellationToken cancellationToken)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        if (timestamp.HasValue)
+        {
+            command.CommandText =
+                "SELECT Id, acquireddate, metadata FROM acquiredimage "
+                + "WHERE acquireddate BETWEEN @start AND @end "
+                + "ORDER BY ABS(acquireddate - @timestamp), Id DESC";
+            command.Parameters.AddWithValue("@start", timestamp.Value - 600);
+            command.Parameters.AddWithValue("@end", timestamp.Value + 600);
+            command.Parameters.AddWithValue("@timestamp", timestamp.Value);
+        }
+        else
+        {
+            command.CommandText =
+                "SELECT Id, acquireddate, metadata FROM acquiredimage "
+                + "ORDER BY Id DESC LIMIT @limit";
+            command.Parameters.AddWithValue("@limit", RecentCaptureLimit);
+        }
+
+        using var reader = command.ExecuteReader();
+        var candidates = new List<CaptureCandidate>();
+        while (reader.Read())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var metadata = reader.IsDBNull(2) ? null : reader.GetString(2);
+            candidates.Add(new CaptureCandidate(
+                reader.GetInt64(0),
+                reader.IsDBNull(1) ? null : reader.GetInt64(1),
+                ReadCaptureMetadata(metadata)));
+        }
+
+        return candidates;
     }
 
     private CatalogBundle BuildCaptureBundle(
@@ -881,40 +971,149 @@ public sealed class TargetSchedulerCatalogReader
         return Convert.ToInt64(value.ToDatabaseValue());
     }
 
-    private static string? TryGetMetadataFileName(string? metadata)
+    private static long? UniqueCapture(
+        IEnumerable<CaptureCandidate> candidates,
+        Func<CaptureCandidate, bool> predicate)
+    {
+        long? match = null;
+        foreach (var candidate in candidates.Where(predicate))
+        {
+            if (match.HasValue && match.Value != candidate.Id)
+            {
+                return null;
+            }
+
+            match = candidate.Id;
+        }
+
+        return match;
+    }
+
+    private static bool ExposureMatches(
+        CaptureCandidate candidate,
+        DateTime exposureStart,
+        long timestamp)
+    {
+        if (candidate.AcquiredDate.HasValue
+            && Math.Abs(candidate.AcquiredDate.Value - timestamp)
+                <= ExposureMatchToleranceSeconds)
+        {
+            return true;
+        }
+
+        if (!candidate.Metadata.ExposureStartTime.HasValue)
+        {
+            return false;
+        }
+
+        return ExposureTimesMatch(
+            candidate.Metadata.ExposureStartTime.Value,
+            exposureStart);
+    }
+
+    private static bool ExposureTimesMatch(DateTime candidateStart, DateTime exposureStart)
+    {
+        if (Math.Abs((candidateStart.ToUniversalTime() - exposureStart.ToUniversalTime()).TotalSeconds)
+            <= ExposureMatchToleranceSeconds)
+        {
+            return true;
+        }
+
+        if (candidateStart.Kind != DateTimeKind.Unspecified
+            && exposureStart.Kind != DateTimeKind.Unspecified)
+        {
+            return false;
+        }
+
+        var candidateWallClock = DateTime.SpecifyKind(candidateStart, DateTimeKind.Unspecified);
+        var expectedWallClock = DateTime.SpecifyKind(exposureStart, DateTimeKind.Unspecified);
+        return Math.Abs((candidateWallClock - expectedWallClock).TotalSeconds)
+            <= ExposureMatchToleranceSeconds;
+    }
+
+    private static bool PathsEqual(string? candidatePath, string normalizedPath) =>
+        candidatePath is not null
+        && string.Equals(
+            NormalizePath(candidatePath),
+            normalizedPath,
+            StringComparison.OrdinalIgnoreCase);
+
+    private static string? FileName(string? path) =>
+        string.IsNullOrWhiteSpace(path) ? null : Path.GetFileName(NormalizePath(path));
+
+    private static CaptureMetadata ReadCaptureMetadata(string? metadata)
     {
         if (string.IsNullOrWhiteSpace(metadata))
         {
-            return null;
+            return default;
         }
 
         try
         {
             using var document = JsonDocument.Parse(metadata);
-            return document.RootElement.TryGetProperty("FileName", out var fileName)
-                ? fileName.GetString()
-                : null;
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return default;
+            }
+
+            string? fileName = null;
+            DateTime? exposureStart = null;
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                if (property.Name.Equals("FileName", StringComparison.OrdinalIgnoreCase)
+                    && property.Value.ValueKind == JsonValueKind.String)
+                {
+                    fileName = property.Value.GetString();
+                }
+                else if (property.Name.Equals(
+                        "ExposureStartTime",
+                        StringComparison.OrdinalIgnoreCase)
+                    && property.Value.ValueKind == JsonValueKind.String
+                    && property.Value.TryGetDateTime(out var parsedExposureStart))
+                {
+                    exposureStart = parsedExposureStart;
+                }
+            }
+
+            return new CaptureMetadata(fileName, exposureStart);
         }
         catch (JsonException)
         {
-            return null;
+            return default;
         }
     }
 
     private static string NormalizePath(string value)
     {
+        var normalized = value.Trim();
+        if (Uri.TryCreate(normalized, UriKind.Absolute, out var uri) && uri.IsFile)
+        {
+            normalized = uri.LocalPath;
+        }
+
         try
         {
-            return Path.GetFullPath(value)
-                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            normalized = Path.GetFullPath(normalized);
         }
         catch (Exception exception) when (
             exception is ArgumentException
             or NotSupportedException
             or PathTooLongException)
         {
-            return value.Trim();
         }
+
+        if (normalized.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = @"\\" + normalized[8..];
+        }
+        else if (normalized.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized[4..];
+        }
+
+        return normalized
+            .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
+            .TrimEnd(Path.DirectorySeparatorChar);
     }
 
     private static string CatalogId(string path)
@@ -942,4 +1141,13 @@ public sealed class TargetSchedulerCatalogReader
     private sealed record BundleSnapshot(
         int SchemaVersion,
         SortedDictionary<string, BundleTable> Tables);
+
+    private sealed record CaptureCandidate(
+        long Id,
+        long? AcquiredDate,
+        CaptureMetadata Metadata);
+
+    private readonly record struct CaptureMetadata(
+        string? FileName,
+        DateTime? ExposureStartTime);
 }
