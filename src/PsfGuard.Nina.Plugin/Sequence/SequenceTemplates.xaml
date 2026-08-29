@@ -9,7 +9,7 @@
     <DataTemplate DataType="{x:Type local:CheckPsfGuardConnection}">
         <nina:SequenceBlockView>
             <nina:SequenceBlockView.SequenceItemContent>
-                <TextBlock Text="Verify server, token, and catalog" />
+                <TextBlock Text="Verify server pairing and catalog" />
             </nina:SequenceBlockView.SequenceItemContent>
         </nina:SequenceBlockView>
     </DataTemplate>

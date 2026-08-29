@@ -26,6 +26,12 @@
     <PackageReference Include="NINA.Plugin" Version="3.2.0.9001" />
   </ItemGroup>
 
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>PsfGuard.Nina.Plugin.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
   <Target Name="CopyPluginForLocalDevelopment" AfterTargets="Build" Condition="'$(CopyToNina)' == 'true'">
     <PropertyGroup>
       <NinaPluginDir>$(LOCALAPPDATA)\NINA\Plugins\3.0.0\PSF Guard Sync</NinaPluginDir>

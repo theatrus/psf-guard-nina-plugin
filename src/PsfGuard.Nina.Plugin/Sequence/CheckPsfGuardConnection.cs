@@ -7,7 +7,7 @@ using NINA.Sequencer.SequenceItem;
 namespace PsfGuard.Nina.Plugin.Sequence;
 
 [ExportMetadata("Name", "Check PSF Guard connection")]
-[ExportMetadata("Description", "Verify the remote server, API token, and configured catalog before a session or target")]
+[ExportMetadata("Description", "Verify the remote server, paired credential, and configured catalog before a session or target")]
 [ExportMetadata("Icon", "ConnectSVG")]
 [ExportMetadata("Category", "PSF Guard Sync")]
 [Export(typeof(ISequenceItem))]

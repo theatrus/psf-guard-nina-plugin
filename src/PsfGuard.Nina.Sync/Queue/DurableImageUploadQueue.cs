@@ -102,7 +102,7 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
                 var job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
                 if (job is null
                     || !job.ImageUploadDeferred
-                    || job.Destination != destination)
+                    || !destination.Matches(job.Destination))
                 {
                     continue;
                 }
@@ -145,7 +145,7 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
-                if (job is null || !job.Blocked || job.Destination != destination)
+                if (job is null || !job.Blocked || !destination.Matches(job.Destination))
                 {
                     continue;
                 }

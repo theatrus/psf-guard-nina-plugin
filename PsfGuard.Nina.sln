@@ -8,6 +8,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PsfGuard.Nina.Plugin", "src
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PsfGuard.Nina.Sync.Tests", "tests\PsfGuard.Nina.Sync.Tests\PsfGuard.Nina.Sync.Tests.csproj", "{040488DB-1F04-47A0-BC68-19EF53019C65}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PsfGuard.Nina.Plugin.Tests", "tests\PsfGuard.Nina.Plugin.Tests\PsfGuard.Nina.Plugin.Tests.csproj", "{911F66E4-80C8-46D2-81B5-7284F21A68E3}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -26,5 +28,9 @@ Global
 		{040488DB-1F04-47A0-BC68-19EF53019C65}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{040488DB-1F04-47A0-BC68-19EF53019C65}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{040488DB-1F04-47A0-BC68-19EF53019C65}.Release|Any CPU.Build.0 = Release|Any CPU
+		{911F66E4-80C8-46D2-81B5-7284F21A68E3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{911F66E4-80C8-46D2-81B5-7284F21A68E3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{911F66E4-80C8-46D2-81B5-7284F21A68E3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{911F66E4-80C8-46D2-81B5-7284F21A68E3}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

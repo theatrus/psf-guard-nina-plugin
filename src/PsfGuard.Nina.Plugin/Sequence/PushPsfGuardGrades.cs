@@ -30,9 +30,10 @@ public sealed class PushPsfGuardGrades : PsfGuardSequenceItemBase
         CancellationToken token)
     {
         using var status = BeginStatus(progress);
+        var captureSettings = CaptureSettingsSnapshot();
         Report(progress, "Pushing grades...");
-        await CreateOrchestrator()
-            .PushGradesAsync(AutoApplyPushes, token)
+        await CreateOrchestrator(captureSettings)
+            .PushGradesAsync(captureSettings.AutoApplyPushes, token)
             .ConfigureAwait(false);
     }
 

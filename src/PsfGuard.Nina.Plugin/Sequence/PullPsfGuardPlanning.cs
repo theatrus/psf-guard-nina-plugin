@@ -30,8 +30,9 @@ public sealed class PullPsfGuardPlanning : PsfGuardSequenceItemBase
         CancellationToken token)
     {
         using var status = BeginStatus(progress);
+        var captureSettings = CaptureSettingsSnapshot();
         Report(progress, "Pulling planning...");
-        await CreateOrchestrator()
+        await CreateOrchestrator(captureSettings)
             .PullPlanningAsync(token)
             .ConfigureAwait(false);
     }

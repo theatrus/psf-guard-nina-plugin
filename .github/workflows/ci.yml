@@ -33,6 +33,7 @@ jobs:
           cache-dependency-path: |
             src/PsfGuard.Nina.Plugin/packages.lock.json
             src/PsfGuard.Nina.Sync/packages.lock.json
+            tests/PsfGuard.Nina.Plugin.Tests/packages.lock.json
             tests/PsfGuard.Nina.Sync.Tests/packages.lock.json
 
       - name: Restore locked dependencies
@@ -47,6 +48,14 @@ jobs:
           --configuration Release
           --no-restore
           --logger "trx;LogFileName=sync-tests.trx"
+          --results-directory artifacts\test-results
+
+      - name: Test plugin settings
+        run: >-
+          dotnet test tests\PsfGuard.Nina.Plugin.Tests\PsfGuard.Nina.Plugin.Tests.csproj
+          --configuration Release
+          --no-restore
+          --logger "trx;LogFileName=plugin-tests.trx"
           --results-directory artifacts\test-results
 
       - name: Build N.I.N.A. plugin
