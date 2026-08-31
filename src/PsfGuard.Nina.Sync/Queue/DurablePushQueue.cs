@@ -502,6 +502,18 @@ public sealed class DurablePushQueue : IAsyncDisposable
                     soonest = delay.Value;
                 }
             }
+            catch (PsfGuardPreviewJobException exception) when (exception.IsTransient)
+            {
+                var delay = await RenewBundleForPreviewAsync(
+                        job,
+                        exception,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (delay.HasValue && delay.Value < soonest)
+                {
+                    soonest = delay.Value;
+                }
+            }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 throw;
@@ -632,7 +644,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
 
     private async Task<TimeSpan?> RenewBundleForPreviewAsync(
         QueuedBundleJob job,
-        PreviewUnavailableException exception,
+        Exception exception,
         CancellationToken cancellationToken)
     {
         var bundle = job.Bundle
@@ -648,14 +660,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
             return null;
         }
 
-        var renewed = bundle with
-        {
-            BundleId = Guid.NewGuid(),
-            CreatedAtUtc = DateTimeOffset.UtcNow,
-            PayloadSha256 = null,
-        };
-        renewed.Seal(cancellationToken);
-        job.Bundle = renewed;
+        job.Bundle = bundle.RenewForPreviewRetry(cancellationToken);
         var delay = QueueFailurePolicy.RetryDelay(job.Attempts);
         job.NextAttemptUtc = DateTimeOffset.UtcNow + delay;
         await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
@@ -766,10 +771,32 @@ public sealed class DurablePushQueue : IAsyncDisposable
         bool resolvingCapture,
         CancellationToken cancellationToken)
     {
+        if (resolvingCapture)
+        {
+            job.LastError = exception.Message;
+            if (!QueueFailurePolicy.ShouldRetry(exception, resolvingCapture: true))
+            {
+                job.Blocked = true;
+                await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
+                ReportStatus($"Sync job blocked: {exception.Message}");
+                return null;
+            }
+
+            job.PrerequisiteAttempts = QueueFailurePolicy.IncrementAttempts(
+                job.PrerequisiteAttempts);
+            var prerequisiteDelay = QueueFailurePolicy.RetryDelay(job.PrerequisiteAttempts);
+            job.NextAttemptUtc = DateTimeOffset.UtcNow + prerequisiteDelay;
+            await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
+            ReportStatus(
+                "Local Target Scheduler access failed; "
+                + $"retrying in {prerequisiteDelay.TotalSeconds:0} seconds: {exception.Message}");
+            return prerequisiteDelay;
+        }
+
         job.Attempts = QueueFailurePolicy.IncrementAttempts(job.Attempts);
         job.LastError = exception.Message;
         var retry = job.Attempts < QueueFailurePolicy.MaximumAttempts
-            && QueueFailurePolicy.ShouldRetry(exception, resolvingCapture);
+            && QueueFailurePolicy.ShouldRetry(exception);
         if (!retry)
         {
             job.Blocked = true;

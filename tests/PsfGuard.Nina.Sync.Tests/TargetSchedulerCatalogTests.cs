@@ -1,3 +1,4 @@
+using System.Data.SQLite;
 using PsfGuard.Nina.Sync.Protocol;
 using PsfGuard.Nina.Sync.TargetScheduler;
 
@@ -305,6 +306,64 @@ public sealed class TargetSchedulerCatalogTests
 
         Assert.True(updated);
         Assert.Equal("M 31", TextValue(bundle.Tables["target"], "name"));
+    }
+
+    [Fact]
+    public async Task RollbackJournalFullMergeYieldsToAWriterAndRetriesTheSnapshot()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0);
+        using (var connection = database.Open())
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "PRAGMA journal_mode = DELETE";
+            Assert.Equal("delete", Convert.ToString(command.ExecuteScalar())?.ToLowerInvariant());
+        }
+
+        var updated = false;
+        var projectReads = 0;
+        var reader = new TargetSchedulerCatalogReader(
+            database.Path,
+            "5.9.6.0",
+            TargetSchedulerCatalogReader.DefaultMaximumThumbnailBytes,
+            table =>
+            {
+                if (!table.Equals("project", StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                projectReads++;
+                if (updated)
+                {
+                    return;
+                }
+
+                updated = true;
+                var builder = new SQLiteConnectionStringBuilder
+                {
+                    DataSource = database.Path,
+                    Pooling = false,
+                    DefaultTimeout = 0,
+                    BusyTimeout = 0,
+                };
+                using var writer = new SQLiteConnection(builder.ConnectionString);
+                writer.Open();
+                writer.Execute(
+                    """
+                    UPDATE project SET name = 'Changed project' WHERE Id = 1;
+                    UPDATE target SET name = 'Changed target' WHERE Id = 2;
+                    """);
+            });
+
+        var bundle = await reader.BuildFullMergeBundleAsync(
+            includeThumbnails: false,
+            CancellationToken.None);
+
+        Assert.True(updated);
+        Assert.Equal(2, projectReads);
+        Assert.Equal("Changed project", TextValue(bundle.Tables["project"], "name"));
+        Assert.Equal("Changed target", TextValue(bundle.Tables["target"], "name"));
     }
 
     [Fact]
@@ -641,6 +700,37 @@ public sealed class TargetSchedulerCatalogTests
     }
 
     [Fact]
+    public async Task PlanningPullCancellationInterruptsADatabaseLock()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0);
+        destination.Seed(100);
+        using (var connection = source.Open())
+        {
+            connection.Execute("UPDATE project SET name = 'Remote name' WHERE guid = 'project-guid'");
+        }
+
+        var reader = new TargetSchedulerCatalogReader(source.Path, "5.9.6.0");
+        var bundle = await reader.BuildPlanningBundleAsync(CancellationToken.None);
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+        using (var blocker = destination.Open())
+        using (var transaction = blocker.BeginTransaction())
+        using (var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100)))
+        {
+            AcquireWriteLock(blocker, transaction);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => writer.ApplyPlanningAsync(bundle, cancellation.Token)
+                    .WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+
+        using var destinationConnection = destination.Open();
+        using var command = destinationConnection.CreateCommand();
+        command.CommandText = "SELECT name FROM project WHERE guid = 'project-guid'";
+        Assert.Equal("M 31", command.ExecuteScalar());
+    }
+
+    [Fact]
     public async Task GradePullMatchesByGuidAndOnlyChangesAcquiredImageGradeFields()
     {
         using var source = new TestDatabase();
@@ -665,6 +755,66 @@ public sealed class TargetSchedulerCatalogTests
         Assert.Equal(2, row.GetInt32(0));
         Assert.Equal("Clouds", row.GetString(1));
         Assert.Equal(101, row.GetInt64(2));
+    }
+
+    [Fact]
+    public async Task GradePullCancellationInterruptsADatabaseLock()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0, grade: 2, rejectReason: "Clouds");
+        destination.Seed(100, grade: 0);
+
+        var reader = new TargetSchedulerCatalogReader(source.Path, "5.9.6.0");
+        var bundle = await reader.BuildGradesBundleAsync(
+            reviewedOnly: true,
+            CancellationToken.None);
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+        using (var blocker = destination.Open())
+        using (var transaction = blocker.BeginTransaction())
+        using (var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(100)))
+        {
+            AcquireWriteLock(blocker, transaction);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => writer.ApplyGradesAsync(bundle, cancellation.Token)
+                    .WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+
+        using var destinationConnection = destination.Open();
+        using var command = destinationConnection.CreateCommand();
+        command.CommandText =
+            "SELECT gradingStatus, rejectreason FROM acquiredimage WHERE guid = 'image-guid'";
+        using var row = command.ExecuteReader();
+        Assert.True(row.Read());
+        Assert.Equal(0, row.GetInt32(0));
+        Assert.True(row.IsDBNull(1));
+    }
+
+    [Fact]
+    public async Task GradePullRetriesUntilATransientDatabaseLockClears()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0, grade: 2, rejectReason: "Clouds");
+        destination.Seed(100, grade: 0);
+
+        var reader = new TargetSchedulerCatalogReader(source.Path, "5.9.6.0");
+        var bundle = await reader.BuildGradesBundleAsync(
+            reviewedOnly: true,
+            CancellationToken.None);
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+        Task<ApplyResult> apply;
+        using (var blocker = destination.Open())
+        using (var transaction = blocker.BeginTransaction())
+        {
+            AcquireWriteLock(blocker, transaction);
+            apply = writer.ApplyGradesAsync(bundle, CancellationToken.None);
+            await Task.Delay(300);
+        }
+
+        var result = await apply.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, result.Updated);
     }
 
     [Fact]
@@ -802,6 +952,16 @@ public sealed class TargetSchedulerCatalogTests
         using var command = connection.CreateCommand();
         command.CommandText = sql;
         return Convert.ToInt64(command.ExecuteScalar());
+    }
+
+    private static void AcquireWriteLock(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "UPDATE project SET name = name WHERE Id = 101";
+        command.ExecuteNonQuery();
     }
 
     private static BundleTable ReplaceValue(

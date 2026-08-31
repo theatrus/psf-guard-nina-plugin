@@ -180,7 +180,7 @@ public sealed class PsfGuardSyncClient : IDisposable
         {
             if (string.Equals(job.State, "failed", StringComparison.OrdinalIgnoreCase))
             {
-                throw new InvalidOperationException(job.Error ?? "PSF Guard preview failed.");
+                throw new PsfGuardPreviewJobException(job.JobId, job.Error);
             }
 
             if (DateTimeOffset.UtcNow >= deadline)
@@ -307,7 +307,7 @@ public sealed class PsfGuardSyncClient : IDisposable
         {
             if (string.Equals(export.State, "failed", StringComparison.OrdinalIgnoreCase))
             {
-                throw new InvalidOperationException(export.Error ?? "PSF Guard export failed.");
+                throw new PsfGuardExportJobException(export.ExportId, export.Error);
             }
 
             if (DateTimeOffset.UtcNow >= deadline)

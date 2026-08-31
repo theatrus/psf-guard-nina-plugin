@@ -93,6 +93,18 @@ public sealed record CatalogBundle
         }
     }
 
+    internal CatalogBundle RenewForPreviewRetry(CancellationToken cancellationToken)
+    {
+        var renewed = this with
+        {
+            BundleId = Guid.NewGuid(),
+            CreatedAtUtc = DateTimeOffset.UtcNow,
+            PayloadSha256 = null,
+        };
+        renewed.Seal(cancellationToken);
+        return renewed;
+    }
+
     private string ComputeDigest(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();

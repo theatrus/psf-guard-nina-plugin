@@ -10,6 +10,7 @@ public sealed class SyncOrchestrator
 {
     public const string ExportsCapability = "exports";
 
+    private const int MaximumImmediatePreviewAttempts = 3;
     private static readonly TimeSpan ProgressHeartbeatInterval = TimeSpan.FromSeconds(5);
 
     private readonly string destinationCatalogId;
@@ -458,12 +459,14 @@ public sealed class SyncOrchestrator
         return await WithClientAsync(
                 async client =>
                 {
-                    var preview = await client.CreatePreviewAsync(
-                            destinationCatalogId,
+                    var previewResult = await CreatePreviewWithRetryAsync(
+                            client,
                             bundle,
                             cancellationToken,
                             activity)
                         .ConfigureAwait(false);
+                    bundle = previewResult.Bundle;
+                    var preview = previewResult.Preview;
                     SyncApplyResult? applied = null;
                     if (apply)
                     {
@@ -502,6 +505,43 @@ public sealed class SyncOrchestrator
                     return receipt;
                 })
             .ConfigureAwait(false);
+    }
+
+    private async Task<(CatalogBundle Bundle, SyncPreview Preview)> CreatePreviewWithRetryAsync(
+        PsfGuardSyncClient client,
+        CatalogBundle bundle,
+        CancellationToken cancellationToken,
+        IProgress<SyncProgress>? progress)
+    {
+        var current = bundle;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                var preview = await client.CreatePreviewAsync(
+                        destinationCatalogId,
+                        current,
+                        cancellationToken,
+                        progress)
+                    .ConfigureAwait(false);
+                return (current, preview);
+            }
+            catch (PsfGuardPreviewJobException exception)
+                when (exception.IsTransient && attempt < MaximumImmediatePreviewAttempts)
+            {
+                var delay = QueueFailurePolicy.RetryDelay(attempt);
+                current = current.RenewForPreviewRetry(cancellationToken);
+                SyncProgressReporter.Report(
+                    progress,
+                    new SyncProgress
+                    {
+                        Stage = SyncProgressStage.WaitingForPreview,
+                        Message = $"{exception.Message} Retrying with a fresh preview in "
+                            + $"{delay.TotalSeconds:0} seconds...",
+                    });
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     private async Task<CatalogBundle> BuildCapturedImageBundleAsync(

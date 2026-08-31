@@ -73,6 +73,34 @@ public sealed class SyncOrchestratorTests
     }
 
     [Fact]
+    public async Task ImmediatePushRetriesRemoteContentionWithAFreshBundleIdentity()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0, grade: 2, rejectReason: "Clouds");
+        var idempotencyKeys = new List<string>();
+        var orchestrator = Orchestrator(
+            database.Path,
+            request =>
+            {
+                idempotencyKeys.Add(request.Headers.GetValues("Idempotency-Key").Single());
+                return idempotencyKeys.Count == 1
+                    ? Json(
+                        """{"job_id":"job-locked","state":"failed","error":"database is locked"}""",
+                        HttpStatusCode.Accepted)
+                    : Json("""{"preview_id":"preview-retried","state":"ready"}""");
+            });
+
+        var receipt = await orchestrator.PushGradesAsync(
+            apply: false,
+            CancellationToken.None);
+
+        Assert.Equal("preview-retried", receipt.PreviewId);
+        Assert.Equal(2, idempotencyKeys.Count);
+        Assert.NotEqual(idempotencyKeys[0], idempotencyKeys[1]);
+        Assert.Equal(receipt.BundleId.ToString("D"), idempotencyKeys[1]);
+    }
+
+    [Fact]
     public async Task AppliedPushRejectsAnUnexpectedServerState()
     {
         using var database = new TestDatabase();
@@ -332,10 +360,12 @@ public sealed class SyncOrchestratorTests
         new TargetSchedulerCatalogReader(databasePath, "5.9.6.0"),
         new TargetSchedulerCatalogWriter(databasePath));
 
-    private static HttpResponseMessage Json(string body) => new(HttpStatusCode.OK)
-    {
-        Content = new StringContent(body, Encoding.UTF8, "application/json"),
-    };
+    private static HttpResponseMessage Json(
+        string body,
+        HttpStatusCode statusCode = HttpStatusCode.OK) => new(statusCode)
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json"),
+        };
 
     private static HttpResponseMessage Capabilities(IReadOnlyList<string> capabilities) =>
         Json(

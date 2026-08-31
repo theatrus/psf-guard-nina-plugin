@@ -14,6 +14,7 @@ public sealed class TargetSchedulerCatalogReader
 
     private const int RecentCaptureLimit = 2_000;
     private const int RowProgressInterval = 1_000;
+    private const int MaximumSnapshotAttempts = 3;
     private const long ExposureMatchToleranceSeconds = 2;
 
     private static readonly string[] PlanningTables =
@@ -287,12 +288,15 @@ public sealed class TargetSchedulerCatalogReader
 
     private static List<CaptureCandidate> ReadCaptureCandidates(
         SQLiteConnection connection,
-        SQLiteTransaction transaction,
+        SQLiteTransaction? transaction,
         long? timestamp,
         CancellationToken cancellationToken)
     {
         using var command = connection.CreateCommand();
-        command.Transaction = transaction;
+        if (transaction is not null)
+        {
+            command.Transaction = transaction;
+        }
         if (timestamp.HasValue)
         {
             command.CommandText =
@@ -645,7 +649,7 @@ public sealed class TargetSchedulerCatalogReader
 
     private BundleTable ReadById(
         SQLiteConnection connection,
-        SQLiteTransaction transaction,
+        SQLiteTransaction? transaction,
         string table,
         long id,
         CancellationToken cancellationToken,
@@ -663,7 +667,7 @@ public sealed class TargetSchedulerCatalogReader
 
     private BundleTable ReadTable(
         SQLiteConnection connection,
-        SQLiteTransaction transaction,
+        SQLiteTransaction? transaction,
         string table,
         string? whereClause,
         IReadOnlyCollection<SQLiteParameter> parameters,
@@ -689,7 +693,10 @@ public sealed class TargetSchedulerCatalogReader
 
         var columnSql = string.Join(", ", schema.Select(column => Quote(column.Name)));
         using var command = connection.CreateCommand();
-        command.Transaction = transaction;
+        if (transaction is not null)
+        {
+            command.Transaction = transaction;
+        }
         command.CommandText =
             $"SELECT {columnSql} FROM {Quote(table)} "
             + $"{whereClause ?? string.Empty} "
@@ -702,28 +709,30 @@ public sealed class TargetSchedulerCatalogReader
         }
 
         var rows = new List<BundleRow>();
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
+        using (var reader = command.ExecuteReader())
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var values = new WireValue[schema.Count];
-            for (var index = 0; index < schema.Count; index++)
+            while (reader.Read())
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                values[index] = ToWireValue(reader, index);
-            }
+                var values = new WireValue[schema.Count];
+                for (var index = 0; index < schema.Count; index++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    values[index] = ToWireValue(reader, index);
+                }
 
-            rows.Add(new BundleRow { Values = values });
-            if (rows.Count % RowProgressInterval == 0
-                && tableStarted.Elapsed - lastProgressAt >= TimeSpan.FromSeconds(1))
-            {
-                ReportTableProgress(
-                    progress,
-                    table,
-                    rows.Count,
-                    completed: false,
-                    tableStarted.Elapsed);
-                lastProgressAt = tableStarted.Elapsed;
+                rows.Add(new BundleRow { Values = values });
+                if (rows.Count % RowProgressInterval == 0
+                    && tableStarted.Elapsed - lastProgressAt >= TimeSpan.FromSeconds(1))
+                {
+                    ReportTableProgress(
+                        progress,
+                        table,
+                        rows.Count,
+                        completed: false,
+                        tableStarted.Elapsed);
+                    lastProgressAt = tableStarted.Elapsed;
+                }
             }
         }
 
@@ -775,14 +784,17 @@ public sealed class TargetSchedulerCatalogReader
 
     private static List<BundleColumn> ReadColumns(
         SQLiteConnection connection,
-        SQLiteTransaction transaction,
+        SQLiteTransaction? transaction,
         string table,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ValidateTable(table);
         using var command = connection.CreateCommand();
-        command.Transaction = transaction;
+        if (transaction is not null)
+        {
+            command.Transaction = transaction;
+        }
         command.CommandText = $"PRAGMA table_info({Quote(table)})";
         using var reader = command.ExecuteReader();
         var columns = new List<BundleColumn>();
@@ -846,6 +858,8 @@ public sealed class TargetSchedulerCatalogReader
             ReadOnly = true,
             FailIfMissing = true,
             Pooling = false,
+            DefaultTimeout = TargetSchedulerDatabaseAccess.CommandTimeoutSeconds,
+            BusyTimeout = TargetSchedulerDatabaseAccess.BusyTimeoutMilliseconds,
         };
         var connection = new SQLiteConnection(builder.ConnectionString);
         connection.Open();
@@ -853,25 +867,48 @@ public sealed class TargetSchedulerCatalogReader
     }
 
     private T ReadSnapshot<T>(
-        Func<SQLiteConnection, SQLiteTransaction, int, T> read,
+        Func<SQLiteConnection, SQLiteTransaction?, int, T> read,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        using var connection = OpenReadOnly();
-        using var cancellationRegistration = cancellationToken.Register(
-            static state => ((SQLiteConnection)state!).Cancel(),
-            connection);
         try
         {
-            using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
-            var schemaVersion = RequireCompatibleSchema(
-                connection,
-                transaction,
-                cancellationToken);
-            var result = read(connection, transaction, schemaVersion);
-            cancellationToken.ThrowIfCancellationRequested();
-            transaction.Commit();
-            return result;
+            using var connection = OpenReadOnly();
+            using var cancellationRegistration = cancellationToken.Register(
+                static state => ((SQLiteConnection)state!).Cancel(),
+                connection);
+            if (UsesWriteAheadLog(connection, cancellationToken))
+            {
+                using var transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+                var schemaVersion = RequireCompatibleSchema(
+                    connection,
+                    transaction,
+                    cancellationToken);
+                var result = read(connection, transaction, schemaVersion);
+                cancellationToken.ThrowIfCancellationRequested();
+                transaction.Commit();
+                return result;
+            }
+
+            for (var attempt = 1; attempt <= MaximumSnapshotAttempts; attempt++)
+            {
+                var versionBefore = DataVersion(connection, cancellationToken);
+                var schemaVersion = RequireCompatibleSchema(
+                    connection,
+                    transaction: null,
+                    cancellationToken);
+                var result = read(connection, null, schemaVersion);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (versionBefore == DataVersion(connection, cancellationToken))
+                {
+                    return result;
+                }
+            }
+
+            throw new TargetSchedulerTransientAccessException(
+                "The local Target Scheduler database changed repeatedly while PSF Guard "
+                    + $"was reading it: {databasePath}. Try the sync again after the current "
+                    + "scheduler update completes.");
         }
         catch (SQLiteException exception) when (cancellationToken.IsCancellationRequested)
         {
@@ -880,18 +917,53 @@ public sealed class TargetSchedulerCatalogReader
                 exception,
                 cancellationToken);
         }
+        catch (SQLiteException exception)
+            when (TargetSchedulerDatabaseAccess.IsBusy(exception))
+        {
+            throw TargetSchedulerDatabaseAccess.BusyException(
+                databasePath,
+                "reading it",
+                exception);
+        }
+    }
+
+    private static bool UsesWriteAheadLog(
+        SQLiteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA journal_mode";
+        var mode = Convert.ToString(command.ExecuteScalar());
+        cancellationToken.ThrowIfCancellationRequested();
+        return string.Equals(mode, "wal", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static long DataVersion(
+        SQLiteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA data_version";
+        var version = Convert.ToInt64(command.ExecuteScalar());
+        cancellationToken.ThrowIfCancellationRequested();
+        return version;
     }
 
     private void EnsureThumbnailBudget(
         SQLiteConnection connection,
-        SQLiteTransaction transaction,
+        SQLiteTransaction? transaction,
         string? whereClause,
         IReadOnlyCollection<SQLiteParameter> parameters,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         using var command = connection.CreateCommand();
-        command.Transaction = transaction;
+        if (transaction is not null)
+        {
+            command.Transaction = transaction;
+        }
         command.CommandText =
             "SELECT COALESCE(SUM(LENGTH(imagedata)), 0) FROM imagedata "
             + (whereClause ?? string.Empty);
@@ -915,7 +987,7 @@ public sealed class TargetSchedulerCatalogReader
 
     private static int RequireCompatibleSchema(
         SQLiteConnection connection,
-        SQLiteTransaction transaction,
+        SQLiteTransaction? transaction,
         CancellationToken cancellationToken)
     {
         var version = UserVersion(connection, transaction, cancellationToken);
@@ -930,12 +1002,15 @@ public sealed class TargetSchedulerCatalogReader
 
     private static int UserVersion(
         SQLiteConnection connection,
-        SQLiteTransaction transaction,
+        SQLiteTransaction? transaction,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         using var command = connection.CreateCommand();
-        command.Transaction = transaction;
+        if (transaction is not null)
+        {
+            command.Transaction = transaction;
+        }
         command.CommandText = "PRAGMA user_version";
         var version = Convert.ToInt32(command.ExecuteScalar());
         cancellationToken.ThrowIfCancellationRequested();
