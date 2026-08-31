@@ -15,6 +15,7 @@ using NINA.Profile.Interfaces;
 using NINA.WPF.Base.Interfaces.Mediator;
 using PsfGuard.Nina.Sync;
 using PsfGuard.Nina.Sync.Client;
+using PsfGuard.Nina.Sync.Protocol;
 using PsfGuard.Nina.Sync.Queue;
 using PsfGuard.Nina.Sync.TargetScheduler;
 
@@ -76,9 +77,11 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
             SetBackgroundStatus);
 
         TestConnectionCommand = CreateManualCommand(
-            () => RunCommandAsync(TestConnectionAsync, "Testing the PSF Guard connection..."));
+            () => RunCommandAsync(TestConnectionAsync, "Testing the PSF Guard connection..."),
+            CanUseRemote);
         PairCommand = CreateManualCommand(
-            () => RunCommandAsync(PairAsync, "Pairing with PSF Guard..."));
+            () => RunCommandAsync(PairAsync, "Pairing with PSF Guard..."),
+            CanPair);
         PushAllCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
@@ -86,7 +89,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
                     await CreateOrchestrator().QueueFullMergeAsync(token).ConfigureAwait(false);
                     return "Full Target Scheduler merge queued.";
                 },
-                "Preparing a full Target Scheduler merge for the queue..."));
+                "Preparing a full Target Scheduler merge for the queue..."),
+            CanUseCatalogSync);
         ReconcileCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
@@ -123,7 +127,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
                         + " "
                         + FormatApplyResult("Catalog pull-back", pulled);
                 },
-                "Starting full catalog reconcile..."));
+                "Starting full catalog reconcile..."),
+            CanUseCatalogSync);
         applyPreviewCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
@@ -178,7 +183,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
                         .ConfigureAwait(false);
                     return FormatApplyResult("Catalog pull", result);
                 },
-                "Starting merged catalog pull..."));
+                "Starting merged catalog pull..."),
+            CanUseCatalogSync);
         PushPlanningCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
@@ -186,7 +192,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
                     await CreateOrchestrator().QueuePlanningPushAsync(token).ConfigureAwait(false);
                     return "Planning push queued.";
                 },
-                "Preparing planning rows for the queue..."));
+                "Preparing planning rows for the queue..."),
+            CanUseCatalogSync);
         PushGradesCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
@@ -194,7 +201,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
                     await CreateOrchestrator().QueueGradePushAsync(token).ConfigureAwait(false);
                     return "Reviewed-grade push queued.";
                 },
-                "Preparing reviewed grades for the queue..."));
+                "Preparing reviewed grades for the queue..."),
+            CanUseCatalogSync);
         PullPlanningCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
@@ -204,7 +212,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
                         .ConfigureAwait(false);
                     return FormatApplyResult("Planning pull", result);
                 },
-                "Pulling planning rows from PSF Guard..."));
+                "Pulling planning rows from PSF Guard..."),
+            CanUseCatalogSync);
         PullGradesCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
@@ -214,14 +223,17 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
                         .ConfigureAwait(false);
                     return FormatApplyResult("Grade pull", result);
                 },
-                "Pulling reviewed grades from PSF Guard..."));
+                "Pulling reviewed grades from PSF Guard..."),
+            CanUseCatalogSync);
         RetryBlockedCommand = CreateManualCommand(
-            () => RunCommandAsync(RetryBlockedAsync, "Retrying blocked PSF Guard jobs..."));
+            () => RunCommandAsync(RetryBlockedAsync, "Retrying blocked PSF Guard jobs..."),
+            CanUseRemote);
         StartQueuedUploadsCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token => FormatReleasedUploads(
                     await StartQueuedUploadsAsync(token).ConfigureAwait(false)),
-                "Starting queued PSF Guard uploads..."));
+                "Starting queued PSF Guard uploads..."),
+            CanUseRemote);
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -241,6 +253,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         {
             pairingCode = value ?? string.Empty;
             RaisePropertyChanged();
+            RaiseCommandStates();
         }
     }
 
@@ -271,30 +284,31 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         get => settings.ServerUrl;
         set
         {
-            if (!string.Equals(settings.ServerUrl, value, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(settings.ServerUrl, value, StringComparison.Ordinal))
             {
                 SetPendingPreview(null);
+                ClearPairingCode();
             }
 
             settings.ServerUrl = value;
             RaisePropertyChanged();
+            RaisePropertyChanged(nameof(HasStoredCredential));
+            RaisePropertyChanged(nameof(PairingStatus));
+            RaiseCommandStates();
         }
     }
 
-    public string CatalogId
+    public string CatalogId => settings.CatalogId;
+
+    public bool HasStoredCredential => settings.HasPairingCredential;
+
+    public string PairingStatus => settings.GetPairingAvailability(ServerUrl) switch
     {
-        get => settings.CatalogId;
-        set
-        {
-            if (!string.Equals(settings.CatalogId, value, StringComparison.Ordinal))
-            {
-                SetPendingPreview(null);
-            }
-
-            settings.CatalogId = value;
-            RaisePropertyChanged();
-        }
-    }
+        PairingAvailability.Ready => "Paired",
+        PairingAvailability.ServerChanged => "Server changed; pair again",
+        PairingAvailability.CredentialUnavailable => "Credential unavailable",
+        _ => "Not paired",
+    };
 
     public string TargetSchedulerDatabase
     {
@@ -311,21 +325,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
 
             settings.TargetSchedulerDatabase = value;
             RaisePropertyChanged();
-        }
-    }
-
-    public string ApiToken
-    {
-        get => settings.ApiToken;
-        set
-        {
-            if (!string.Equals(settings.ApiToken, value, StringComparison.Ordinal))
-            {
-                SetPendingPreview(null);
-            }
-
-            settings.ApiToken = value;
-            RaisePropertyChanged();
+            RaiseCommandStates();
         }
     }
 
@@ -336,6 +336,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         {
             settings.Enabled = value;
             RaisePropertyChanged();
+            SetBackgroundStatus(
+                value ? "Profile automation is active." : "Profile automation is disabled.");
         }
     }
 
@@ -424,6 +426,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
 
     public bool IsOperationRunning => Volatile.Read(ref activeOperationId) != 0;
 
+    public bool IsSettingsEditable => !IsOperationRunning;
+
     public string PendingPreviewStatus
     {
         get
@@ -450,7 +454,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         queue.Start();
         imageUploadQueue.Start();
         captureWorker = Task.Run(ProcessCaptureWorkAsync);
-        SetBackgroundStatus(Enabled ? "Capture sync is active." : "Sync is disabled.");
+        SetBackgroundStatus(
+            Enabled ? "Profile automation is active." : "Profile automation is disabled.");
         return base.Initialize();
     }
 
@@ -602,7 +607,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         if (string.IsNullOrWhiteSpace(apiToken))
         {
             throw new InvalidOperationException(
-                "The API key for this queued job is no longer available.");
+                "The pairing credential for this queued job is no longer available.");
         }
 
         return new PsfGuardSyncClient(
@@ -618,58 +623,55 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
 
     private async Task<string> PairAsync(CancellationToken cancellationToken)
     {
-        if (!Uri.TryCreate(ServerUrl, UriKind.Absolute, out var serverUri))
+        var pairingTarget = settings.CapturePairingTarget();
+        if (!TryGetServerUri(pairingTarget.ServerUrl, out var serverUri))
         {
-            throw new InvalidOperationException("Enter a valid absolute PSF Guard server URL.");
+            throw new InvalidOperationException(
+                "Enter an HTTPS PSF Guard server URL. HTTP is allowed only for loopback.");
         }
         if (string.IsNullOrWhiteSpace(PairingCode))
         {
             throw new InvalidOperationException(
                 "Enter the pairing code from PSF Guard Settings (Pair a client).");
         }
+        var pairingCode = PairingCode.Trim();
 
         // No API token: the pairing code is the entire authorization.
-        using var client = CreateClient(serverUri, apiToken: string.Empty);
+        using var client = CreateClient(serverUri!, apiToken: string.Empty);
         var paired = await client.PairAsync(
-                PairingCode,
-                $"{Environment.MachineName} · {settings.ProfileName}",
+                pairingCode,
+                $"{Environment.MachineName} · {pairingTarget.ProfileName}",
                 cancellationToken)
             .ConfigureAwait(false);
 
-        CatalogId = paired.CatalogId;
-        ApiToken = paired.Token;
-        PairingCode = string.Empty;
+        await CommitPairingAsync(pairingTarget, paired).ConfigureAwait(false);
         return $"Paired with {paired.Product} {paired.ProductVersion}; "
             + $"catalog {paired.CatalogName} ({paired.CatalogId}). "
-            + "The credential is stored — the code is now used up.";
+            + "The credential is stored; the code is now used up.";
     }
 
     private async Task<string> TestConnectionAsync(CancellationToken cancellationToken)
     {
-        RequireRemoteConfigured();
-        if (!Uri.TryCreate(ServerUrl, UriKind.Absolute, out var serverUri))
-        {
-            throw new InvalidOperationException("Enter a valid absolute PSF Guard server URL.");
-        }
-
-        var catalogId = CatalogId;
-        var apiToken = ApiToken;
-        var uploadCapturedImages = UploadCapturedImages;
-        using var client = CreateClient(serverUri, apiToken);
+        var captureSettings = settings.CaptureSnapshot();
+        var destination = captureSettings.RequireQueueDestination();
+        using var client = CreateClient(
+            new Uri(destination.ServerUrl, UriKind.Absolute),
+            captureSettings.RequireApiToken());
         var capabilities = await client.GetCapabilitiesAsync(cancellationToken)
             .ConfigureAwait(false);
         var catalog = capabilities.Catalogs.FirstOrDefault(
-            item => string.Equals(item.Id, catalogId, StringComparison.Ordinal));
+            item => string.Equals(item.Id, destination.CatalogId, StringComparison.Ordinal));
         if (catalog is null)
         {
             throw new InvalidOperationException(
-                $"PSF Guard did not advertise catalog '{catalogId}'.");
+                $"PSF Guard did not advertise catalog '{destination.CatalogId}'.");
         }
-        if (uploadCapturedImages
+        if (captureSettings.UploadCapturedImages
             && !capabilities.Capabilities.Contains("image_upload", StringComparer.Ordinal))
         {
             throw new InvalidOperationException(
-                $"Remote image upload is disabled for PSF Guard catalog '{catalogId}'.");
+                "Remote image upload is disabled for PSF Guard catalog "
+                + $"'{destination.CatalogId}'.");
         }
 
         return $"Connected to {capabilities.Product} {capabilities.ProductVersion}; "
@@ -953,36 +955,6 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         }
     }
 
-    private void RequireRemoteConfigured()
-    {
-        if (string.IsNullOrWhiteSpace(ServerUrl))
-        {
-            throw new InvalidOperationException("PSF Guard server URL is required.");
-        }
-
-        if (string.IsNullOrWhiteSpace(CatalogId))
-        {
-            throw new InvalidOperationException("Destination catalog ID is required.");
-        }
-
-        if (string.IsNullOrWhiteSpace(ApiToken))
-        {
-            throw new InvalidOperationException("Remote API key is required.");
-        }
-    }
-
-    private void RequireSchedulerConfigured()
-    {
-        if (!HasTargetSchedulerDatabase())
-        {
-            throw new InvalidOperationException(
-                "A Target Scheduler database is required for catalog sync actions.");
-        }
-    }
-
-    private bool HasTargetSchedulerDatabase() =>
-        HasTargetSchedulerDatabase(TargetSchedulerDatabase);
-
     private static bool HasTargetSchedulerDatabase(string databasePath) =>
         !string.IsNullOrWhiteSpace(databasePath)
         && File.Exists(databasePath);
@@ -990,12 +962,15 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
     private void ProfileServiceProfileChanged(object? sender, EventArgs args)
     {
         SetPendingPreview(null);
+        ClearPairingCode();
+        settings.EnsurePairingMetadata();
         foreach (var property in new[]
         {
             nameof(ServerUrl),
             nameof(CatalogId),
             nameof(TargetSchedulerDatabase),
-            nameof(ApiToken),
+            nameof(HasStoredCredential),
+            nameof(PairingStatus),
             nameof(Enabled),
             nameof(AutoPushCaptures),
             nameof(UploadCapturedImages),
@@ -1008,6 +983,64 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         {
             RaisePropertyChanged(property);
         }
+
+        RaiseCommandStates();
+    }
+
+    private bool CanPair() =>
+        !string.IsNullOrWhiteSpace(PairingCode)
+        && TryGetServerUri(ServerUrl, out _);
+
+    private bool CanUseRemote() =>
+        settings.IsPairedForServer(ServerUrl)
+        && TryGetServerUri(ServerUrl, out _);
+
+    private bool CanUseCatalogSync() =>
+        CanUseRemote() && !string.IsNullOrWhiteSpace(TargetSchedulerDatabase);
+
+    private static bool TryGetServerUri(string value, out Uri? serverUri)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out serverUri))
+        {
+            return false;
+        }
+
+        return serverUri.Scheme == Uri.UriSchemeHttps
+            || (serverUri.Scheme == Uri.UriSchemeHttp && serverUri.IsLoopback);
+    }
+
+    private async Task CommitPairingAsync(PairingTarget target, PairResponse paired)
+    {
+        void CommitPairing()
+        {
+            PairingCode = string.Empty;
+            settings.StorePairing(target, paired.CatalogId, paired.Token);
+            SetPendingPreview(null);
+            RaisePropertyChanged(nameof(CatalogId));
+            RaisePropertyChanged(nameof(HasStoredCredential));
+            RaisePropertyChanged(nameof(PairingStatus));
+            RaiseCommandStates();
+        }
+
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is not null && !dispatcher.CheckAccess())
+        {
+            await dispatcher.InvokeAsync(CommitPairing).Task.ConfigureAwait(false);
+            return;
+        }
+
+        CommitPairing();
+    }
+
+    private void ClearPairingCode()
+    {
+        if (pairingCode.Length == 0)
+        {
+            return;
+        }
+
+        pairingCode = string.Empty;
+        RaisePropertyChanged(nameof(PairingCode));
     }
 
     private AsyncRelayCommand CreateManualCommand(
@@ -1136,6 +1169,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         }
 
         RaisePropertyChanged(nameof(IsOperationRunning));
+        RaisePropertyChanged(nameof(IsSettingsEditable));
         foreach (var command in manualCommands)
         {
             command.RaiseCanExecuteChanged();
@@ -1233,36 +1267,33 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
 
     private SyncConfiguration CaptureSyncConfiguration()
     {
-        RequireRemoteConfigured();
-        RequireSchedulerConfigured();
-        if (!Uri.TryCreate(ServerUrl, UriKind.Absolute, out var serverUri))
+        var captureSettings = settings.CaptureSnapshot();
+        var destination = captureSettings.RequireQueueDestination();
+        if (!HasTargetSchedulerDatabase(captureSettings.TargetSchedulerDatabase))
         {
-            throw new InvalidOperationException("Enter a valid absolute PSF Guard server URL.");
+            throw new InvalidOperationException(
+                "A Target Scheduler database is required for catalog sync actions.");
         }
 
-        var catalogId = CatalogId;
-        var targetSchedulerDatabase = TargetSchedulerDatabase;
         return new SyncConfiguration(
-            serverUri,
-            catalogId,
-            ApiToken,
-            targetSchedulerDatabase,
-            AutoApplyPushes,
-            IncludeThumbnails,
+            new Uri(destination.ServerUrl, UriKind.Absolute),
+            destination.CatalogId,
+            captureSettings.RequireApiToken(),
+            captureSettings.TargetSchedulerDatabase,
+            captureSettings.AutoApplyPushes,
+            captureSettings.IncludeThumbnails,
             TargetSchedulerVersion(),
-            new RemoteQueueDestination
-            {
-                ServerUrl = serverUri.AbsoluteUri,
-                CatalogId = catalogId,
-                CredentialReference = settings.CredentialReference,
-            });
+            destination);
     }
 
     private bool MatchesCurrentConfiguration(SyncConfiguration configuration) =>
         Uri.TryCreate(ServerUrl, UriKind.Absolute, out var serverUri)
         && serverUri == configuration.ServerUri
         && string.Equals(CatalogId, configuration.CatalogId, StringComparison.Ordinal)
-        && string.Equals(ApiToken, configuration.ApiToken, StringComparison.Ordinal)
+        && string.Equals(
+            settings.CredentialReference,
+            configuration.QueueDestination.CredentialReference,
+            StringComparison.Ordinal)
         && string.Equals(
             TargetSchedulerDatabase,
             configuration.TargetSchedulerDatabase,

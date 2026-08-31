@@ -261,8 +261,11 @@ public sealed class DeferredUploadQueueTests
     {
         using var directory = new TestDirectory();
         var queuePath = directory.Child("queue");
-        var firstDestination = Destination();
-        var secondDestination = Destination() with { CatalogId = "other-cat" };
+        var firstDestination = Destination() with
+        {
+            ServerUrl = "https://original.example/base",
+        };
+        var secondDestination = firstDestination with { CatalogId = "other-cat" };
         await using var queue = new DurableImageUploadQueue(
             queuePath,
             _ => throw new InvalidOperationException("The worker is not started."));
@@ -288,7 +291,9 @@ public sealed class DeferredUploadQueueTests
 
         Assert.Equal(
             1,
-            await queue.ReleaseDeferredAsync(firstDestination, CancellationToken.None));
+            await queue.ReleaseDeferredAsync(
+                firstDestination with { ServerUrl = "https://original.example/base/" },
+                CancellationToken.None));
 
         var released = await ReadJobAsync<QueuedImageUploadJob>(firstPath);
         var stillHeld = await ReadJobAsync<QueuedImageUploadJob>(
@@ -301,6 +306,41 @@ public sealed class DeferredUploadQueueTests
         Assert.True(released.NextAttemptUtc >= releaseStarted);
         Assert.True(stillHeld.ImageUploadDeferred);
         Assert.Equal(0, await queue.ReleaseDeferredAsync(firstDestination, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task SchedulerReleaseMatchesEquivalentBaseUrl()
+    {
+        using var directory = new TestDirectory();
+        var queuePath = directory.Child("queue");
+        var destination = Destination() with
+        {
+            ServerUrl = "https://original.example/base",
+        };
+        await using var queue = new DurablePushQueue(
+            queuePath,
+            _ => throw new InvalidOperationException("The worker is not started."));
+        var jobId = await queue.EnqueueCaptureAsync(
+            destination,
+            directory.Child("scheduler.sqlite"),
+            "5.9.6.0",
+            directory.Child("capture.fit"),
+            default,
+            includeThumbnail: false,
+            autoApply: true,
+            uploadImageAfterApply: true,
+            deferImageUpload: true,
+            CancellationToken.None);
+
+        Assert.Equal(
+            1,
+            await queue.ReleaseDeferredAsync(
+                destination with { ServerUrl = "https://original.example/base/" },
+                CancellationToken.None));
+
+        var released = await ReadJobAsync<QueuedBundleJob>(
+            Path.Combine(queuePath, $"{jobId:N}.json"));
+        Assert.False(released.ImageUploadDeferred);
     }
 
     [Fact]

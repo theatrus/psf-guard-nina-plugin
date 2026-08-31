@@ -30,9 +30,10 @@ public sealed class PushPsfGuardPlanning : PsfGuardSequenceItemBase
         CancellationToken token)
     {
         using var status = BeginStatus(progress);
+        var captureSettings = CaptureSettingsSnapshot();
         Report(progress, "Pushing planning...");
-        await CreateOrchestrator()
-            .PushPlanningAsync(AutoApplyPushes, token)
+        await CreateOrchestrator(captureSettings)
+            .PushPlanningAsync(captureSettings.AutoApplyPushes, token)
             .ConfigureAwait(false);
     }
 

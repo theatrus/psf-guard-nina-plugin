@@ -145,7 +145,10 @@ public sealed class DurableQueueTests
             },
             statuses.Enqueue);
         queue.Start();
-        var destination = Destination();
+        var destination = Destination() with
+        {
+            ServerUrl = "https://original.example/base",
+        };
 
         await queue.EnqueueAsync(destination, imagePath, CancellationToken.None);
         await WaitUntilAsync(
@@ -157,11 +160,63 @@ public sealed class DurableQueueTests
         Volatile.Write(ref accept, 1);
         Assert.Equal(
             1,
-            await queue.RetryBlockedAsync(destination, CancellationToken.None));
+            await queue.RetryBlockedAsync(
+                destination with { ServerUrl = "https://original.example/base/" },
+                CancellationToken.None));
         await WaitUntilAsync(
             () => Directory.GetFiles(directory.Child("queue"), "*.json").Length == 0,
             TimeSpan.FromSeconds(2));
         Assert.All(destinations, actual => Assert.Equal(destination, actual));
+    }
+
+    [Fact]
+    public async Task SchedulerRetryMatchesEquivalentServerUrl()
+    {
+        using var directory = new TestDirectory();
+        var queuePath = directory.Child("queue");
+        var destination = Destination() with
+        {
+            ServerUrl = "https://original.example/base",
+        };
+        await using var queue = new DurablePushQueue(
+            queuePath,
+            _ => throw new InvalidOperationException("The worker is not started."));
+        var jobId = await queue.EnqueueAsync(
+            destination,
+            Bundle(),
+            autoApply: false,
+            CancellationToken.None);
+        var jobPath = Path.Combine(queuePath, $"{jobId:N}.json");
+        var job = await ReadJobAsync<QueuedBundleJob>(jobPath);
+        job.Blocked = true;
+        await WriteJobAsync(jobPath, job);
+
+        Assert.Equal(
+            1,
+            await queue.RetryBlockedAsync(
+                destination with { ServerUrl = "https://original.example/base/" },
+                CancellationToken.None));
+
+        var retried = await ReadJobAsync<QueuedBundleJob>(jobPath);
+        Assert.False(retried.Blocked);
+    }
+
+    [Fact]
+    public void DestinationMatchingNormalizesOnlyTheServerUrl()
+    {
+        var destination = Destination() with
+        {
+            ServerUrl = "https://original.example/base",
+        };
+
+        Assert.True(destination.Matches(
+            destination with { ServerUrl = "https://ORIGINAL.example/base/" }));
+        Assert.False(destination.Matches(
+            destination with { ServerUrl = "https://original.example/Base/" }));
+        Assert.False(destination.Matches(
+            destination with { CatalogId = "other-cat" }));
+        Assert.False(destination.Matches(
+            destination with { CredentialReference = "credential-profile-b" }));
     }
 
     [Fact]

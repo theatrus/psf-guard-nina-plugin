@@ -40,7 +40,8 @@ expose arbitrary SQL.
 - Preservation of telescope-side `acquired` and `accepted` plan counters.
 - Grade pulls update only `gradingStatus` and `rejectreason` on acquired-image
   rows, then reconcile the affected plans' accepted counts.
-- API tokens stored in Windows Credential Manager.
+- Pairing credentials stored in Windows Credential Manager and never shown in
+  the plugin UI.
 - Optional Target Scheduler thumbnail transfer.
 - Background preview jobs for catalogs whose merge planning outlives an HTTP
   proxy timeout.
@@ -79,11 +80,14 @@ dotnet build src\PsfGuard.Nina.Plugin\PsfGuard.Nina.Plugin.csproj `
 
 Restart N.I.N.A., open **Plugins > Installed > PSF Guard Sync**, and configure:
 
-1. PSF Guard server URL.
-2. Destination PSF Guard catalog ID.
-3. Remote API key generated for that PSF Guard database.
-4. Optional Target Scheduler database path.
-5. Image upload, catalog push, and preview-apply policy.
+1. Enter the PSF Guard server URL.
+2. In PSF Guard database settings, create a one-time client pairing code.
+3. Enter that code in the plugin and select **Pair**. Pairing stores the
+   catalog ID and a server-bound credential for the active N.I.N.A. profile;
+   the credential is never displayed or manually editable. Changing the
+   server URL requires pairing that profile again.
+4. Confirm the connection, then select the optional Target Scheduler database.
+5. Choose the automatic capture, image upload, and catalog-reconcile policies.
 
 Direct upload sends each saved light independently of scheduler sync. Enable
 **Also upload calibration frames** to include bias, dark, dark-flat, and flat
@@ -94,11 +98,12 @@ catalog. Calibration frames enter PSF Guard's calibration library and never
 create `acquiredimage` rows. Reconcile operations transfer scheduler rows and
 optional thumbnails, never image bytes.
 
-Enable **Defer image uploads** to persist requested image transfers without
-starting them. Target Scheduler records still sync immediately. Select **Start
-queued uploads** in plugin settings, or run **Start PSF Guard uploads** in the
-Advanced Sequencer, to release the deferred bundle and standalone-image jobs
-for the active server, catalog, and profile credential. The action starts the
+Enable **Defer image uploads until released** to persist requested image
+transfers without starting them. Target Scheduler records still sync
+immediately. Select **Start queued uploads** in plugin settings, or run
+**Start PSF Guard uploads** in the Advanced Sequencer, to release the deferred
+bundle and standalone-image jobs for the active server, catalog, and profile
+credential. The action starts the
 background transfers and does not wait for every upload to finish. It includes
 all image-save work queued before the action; captures that arrive after that
 barrier remain deferred for the next run. Keep each source FITS or XISF file at
@@ -118,8 +123,8 @@ frames, or both and waits for N.I.N.A. to finish saving before it uploads. When
 a matching global policy is also enabled, the trigger recognizes that the
 durable global queue owns the file and does not send it twice.
 
-Profile-wide capture automation requires **Enable PSF Guard sync**. It does not
-require an Advanced Sequencer trigger.
+Profile-wide capture automation requires **Enable PSF Guard for this N.I.N.A.
+profile**. It does not require an Advanced Sequencer trigger.
 
 Use **Test connection** before enabling automatic work. When direct image
 upload is selected, the check also verifies that the chosen PSF Guard database
@@ -148,10 +153,11 @@ require automatic preview apply; ordinary sequencer pushes may leave a staged
 preview for PSF Guard #353's Data Transfer UI.
 
 Queue records retain their original server, catalog, and profile-specific
-Credential Manager reference. They never store the API key itself and never
-follow a later profile or server change. Authentication, catalog, and payload
-errors become blocked jobs instead of retrying forever. After correcting the
-original destination's configuration, select **Retry blocked** to resume them.
+Credential Manager reference. They never store the pairing credential itself
+and never follow a later profile or server change. Authentication, catalog,
+and payload errors become blocked jobs instead of retrying forever. After
+correcting the original destination's configuration, select **Retry blocked**
+to resume them.
 Transient network and server failures retry with bounded exponential backoff.
 
 ## Sequencer Instructions
@@ -159,9 +165,9 @@ Transient network and server failures retry with bounded exponential backoff.
 The plugin contributes these instructions under **PSF Guard Sync** in N.I.N.A.'s
 advanced sequencer:
 
-- **Check PSF Guard connection** verifies the server, API token, and selected
-  catalog. Put it near the beginning of a session when a remote outage should
-  follow the instruction's configured error behavior.
+- **Check PSF Guard connection** verifies the server, paired credential, and
+  selected catalog. Put it near the beginning of a session when a remote
+  outage should follow the instruction's configured error behavior.
 - **Start PSF Guard uploads** releases image jobs deferred for the active
   destination. Put it at the end of a target or session. It starts the durable
   queue and reports how many uploads were released without waiting for them to
@@ -196,10 +202,10 @@ advanced sequencer:
   calibration switches are serialized with the sequence, so it works without
   enabling profile-wide automatic uploads or installing Target Scheduler.
 
-The trigger is a blocking synchronization point. The separate **Push each
-saved light's Target Scheduler record** setting remains a durable background
-queue; disable that setting when the trigger should be the only catalog-sync
-policy for those exposures.
+The trigger is a blocking synchronization point. The separate
+**Automatically push saved light records** setting remains a durable
+background queue; disable that setting when the trigger should be the only
+catalog-sync policy for those exposures.
 
 Reconciliation instructions wait two seconds for final Target Scheduler image
 transactions before taking one consistent, read-only SQLite snapshot. They then

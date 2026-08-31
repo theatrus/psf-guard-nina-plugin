@@ -1,276 +1,244 @@
 <ResourceDictionary
-    x:Class="PsfGuard.Nina.Plugin.Options"
-    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <DataTemplate x:Key="PSF Guard Sync_Options">
-        <Grid MaxWidth="760">
+  x:Class="PsfGuard.Nina.Plugin.Options"
+  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <DataTemplate x:Key="PSF Guard Sync_Options">
+    <StackPanel MaxWidth="760">
+      <StackPanel.Resources>
+        <Style x:Key="SectionStyle" TargetType="{x:Type GroupBox}">
+          <Setter Property="Margin" Value="0,0,0,10" />
+          <Setter Property="Padding" Value="12" />
+          <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        </Style>
+        <Style x:Key="OptionStyle" TargetType="{x:Type CheckBox}">
+          <Setter Property="Margin" Value="0,0,0,7" />
+          <Setter Property="ContentTemplate">
+            <Setter.Value>
+              <DataTemplate>
+                <TextBlock Text="{Binding}" TextWrapping="Wrap" />
+              </DataTemplate>
+            </Setter.Value>
+          </Setter>
+        </Style>
+        <Style x:Key="ActionStyle" TargetType="{x:Type Button}">
+          <Setter Property="MinWidth" Value="128" />
+          <Setter Property="Margin" Value="0,0,8,8" />
+          <Setter Property="Padding" Value="10,3" />
+        </Style>
+        <Style x:Key="FieldLabelStyle" TargetType="{x:Type Label}">
+          <Setter Property="Margin" Value="0,5,0,3" />
+          <Setter Property="Padding" Value="0" />
+        </Style>
+      </StackPanel.Resources>
+
+      <GroupBox Header="Connection" Style="{StaticResource SectionStyle}">
+        <StackPanel>
+          <Label
+            Content="Server URL"
+            Style="{StaticResource FieldLabelStyle}"
+            Target="{Binding ElementName=ServerUrlBox}" />
+          <TextBox
+            x:Name="ServerUrlBox"
+            IsEnabled="{Binding IsSettingsEditable}"
+            Text="{Binding ServerUrl, UpdateSourceTrigger=PropertyChanged}" />
+
+          <StackPanel Margin="0,9,0,3" Orientation="Horizontal">
+            <TextBlock Margin="0,0,8,0" Text="Pairing status" />
+            <TextBlock FontWeight="SemiBold" Text="{Binding PairingStatus}" />
+          </StackPanel>
+
+          <Label
+            Content="Catalog ID"
+            Style="{StaticResource FieldLabelStyle}"
+            Target="{Binding ElementName=CatalogIdBox}" />
+          <TextBox
+            x:Name="CatalogIdBox"
+            IsReadOnly="True"
+            Text="{Binding CatalogId, Mode=OneWay}" />
+
+          <Label
+            Content="One-time pairing code"
+            Style="{StaticResource FieldLabelStyle}"
+            Target="{Binding ElementName=PairingCodeBox}" />
+          <Grid>
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="*" />
+              <ColumnDefinition Width="*" />
+              <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-            </Grid.RowDefinitions>
+            <TextBox
+              x:Name="PairingCodeBox"
+              IsEnabled="{Binding IsSettingsEditable}"
+              VerticalAlignment="Center"
+              Text="{Binding PairingCode, UpdateSourceTrigger=PropertyChanged}" />
+            <Button
+              Grid.Column="1"
+              MinWidth="96"
+              Margin="8,0,0,0"
+              Padding="10,2"
+              Command="{Binding PairCommand}"
+              Content="Pair" />
+          </Grid>
 
+          <Button
+            MinWidth="128"
+            Margin="0,8,0,0"
+            Padding="10,3"
+            HorizontalAlignment="Left"
+            Command="{Binding TestConnectionCommand}"
+            Content="Test connection" />
+        </StackPanel>
+      </GroupBox>
+
+      <GroupBox Header="Capture and sequencer automation" Style="{StaticResource SectionStyle}">
+        <StackPanel>
+          <CheckBox
+            Margin="0,0,0,8"
+            FontWeight="SemiBold"
+            Content="Enable PSF Guard for this N.I.N.A. profile"
+            IsChecked="{Binding Enabled}"
+            Style="{StaticResource OptionStyle}" />
+          <Separator Margin="0,0,0,10" />
+          <StackPanel Margin="20,0,0,0" IsEnabled="{Binding Enabled}">
             <TextBlock
-                Grid.Row="0"
-                Margin="0,0,0,10"
-                VerticalAlignment="Center"
-                Text="Enable PSF Guard sync" />
+              Margin="0,0,0,7"
+              FontWeight="SemiBold"
+              Text="Saved-image automation" />
             <CheckBox
-                Grid.Row="0"
-                Grid.Column="1"
-                Margin="0,0,0,10"
-                HorizontalAlignment="Left"
-                IsChecked="{Binding Enabled}" />
+              Content="Automatically push saved light records"
+              IsChecked="{Binding AutoPushCaptures}"
+              Style="{StaticResource OptionStyle}" />
+            <CheckBox
+              Content="Automatically upload saved images"
+              IsChecked="{Binding UploadCapturedImages}"
+              Style="{StaticResource OptionStyle}" />
+            <CheckBox
+              Margin="20,0,0,7"
+              Content="Also upload calibration frames"
+              IsChecked="{Binding UploadCalibrationImages}"
+              IsEnabled="{Binding UploadCapturedImages}"
+              Style="{StaticResource OptionStyle}" />
+            <TextBlock
+              Margin="0,5,0,7"
+              FontWeight="SemiBold"
+              Text="All image uploads" />
+            <CheckBox
+              Margin="0,0,0,7"
+              Content="Defer image uploads until released"
+              IsChecked="{Binding DeferImageUploads}"
+              Style="{StaticResource OptionStyle}" />
+          </StackPanel>
+        </StackPanel>
+      </GroupBox>
 
-            <TextBlock Grid.Row="1" Margin="0,4,12,4" VerticalAlignment="Center" Text="Server URL" />
-            <TextBox
-                Grid.Row="1"
-                Grid.Column="1"
-                MinWidth="420"
-                Margin="0,4"
-                Text="{Binding ServerUrl, UpdateSourceTrigger=LostFocus}" />
+      <GroupBox Header="Queue recovery" Style="{StaticResource SectionStyle}">
+        <WrapPanel>
+          <Button
+            Command="{Binding StartQueuedUploadsCommand}"
+            Content="Start queued uploads"
+            Style="{StaticResource ActionStyle}" />
+          <Button
+            Command="{Binding RetryBlockedCommand}"
+            Content="Retry blocked"
+            Style="{StaticResource ActionStyle}" />
+        </WrapPanel>
+      </GroupBox>
 
-            <TextBlock Grid.Row="2" Margin="0,4,12,4" VerticalAlignment="Center" Text="Catalog ID" />
-            <TextBox
-                Grid.Row="2"
-                Grid.Column="1"
-                Margin="0,4"
-                Text="{Binding CatalogId, UpdateSourceTrigger=LostFocus}" />
+      <GroupBox Header="Catalog synchronization" Style="{StaticResource SectionStyle}">
+        <StackPanel>
+          <Label
+            Content="Target Scheduler database"
+            Style="{StaticResource FieldLabelStyle}"
+            Target="{Binding ElementName=SchedulerDatabaseBox}" />
+          <TextBox
+            x:Name="SchedulerDatabaseBox"
+            Margin="0,0,0,10"
+            Text="{Binding TargetSchedulerDatabase, UpdateSourceTrigger=PropertyChanged}" />
+          <CheckBox
+            Content="Apply remote previews automatically"
+            IsChecked="{Binding AutoApplyPushes}"
+            Style="{StaticResource OptionStyle}" />
+          <CheckBox
+            Content="Include Target Scheduler thumbnails"
+            IsChecked="{Binding IncludeThumbnails}"
+            Style="{StaticResource OptionStyle}" />
+          <CheckBox
+            Content="Pull the merged catalog back after full reconcile"
+            IsChecked="{Binding RoundTripReconcile}"
+            Style="{StaticResource OptionStyle}" />
+        </StackPanel>
+      </GroupBox>
 
-            <TextBlock Grid.Row="3" Margin="0,4,12,4" VerticalAlignment="Center" Text="Remote API key" />
-            <StackPanel Grid.Row="3" Grid.Column="1" Margin="0,4" Orientation="Vertical">
-                <TextBox Text="{Binding ApiToken, UpdateSourceTrigger=LostFocus}" />
-                <StackPanel Margin="0,6,0,0" Orientation="Horizontal">
-                    <TextBox
-                        MinWidth="320"
-                        VerticalAlignment="Center"
-                        Text="{Binding PairingCode, UpdateSourceTrigger=PropertyChanged}" />
-                    <Button
-                        Margin="8,0,0,0"
-                        Padding="10,2"
-                        Command="{Binding PairCommand}"
-                        Content="Pair" />
-                    <TextBlock
-                        Margin="8,0,0,0"
-                        VerticalAlignment="Center"
-                        Opacity="0.7"
-                        Text="Paste a one-time pairing code from PSF Guard Settings; it fills the key and catalog for you." />
-                </StackPanel>
-            </StackPanel>
+      <GroupBox Header="Catalog actions" Style="{StaticResource SectionStyle}">
+        <StackPanel>
+          <WrapPanel>
+            <Button
+              Command="{Binding ReconcileCommand}"
+              Content="Reconcile"
+              Style="{StaticResource ActionStyle}" />
+            <Button
+              Command="{Binding PushAllCommand}"
+              Content="Push all"
+              Style="{StaticResource ActionStyle}" />
+            <Button
+              Command="{Binding PullMergedCatalogCommand}"
+              Content="Pull catalog"
+              Style="{StaticResource ActionStyle}" />
+          </WrapPanel>
+          <WrapPanel>
+            <Button
+              Command="{Binding PushPlanningCommand}"
+              Content="Push planning"
+              Style="{StaticResource ActionStyle}" />
+            <Button
+              Command="{Binding PullPlanningCommand}"
+              Content="Pull planning"
+              Style="{StaticResource ActionStyle}" />
+            <Button
+              Command="{Binding PushGradesCommand}"
+              Content="Push grades"
+              Style="{StaticResource ActionStyle}" />
+            <Button
+              Command="{Binding PullGradesCommand}"
+              Content="Pull grades"
+              Style="{StaticResource ActionStyle}" />
+          </WrapPanel>
 
-            <TextBlock Grid.Row="4" Margin="0,4,12,4" VerticalAlignment="Center" Text="Scheduler database (optional)" />
-            <TextBox
-                Grid.Row="4"
-                Grid.Column="1"
-                Margin="0,4"
-                Text="{Binding TargetSchedulerDatabase, UpdateSourceTrigger=LostFocus}" />
+          <Separator Margin="0,2,0,10" />
+          <TextBlock Margin="0,0,0,6" FontWeight="SemiBold" Text="Pending preview" />
+          <TextBlock Text="{Binding PendingPreviewStatus}" TextWrapping="Wrap" />
+          <WrapPanel Margin="0,8,0,0">
+            <Button
+              MinWidth="110"
+              Margin="0,0,8,8"
+              Padding="10,3"
+              Command="{Binding ApplyPreviewCommand}"
+              Content="Apply preview" />
+            <Button
+              MinWidth="110"
+              Margin="0,0,8,8"
+              Padding="10,3"
+              Command="{Binding ForgetPreviewCommand}"
+              Content="Forget preview" />
+          </WrapPanel>
+        </StackPanel>
+      </GroupBox>
 
-            <Grid Grid.Row="5" Grid.ColumnSpan="2" Margin="0,10,0,0">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="340" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                </Grid.RowDefinitions>
-
-                <TextBlock
-                    Grid.Row="0"
-                    VerticalAlignment="Center"
-                    Text="Automatically upload saved light images" />
-                <CheckBox
-                    Grid.Row="0"
-                    Grid.Column="1"
-                    HorizontalAlignment="Left"
-                    IsChecked="{Binding UploadCapturedImages}" />
-                <TextBlock
-                    Grid.Row="1"
-                    Margin="0,5,0,0"
-                    VerticalAlignment="Center"
-                    Text="Also upload calibration frames" />
-                <CheckBox
-                    Grid.Row="1"
-                    Grid.Column="1"
-                    Margin="0,5,0,0"
-                    HorizontalAlignment="Left"
-                    IsChecked="{Binding UploadCalibrationImages}"
-                    IsEnabled="{Binding UploadCapturedImages}" />
-                <TextBlock
-                    Grid.Row="2"
-                    Margin="0,5,0,0"
-                    VerticalAlignment="Center"
-                    Text="Defer image uploads" />
-                <CheckBox
-                    Grid.Row="2"
-                    Grid.Column="1"
-                    Margin="0,5,0,0"
-                    HorizontalAlignment="Left"
-                    IsChecked="{Binding DeferImageUploads}" />
-                <TextBlock
-                    Grid.Row="3"
-                    Margin="0,5,0,0"
-                    VerticalAlignment="Center"
-                    Text="Push each saved light's Target Scheduler record" />
-                <CheckBox
-                    Grid.Row="3"
-                    Grid.Column="1"
-                    Margin="0,5,0,0"
-                    HorizontalAlignment="Left"
-                    IsChecked="{Binding AutoPushCaptures}" />
-                <TextBlock
-                    Grid.Row="4"
-                    Margin="0,5,0,0"
-                    VerticalAlignment="Center"
-                    Text="Apply remote previews automatically" />
-                <CheckBox
-                    Grid.Row="4"
-                    Grid.Column="1"
-                    Margin="0,5,0,0"
-                    HorizontalAlignment="Left"
-                    IsChecked="{Binding AutoApplyPushes}" />
-                <TextBlock
-                    Grid.Row="5"
-                    Margin="0,5,0,0"
-                    VerticalAlignment="Center"
-                    Text="Include Target Scheduler thumbnails" />
-                <CheckBox
-                    Grid.Row="5"
-                    Grid.Column="1"
-                    Margin="0,5,0,0"
-                    HorizontalAlignment="Left"
-                    IsChecked="{Binding IncludeThumbnails}" />
-                <TextBlock
-                    Grid.Row="6"
-                    Margin="0,5,0,0"
-                    VerticalAlignment="Center"
-                    Text="Pull merged catalog back after full reconcile" />
-                <CheckBox
-                    Grid.Row="6"
-                    Grid.Column="1"
-                    Margin="0,5,0,0"
-                    HorizontalAlignment="Left"
-                    IsChecked="{Binding RoundTripReconcile}" />
-            </Grid>
-
-            <StackPanel Grid.Row="6" Grid.ColumnSpan="2" Margin="0,14,0,0" Orientation="Horizontal">
-                <Button
-                    MinWidth="120"
-                    Margin="0,0,8,0"
-                    Command="{Binding TestConnectionCommand}"
-                    Content="Test connection" />
-                <Button
-                    MinWidth="120"
-                    Margin="0,0,8,0"
-                    Command="{Binding PushAllCommand}"
-                    Content="Push all" />
-                <Button
-                    MinWidth="120"
-                    Margin="0,0,8,0"
-                    Command="{Binding ReconcileCommand}"
-                    Content="Reconcile" />
-                <Button
-                    MinWidth="120"
-                    Margin="0,0,8,0"
-                    Command="{Binding StartQueuedUploadsCommand}"
-                    Content="Start queued uploads" />
-                <Button
-                    MinWidth="120"
-                    Command="{Binding PullPlanningCommand}"
-                    Content="Pull planning" />
-            </StackPanel>
-
-            <StackPanel Grid.Row="7" Grid.ColumnSpan="2" Margin="0,8,0,0" Orientation="Horizontal">
-                <Button
-                    MinWidth="120"
-                    Margin="0,0,8,0"
-                    Command="{Binding PushPlanningCommand}"
-                    Content="Push planning" />
-                <Button
-                    MinWidth="120"
-                    Margin="0,0,8,0"
-                    Command="{Binding PushGradesCommand}"
-                    Content="Push grades" />
-                <Button
-                    MinWidth="120"
-                    Margin="0,0,8,0"
-                    Command="{Binding PullGradesCommand}"
-                    Content="Pull grades" />
-                <Button
-                    MinWidth="120"
-                    Margin="0,0,8,0"
-                    Command="{Binding RetryBlockedCommand}"
-                    Content="Retry blocked" />
-                <Button
-                    MinWidth="120"
-                    Command="{Binding PullMergedCatalogCommand}"
-                    Content="Pull catalog" />
-            </StackPanel>
-
-            <Grid Grid.Row="8" Grid.ColumnSpan="2" Margin="0,14,0,0">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBlock
-                    Margin="0,0,12,0"
-                    VerticalAlignment="Center"
-                    Text="{Binding PendingPreviewStatus}"
-                    TextWrapping="Wrap" />
-                <Button
-                    Grid.Column="1"
-                    MinWidth="110"
-                    Margin="0,0,8,0"
-                    Command="{Binding ApplyPreviewCommand}"
-                    Content="Apply preview"
-                    IsEnabled="{Binding HasPendingPreview}" />
-                <Button
-                    Grid.Column="2"
-                    MinWidth="110"
-                    Command="{Binding ForgetPreviewCommand}"
-                    Content="Forget preview"
-                    IsEnabled="{Binding HasPendingPreview}" />
-            </Grid>
-
-            <Border
-                Grid.Row="9"
-                Grid.ColumnSpan="2"
-                Margin="0,14,0,0"
-                Padding="10"
-                BorderBrush="{DynamicResource ControlBorderBrush}"
-                BorderThickness="1">
-                <Grid>
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto" />
-                        <RowDefinition Height="Auto" />
-                    </Grid.RowDefinitions>
-                    <ProgressBar
-                        Height="4"
-                        IsIndeterminate="{Binding IsOperationRunning}" />
-                    <TextBlock
-                        Grid.Row="1"
-                        Margin="0,8,0,0"
-                        Text="{Binding LastStatus}"
-                        TextWrapping="Wrap" />
-                </Grid>
-            </Border>
+      <GroupBox Header="Activity" Style="{StaticResource SectionStyle}">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+          </Grid.RowDefinitions>
+          <ProgressBar Height="4" IsIndeterminate="{Binding IsOperationRunning}" />
+          <TextBlock
+            Grid.Row="1"
+            Margin="0,8,0,0"
+            AutomationProperties.LiveSetting="Polite"
+            TargetUpdated="StatusTextTargetUpdated"
+            Text="{Binding LastStatus, NotifyOnTargetUpdated=True}"
+            TextWrapping="Wrap" />
         </Grid>
-    </DataTemplate>
+      </GroupBox>
+    </StackPanel>
+  </DataTemplate>
 </ResourceDictionary>

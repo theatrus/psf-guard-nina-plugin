@@ -44,44 +44,49 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
     protected bool RoundTripReconcile => settings.RoundTripReconcile;
     protected virtual bool RequiresTargetScheduler => true;
 
-    protected SyncOrchestrator CreateOrchestrator()
+    private protected PluginSettingsSnapshot CaptureSettingsSnapshot() =>
+        settings.CaptureSnapshot();
+
+    private protected SyncOrchestrator CreateOrchestrator(
+        PluginSettingsSnapshot captureSettings)
     {
-        var serverUri = new Uri(settings.ServerUrl, UriKind.Absolute);
-        var apiToken = settings.ApiToken;
-        var catalogId = settings.CatalogId;
-        var autoApplyPushes = settings.AutoApplyPushes;
-        var includeThumbnails = settings.IncludeThumbnails;
-        var targetSchedulerDatabase = settings.TargetSchedulerDatabase;
+        var destination = captureSettings.RequireQueueDestination();
         var reader = new TargetSchedulerCatalogReader(
-            targetSchedulerDatabase,
+            captureSettings.TargetSchedulerDatabase,
             TargetSchedulerVersion());
-        var writer = new TargetSchedulerCatalogWriter(targetSchedulerDatabase);
+        var writer = new TargetSchedulerCatalogWriter(
+            captureSettings.TargetSchedulerDatabase);
         return new SyncOrchestrator(
-            catalogId,
-            autoApplyPushes,
-            includeThumbnails,
-            () => CreateClient(serverUri, apiToken),
+            destination.CatalogId,
+            captureSettings.AutoApplyPushes,
+            captureSettings.IncludeThumbnails,
+            () => CreateClient(
+                new Uri(destination.ServerUrl, UriKind.Absolute),
+                captureSettings.RequireApiToken()),
             reader,
             writer);
     }
 
     protected async Task<string> CheckConnectionAsync(CancellationToken cancellationToken)
     {
-        var capabilities = await CreateOrchestrator()
+        var captureSettings = settings.CaptureSnapshot();
+        var destination = captureSettings.RequireQueueDestination();
+        var capabilities = await CreateOrchestrator(captureSettings)
             .TestConnectionAsync(cancellationToken)
             .ConfigureAwait(false);
         var catalog = capabilities.Catalogs.FirstOrDefault(
-            item => string.Equals(item.Id, settings.CatalogId, StringComparison.Ordinal));
+            item => string.Equals(item.Id, destination.CatalogId, StringComparison.Ordinal));
         if (catalog is null)
         {
             throw new InvalidOperationException(
-                $"PSF Guard did not advertise catalog '{settings.CatalogId}'.");
+                $"PSF Guard did not advertise catalog '{destination.CatalogId}'.");
         }
-        if (settings.UploadCapturedImages
+        if (captureSettings.UploadCapturedImages
             && !capabilities.Capabilities.Contains("image_upload", StringComparer.Ordinal))
         {
             throw new InvalidOperationException(
-                $"Remote image upload is disabled for PSF Guard catalog '{settings.CatalogId}'.");
+                "Remote image upload is disabled for PSF Guard catalog "
+                + $"'{destination.CatalogId}'.");
         }
 
         return $"Connected to {capabilities.Product} {capabilities.ProductVersion}; "
@@ -142,14 +147,10 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
             validationIssues.Add("Remote PSF Guard servers must use HTTPS.");
         }
 
-        if (string.IsNullOrWhiteSpace(settings.CatalogId))
+        if (!settings.IsPairedForServer(settings.ServerUrl))
         {
-            validationIssues.Add("Configure the destination PSF Guard catalog ID.");
-        }
-
-        if (string.IsNullOrWhiteSpace(settings.ApiToken))
-        {
-            validationIssues.Add("Configure the PSF Guard API token.");
+            validationIssues.Add(
+                "Pair this N.I.N.A. profile with PSF Guard using a one-time code.");
         }
 
         if (RequiresTargetScheduler

@@ -41,7 +41,6 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
     }
 
     protected bool AutoApplyPushes => settings.AutoApplyPushes;
-    protected bool DeferImageUploads => settings.DeferImageUploads;
     protected virtual bool RequiresTargetScheduler => true;
 
     protected bool IsGlobalCapturePushEnabled =>
@@ -67,6 +66,9 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
         }
     }
 
+    private protected PluginSettingsSnapshot CaptureSettingsSnapshot() =>
+        settings.CaptureSnapshot();
+
     private protected static bool WasGlobalCapturePushEnabled(
         PluginSettingsSnapshot captureSettings) =>
         captureSettings.Enabled && captureSettings.AutoPushCaptures;
@@ -80,27 +82,6 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
             kind,
             includeLights: true,
             includeCalibration: captureSettings.UploadCalibrationImages);
-
-    protected SyncOrchestrator CreateOrchestrator()
-    {
-        var serverUri = new Uri(settings.ServerUrl, UriKind.Absolute);
-        var apiToken = settings.ApiToken;
-        var catalogId = settings.CatalogId;
-        var autoApplyPushes = settings.AutoApplyPushes;
-        var includeThumbnails = settings.IncludeThumbnails;
-        var targetSchedulerDatabase = settings.TargetSchedulerDatabase;
-        var reader = new TargetSchedulerCatalogReader(
-            targetSchedulerDatabase,
-            TargetSchedulerVersion());
-        var writer = new TargetSchedulerCatalogWriter(targetSchedulerDatabase);
-        return new SyncOrchestrator(
-            catalogId,
-            autoApplyPushes,
-            includeThumbnails,
-            () => CreateClient(serverUri, apiToken),
-            reader,
-            writer);
-    }
 
     private protected SyncOrchestrator CreateOrchestrator(
         PluginSettingsSnapshot captureSettings)
@@ -139,18 +120,6 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
         FindCurrentTargetName(container)
         ?? throw new InvalidOperationException(
             "Target reconciliation can run only within a target container.");
-
-    protected async Task UploadImageAsync(
-        string imagePath,
-        CancellationToken cancellationToken)
-    {
-        var serverUri = new Uri(settings.ServerUrl, UriKind.Absolute);
-        var apiToken = settings.ApiToken;
-        var catalogId = settings.CatalogId;
-        using var client = CreateClient(serverUri, apiToken);
-        await client.UploadImageAsync(catalogId, imagePath, cancellationToken)
-            .ConfigureAwait(false);
-    }
 
     private protected async Task UploadImageAsync(
         PluginSettingsSnapshot captureSettings,
@@ -207,14 +176,10 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
             validationIssues.Add("Remote PSF Guard servers must use HTTPS.");
         }
 
-        if (string.IsNullOrWhiteSpace(settings.CatalogId))
+        if (!settings.IsPairedForServer(settings.ServerUrl))
         {
-            validationIssues.Add("Configure the destination PSF Guard catalog ID.");
-        }
-
-        if (string.IsNullOrWhiteSpace(settings.ApiToken))
-        {
-            validationIssues.Add("Configure the PSF Guard API token.");
+            validationIssues.Add(
+                "Pair this N.I.N.A. profile with PSF Guard using a one-time code.");
         }
 
         if (RequiresTargetScheduler

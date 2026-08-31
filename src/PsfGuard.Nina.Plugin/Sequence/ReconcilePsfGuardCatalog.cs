@@ -30,8 +30,9 @@ public sealed class ReconcilePsfGuardCatalog : PsfGuardSequenceItemBase
         CancellationToken token)
     {
         using var status = BeginStatus(progress);
-        var autoApply = AutoApplyPushes;
-        var roundTrip = RoundTripReconcile;
+        var captureSettings = CaptureSettingsSnapshot();
+        var autoApply = captureSettings.AutoApplyPushes;
+        var roundTrip = captureSettings.RoundTripReconcile;
         if (roundTrip && !autoApply)
         {
             throw new InvalidOperationException(
@@ -40,7 +41,7 @@ public sealed class ReconcilePsfGuardCatalog : PsfGuardSequenceItemBase
         Report(progress, "Waiting for scheduler...");
         await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
         Report(progress, "Reconciling catalog...");
-        var orchestrator = CreateOrchestrator();
+        var orchestrator = CreateOrchestrator(captureSettings);
         var reconcileProgress = CreateSyncProgress(
             progress,
             suppressCompleted: roundTrip);
