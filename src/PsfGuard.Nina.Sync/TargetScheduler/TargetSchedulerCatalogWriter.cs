@@ -67,7 +67,18 @@ public sealed class TargetSchedulerCatalogWriter
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            return await Task.Run(apply, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                return await Task.Run(apply, cancellationToken).ConfigureAwait(false);
+            }
+            catch (SQLiteException exception)
+                when (TargetSchedulerDatabaseAccess.IsBusy(exception))
+            {
+                throw TargetSchedulerDatabaseAccess.BusyException(
+                    databasePath,
+                    "applying remote changes to it",
+                    exception);
+            }
         }
         finally
         {
@@ -736,7 +747,8 @@ public sealed class TargetSchedulerCatalogWriter
             ReadOnly = false,
             FailIfMissing = true,
             Pooling = false,
-            BusyTimeout = 15_000,
+            DefaultTimeout = TargetSchedulerDatabaseAccess.CommandTimeoutSeconds,
+            BusyTimeout = TargetSchedulerDatabaseAccess.BusyTimeoutMilliseconds,
         };
         var connection = new SQLiteConnection(builder.ConnectionString);
         connection.Open();

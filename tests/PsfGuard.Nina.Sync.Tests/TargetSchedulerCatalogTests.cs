@@ -1,3 +1,4 @@
+using System.Data.SQLite;
 using PsfGuard.Nina.Sync.Protocol;
 using PsfGuard.Nina.Sync.TargetScheduler;
 
@@ -305,6 +306,64 @@ public sealed class TargetSchedulerCatalogTests
 
         Assert.True(updated);
         Assert.Equal("M 31", TextValue(bundle.Tables["target"], "name"));
+    }
+
+    [Fact]
+    public async Task RollbackJournalFullMergeYieldsToAWriterAndRetriesTheSnapshot()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0);
+        using (var connection = database.Open())
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "PRAGMA journal_mode = DELETE";
+            Assert.Equal("delete", Convert.ToString(command.ExecuteScalar())?.ToLowerInvariant());
+        }
+
+        var updated = false;
+        var projectReads = 0;
+        var reader = new TargetSchedulerCatalogReader(
+            database.Path,
+            "5.9.6.0",
+            TargetSchedulerCatalogReader.DefaultMaximumThumbnailBytes,
+            table =>
+            {
+                if (!table.Equals("project", StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                projectReads++;
+                if (updated)
+                {
+                    return;
+                }
+
+                updated = true;
+                var builder = new SQLiteConnectionStringBuilder
+                {
+                    DataSource = database.Path,
+                    Pooling = false,
+                    DefaultTimeout = 0,
+                    BusyTimeout = 0,
+                };
+                using var writer = new SQLiteConnection(builder.ConnectionString);
+                writer.Open();
+                writer.Execute(
+                    """
+                    UPDATE project SET name = 'Changed project' WHERE Id = 1;
+                    UPDATE target SET name = 'Changed target' WHERE Id = 2;
+                    """);
+            });
+
+        var bundle = await reader.BuildFullMergeBundleAsync(
+            includeThumbnails: false,
+            CancellationToken.None);
+
+        Assert.True(updated);
+        Assert.Equal(2, projectReads);
+        Assert.Equal("Changed project", TextValue(bundle.Tables["project"], "name"));
+        Assert.Equal("Changed target", TextValue(bundle.Tables["target"], "name"));
     }
 
     [Fact]

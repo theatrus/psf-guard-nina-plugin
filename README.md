@@ -98,6 +98,12 @@ catalog. Calibration frames enter PSF Guard's calibration library and never
 create `acquiredimage` rows. Reconcile operations transfer scheduler rows and
 optional thumbnails, never image bytes.
 
+Direct uploads use the receive layout configured for that database in PSF
+Guard. **Receive directory** keeps every file at the selected root;
+**Target and frame type** groups lights and flats by target and filter and
+places the other calibration kinds in frame-type folders. PSF Guard derives
+and sanitizes every folder name; the plugin sends only the file basename.
+
 Enable **Defer image uploads until released** to persist requested image
 transfers without starting them. Target Scheduler records still sync
 immediately. Select **Start queued uploads** in plugin settings, or run
@@ -159,6 +165,9 @@ and payload errors become blocked jobs instead of retrying forever. After
 correcting the original destination's configuration, select **Retry blocked**
 to resume them.
 Transient network and server failures retry with bounded exponential backoff.
+Errors naming the **remote server** refer to PSF Guard's catalog database;
+errors naming the **local Target Scheduler database** refer to the scheduler
+file configured in this plugin.
 
 ## Sequencer Instructions
 

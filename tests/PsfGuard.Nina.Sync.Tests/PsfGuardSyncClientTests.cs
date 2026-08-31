@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using PsfGuard.Nina.Sync.Client;
 using PsfGuard.Nina.Sync.Protocol;
+using PsfGuard.Nina.Sync.TargetScheduler;
 
 namespace PsfGuard.Nina.Sync.Tests;
 
@@ -102,6 +103,56 @@ public sealed class PsfGuardSyncClientTests
 
         Assert.Equal("preview-1", preview.PreviewId);
         Assert.Equal(2, calls);
+    }
+
+    [Fact]
+    public async Task FailedPreviewIdentifiesRemoteDatabaseContentionAsRetryable()
+    {
+        var handler = new StubHandler(
+            _ => Task.FromResult(
+                Json(
+                    """{"job_id":"job-locked","state":"failed","error":"database is locked"}""",
+                    HttpStatusCode.Accepted)));
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(handler),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        var exception = await Assert.ThrowsAsync<PsfGuardPreviewJobException>(
+            () => client.CreatePreviewAsync(
+                "review",
+                Bundle(),
+                CancellationToken.None));
+
+        Assert.Equal("job-locked", exception.JobId);
+        Assert.Equal("database is locked", exception.ServerError);
+        Assert.Contains("remote server", exception.Message, StringComparison.Ordinal);
+        Assert.True(exception.IsTransient);
+        Assert.True(Queue.QueueFailurePolicy.ShouldRetry(exception));
+    }
+
+    [Fact]
+    public void NonTransientPreviewFailureIsNotRetried()
+    {
+        var exception = new PsfGuardPreviewJobException(
+            "job-invalid",
+            "bundle schema is invalid");
+
+        Assert.False(exception.IsTransient);
+        Assert.False(Queue.QueueFailurePolicy.ShouldRetry(exception));
+    }
+
+    [Fact]
+    public void CaptureResolutionDoesNotRetryArbitrarySqliteFailures()
+    {
+        var corrupt = new System.Data.SQLite.SQLiteException(
+            System.Data.SQLite.SQLiteErrorCode.Corrupt,
+            "database disk image is malformed");
+
+        Assert.True(Queue.QueueFailurePolicy.ShouldRetry(
+            new TargetSchedulerTransientAccessException("database is busy"),
+            resolvingCapture: true));
+        Assert.False(Queue.QueueFailurePolicy.ShouldRetry(corrupt, resolvingCapture: true));
     }
 
     [Fact]
@@ -300,6 +351,30 @@ public sealed class PsfGuardSyncClientTests
         Assert.Equal(2, calls);
         using var json = JsonDocument.Parse(requestBody!);
         Assert.False(json.RootElement.TryGetProperty("include_thumbnails", out _));
+    }
+
+    [Fact]
+    public async Task FailedExportIdentifiesRemoteDatabaseContention()
+    {
+        var handler = new StubHandler(
+            _ => Task.FromResult(
+                Json(
+                    """{"export_id":"export-locked","state":"failed","error":"database is locked"}""")));
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(handler),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        var exception = await Assert.ThrowsAsync<PsfGuardExportJobException>(
+            () => client.DownloadExportAsync(
+                "review",
+                SyncOperation.PushGrades,
+                reviewedOnly: true,
+                CancellationToken.None));
+
+        Assert.Equal("export-locked", exception.JobId);
+        Assert.Contains("remote server", exception.Message, StringComparison.Ordinal);
+        Assert.True(exception.IsTransient);
     }
 
     [Fact]

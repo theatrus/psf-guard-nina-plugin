@@ -252,6 +252,43 @@ public sealed class DurableQueueTests
     }
 
     [Fact]
+    public async Task RemoteDatabaseContentionRetriesWithAFreshBundleIdentity()
+    {
+        using var directory = new TestDirectory();
+        var idempotencyKeys = new ConcurrentQueue<string>();
+        var requests = 0;
+        await using var queue = new DurablePushQueue(
+            directory.Child("queue"),
+            destination => Client(
+                destination,
+                request =>
+                {
+                    idempotencyKeys.Enqueue(
+                        request.Headers.GetValues("Idempotency-Key").Single());
+                    return Interlocked.Increment(ref requests) == 1
+                        ? Json(
+                            """{"job_id":"job-locked","state":"failed","error":"database is locked"}""",
+                            HttpStatusCode.Accepted)
+                        : Json("""{"preview_id":"preview-retried","state":"ready"}""");
+                }));
+        queue.Start();
+
+        await queue.EnqueueAsync(
+            Destination(),
+            Bundle(),
+            autoApply: false,
+            CancellationToken.None);
+
+        await WaitUntilAsync(
+            () => Volatile.Read(ref requests) == 2
+                && Directory.GetFiles(directory.Child("queue"), "*.json").Length == 0,
+            TimeSpan.FromSeconds(5));
+        var keys = idempotencyKeys.ToArray();
+        Assert.Equal(2, keys.Length);
+        Assert.NotEqual(keys[0], keys[1]);
+    }
+
+    [Fact]
     public async Task AppliedPushPublishesTheServerApplySummary()
     {
         using var directory = new TestDirectory();

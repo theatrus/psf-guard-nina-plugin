@@ -1,4 +1,5 @@
 using System.Net;
+using PsfGuard.Nina.Sync.TargetScheduler;
 
 namespace PsfGuard.Nina.Sync.Queue;
 
@@ -8,11 +9,15 @@ internal static class QueueFailurePolicy
 
     public static bool ShouldRetry(Exception exception, bool resolvingCapture = false)
     {
+        if (exception is Client.PsfGuardRemoteJobException remoteJobException)
+        {
+            return remoteJobException.IsTransient;
+        }
+
         if (resolvingCapture)
         {
             return exception is TimeoutException
-                or IOException
-                or System.Data.SQLite.SQLiteException;
+                or TargetSchedulerTransientAccessException;
         }
 
         if (exception is HttpRequestException httpException)
