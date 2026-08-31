@@ -660,14 +660,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
             return null;
         }
 
-        var renewed = bundle with
-        {
-            BundleId = Guid.NewGuid(),
-            CreatedAtUtc = DateTimeOffset.UtcNow,
-            PayloadSha256 = null,
-        };
-        renewed.Seal(cancellationToken);
-        job.Bundle = renewed;
+        job.Bundle = bundle.RenewForPreviewRetry(cancellationToken);
         var delay = QueueFailurePolicy.RetryDelay(job.Attempts);
         job.NextAttemptUtc = DateTimeOffset.UtcNow + delay;
         await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);

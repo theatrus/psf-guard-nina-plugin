@@ -143,6 +143,17 @@ public sealed class PsfGuardSyncClientTests
     }
 
     [Fact]
+    public void RemoteSchemaLockIsRetried()
+    {
+        var exception = new PsfGuardPreviewJobException(
+            "job-schema-locked",
+            "database schema is locked: main");
+
+        Assert.True(exception.IsTransient);
+        Assert.True(Queue.QueueFailurePolicy.ShouldRetry(exception));
+    }
+
+    [Fact]
     public void CaptureResolutionDoesNotRetryArbitrarySqliteFailures()
     {
         var corrupt = new System.Data.SQLite.SQLiteException(

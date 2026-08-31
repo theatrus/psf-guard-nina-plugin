@@ -6,6 +6,12 @@ namespace PsfGuard.Nina.Sync.TargetScheduler;
 
 public sealed class TargetSchedulerCatalogWriter
 {
+    // The native busy wait ignores SQLiteConnection.Cancel, so keep each attempt
+    // short and enforce the full contention window in the cancellable outer loop.
+    private const int BusyAttemptTimeoutMilliseconds = 250;
+    private const int CommandAttemptTimeoutSeconds = 1;
+    private static readonly TimeSpan BusyRetryDelay = TimeSpan.FromMilliseconds(100);
+
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> ApplyGates =
         new(StringComparer.OrdinalIgnoreCase);
 
@@ -38,7 +44,9 @@ public sealed class TargetSchedulerCatalogWriter
         CatalogBundle bundle,
         CancellationToken cancellationToken)
     {
-        return RunSerializedAsync(() => ApplyGrades(bundle), cancellationToken);
+        return RunSerializedAsync(
+            () => ApplyGrades(bundle, cancellationToken),
+            cancellationToken);
     }
 
     public Task<ApplyResult> ApplyPlanningAsync(
@@ -67,17 +75,38 @@ public sealed class TargetSchedulerCatalogWriter
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            try
+            DateTimeOffset? busyDeadline = null;
+            while (true)
             {
-                return await Task.Run(apply, cancellationToken).ConfigureAwait(false);
-            }
-            catch (SQLiteException exception)
-                when (TargetSchedulerDatabaseAccess.IsBusy(exception))
-            {
-                throw TargetSchedulerDatabaseAccess.BusyException(
-                    databasePath,
-                    "applying remote changes to it",
-                    exception);
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    return await Task.Run(apply, cancellationToken).ConfigureAwait(false);
+                }
+                catch (SQLiteException exception)
+                    when (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(
+                        "Target Scheduler apply was canceled.",
+                        exception,
+                        cancellationToken);
+                }
+                catch (SQLiteException exception)
+                    when (TargetSchedulerDatabaseAccess.IsBusy(exception))
+                {
+                    busyDeadline ??= DateTimeOffset.UtcNow
+                        + TimeSpan.FromMilliseconds(
+                            TargetSchedulerDatabaseAccess.BusyTimeoutMilliseconds);
+                    if (DateTimeOffset.UtcNow >= busyDeadline)
+                    {
+                        throw TargetSchedulerDatabaseAccess.BusyException(
+                            databasePath,
+                            "applying remote changes to it",
+                            exception);
+                    }
+
+                    await Task.Delay(BusyRetryDelay, cancellationToken).ConfigureAwait(false);
+                }
             }
         }
         finally
@@ -86,8 +115,11 @@ public sealed class TargetSchedulerCatalogWriter
         }
     }
 
-    private ApplyResult ApplyGrades(CatalogBundle bundle)
+    private ApplyResult ApplyGrades(
+        CatalogBundle bundle,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         ValidateBundle(bundle, SyncOperation.PushGrades);
         if (!bundle.Tables.TryGetValue("acquiredimage", out var table))
         {
@@ -96,7 +128,8 @@ public sealed class TargetSchedulerCatalogWriter
 
         var rows = RowsByColumn(table);
         EnsureRequiredColumns(table, "guid", "gradingStatus", "rejectreason");
-        using var connection = OpenReadWrite();
+        using var session = OpenReadWrite(cancellationToken);
+        var connection = session.Connection;
         using var transaction = connection.BeginTransaction();
         var result = new MutableApplyResult();
         var duplicateSourceGuids = FindDuplicateGuids(rows);
@@ -114,6 +147,7 @@ public sealed class TargetSchedulerCatalogWriter
 
         foreach (var row in rows)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var guid = OptionalText(row, "guid");
             if (guid is null)
             {
@@ -162,7 +196,9 @@ public sealed class TargetSchedulerCatalogWriter
             connection,
             transaction,
             affectedExposurePlans,
-            acceptedCounts);
+            acceptedCounts,
+            cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         transaction.Commit();
         return result.ToImmutable();
     }
@@ -171,7 +207,8 @@ public sealed class TargetSchedulerCatalogWriter
         SQLiteConnection connection,
         SQLiteTransaction transaction,
         IReadOnlyCollection<long> exposurePlanIds,
-        IReadOnlyDictionary<long, long> acceptedCounts)
+        IReadOnlyDictionary<long, long> acceptedCounts,
+        CancellationToken cancellationToken)
     {
         using var update = connection.CreateCommand();
         update.Transaction = transaction;
@@ -181,6 +218,7 @@ public sealed class TargetSchedulerCatalogWriter
 
         foreach (var exposurePlanId in exposurePlanIds)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             acceptedParameter.Value = acceptedCounts.GetValueOrDefault(exposurePlanId);
             idParameter.Value = exposurePlanId;
             update.ExecuteNonQuery();
@@ -194,7 +232,8 @@ public sealed class TargetSchedulerCatalogWriter
         ValidateBundle(bundle, SyncOperation.PushPlanning);
         EnsureBundleTables(bundle, PlanningTables, "Planning");
 
-        using var connection = OpenReadWrite();
+        using var session = OpenReadWrite(cancellationToken);
+        var connection = session.Connection;
         using var transaction = connection.BeginTransaction();
         var result = new MutableApplyResult();
         _ = ApplyPlanningTables(
@@ -205,6 +244,7 @@ public sealed class TargetSchedulerCatalogWriter
             preservePlanProgress: true,
             cancellationToken);
 
+        cancellationToken.ThrowIfCancellationRequested();
         transaction.Commit();
         return result.ToImmutable();
     }
@@ -228,10 +268,8 @@ public sealed class TargetSchedulerCatalogWriter
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        using var connection = OpenReadWrite();
-        using var cancellationRegistration = cancellationToken.Register(
-            static state => ((SQLiteConnection)state!).Cancel(),
-            connection);
+        using var session = OpenReadWrite(cancellationToken);
+        var connection = session.Connection;
         using var transaction = connection.BeginTransaction();
         try
         {
@@ -732,7 +770,7 @@ public sealed class TargetSchedulerCatalogWriter
         }
     }
 
-    private SQLiteConnection OpenReadWrite()
+    private WriteSession OpenReadWrite(CancellationToken cancellationToken)
     {
         if (!File.Exists(databasePath))
         {
@@ -747,22 +785,64 @@ public sealed class TargetSchedulerCatalogWriter
             ReadOnly = false,
             FailIfMissing = true,
             Pooling = false,
-            DefaultTimeout = TargetSchedulerDatabaseAccess.CommandTimeoutSeconds,
-            BusyTimeout = TargetSchedulerDatabaseAccess.BusyTimeoutMilliseconds,
+            DefaultTimeout = CommandAttemptTimeoutSeconds,
+            BusyTimeout = BusyAttemptTimeoutMilliseconds,
         };
         var connection = new SQLiteConnection(builder.ConnectionString);
-        connection.Open();
-        using var version = connection.CreateCommand();
-        version.CommandText = "PRAGMA user_version";
-        var schemaVersion = Convert.ToInt32(version.ExecuteScalar());
-        if (schemaVersion < 22)
+        WriteSession? session = null;
+        try
         {
-            connection.Dispose();
-            throw new InvalidDataException(
-                $"Target Scheduler schema {schemaVersion} is too old; PSF Guard sync requires schema 22 or newer.");
+            connection.Open();
+            session = new WriteSession(connection, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            using var version = connection.CreateCommand();
+            version.CommandText = "PRAGMA user_version";
+            var schemaVersion = Convert.ToInt32(version.ExecuteScalar());
+            cancellationToken.ThrowIfCancellationRequested();
+            if (schemaVersion < 22)
+            {
+                throw new InvalidDataException(
+                    $"Target Scheduler schema {schemaVersion} is too old; PSF Guard sync requires schema 22 or newer.");
+            }
+
+            return session;
+        }
+        catch
+        {
+            if (session is null)
+            {
+                connection.Dispose();
+            }
+            else
+            {
+                session.Dispose();
+            }
+
+            throw;
+        }
+    }
+
+    private sealed class WriteSession : IDisposable
+    {
+        private readonly CancellationTokenRegistration cancellationRegistration;
+
+        public WriteSession(
+            SQLiteConnection connection,
+            CancellationToken cancellationToken)
+        {
+            Connection = connection;
+            cancellationRegistration = cancellationToken.Register(
+                static state => ((SQLiteConnection)state!).Cancel(),
+                connection);
         }
 
-        return connection;
+        public SQLiteConnection Connection { get; }
+
+        public void Dispose()
+        {
+            cancellationRegistration.Dispose();
+            Connection.Dispose();
+        }
     }
 
     private static void ValidateBundle(CatalogBundle bundle, SyncOperation operation)

@@ -26,6 +26,7 @@ public abstract class PsfGuardRemoteJobException : InvalidOperationException
     public bool IsTransient =>
         Contains("database is locked")
         || Contains("database table is locked")
+        || Contains("database schema is locked")
         || Contains("database is busy")
         || Contains("SQLITE_BUSY")
         || Contains("SQLITE_LOCKED");
