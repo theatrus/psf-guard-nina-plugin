@@ -33,6 +33,37 @@ public sealed class PsfGuardSyncClient : IDisposable
         return GetAsync<SyncCapabilities>("api/sync/v1/capabilities", cancellationToken);
     }
 
+    public Task<FlatHistorySnapshotResponse> UploadFlatHistoryAsync(
+        FlatHistorySnapshot snapshot,
+        CancellationToken cancellationToken) =>
+        PostFlatHistoryAsync<FlatHistorySnapshot, FlatHistorySnapshotResponse>(
+            "snapshot", snapshot, cancellationToken);
+
+    public Task<FlatHistoryPendingResponse> GetPendingFlatHistoryAsync(
+        FlatHistoryPendingRequest request,
+        CancellationToken cancellationToken) =>
+        PostFlatHistoryAsync<FlatHistoryPendingRequest, FlatHistoryPendingResponse>(
+            "pending", request, cancellationToken);
+
+    public Task<FlatHistoryAcknowledgeResponse> AcknowledgeFlatHistoryAsync(
+        FlatHistoryAcknowledgeRequest request,
+        CancellationToken cancellationToken) =>
+        PostFlatHistoryAsync<FlatHistoryAcknowledgeRequest, FlatHistoryAcknowledgeResponse>(
+            "acknowledge", request, cancellationToken);
+
+    private async Task<TResponse> PostFlatHistoryAsync<TRequest, TResponse>(
+        string action,
+        TRequest body,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post, $"api/sync/v1/flat-history/{action}")
+        {
+            Content = JsonContent.Create(body, options: ProtocolJson.Options),
+        };
+        return await SendAsync<TResponse>(request, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Exchange a one-time pairing code for this install's durable
     /// credential. Construct the client with no API token for this call —

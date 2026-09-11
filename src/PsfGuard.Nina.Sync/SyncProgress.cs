@@ -11,6 +11,7 @@ public enum SyncProgressStage
     ApplyingPreview,
     DownloadingCatalog,
     ApplyingCatalog,
+    SyncingFlatHistory,
     Completed,
 }
 

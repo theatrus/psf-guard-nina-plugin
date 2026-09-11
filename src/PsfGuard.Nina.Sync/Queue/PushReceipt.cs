@@ -12,6 +12,12 @@ public sealed record PushReceipt
 
     public IReadOnlyDictionary<string, long>? Summary { get; init; }
 
+    public bool ReconcileFlatHistory { get; init; }
+
+    public string? FlatHistoryTargetGuid { get; init; }
+
+    public FlatHistorySyncResult? FlatHistory { get; init; }
+
     public bool Applied => string.Equals(State, "applied", StringComparison.OrdinalIgnoreCase);
 
     public bool TryGetChangeCounts(out long inserted, out long updated)

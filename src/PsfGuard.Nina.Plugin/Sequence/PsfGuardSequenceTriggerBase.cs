@@ -99,7 +99,9 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
             captureSettings.IncludeThumbnails,
             () => CreateClient(serverUri, captureSettings.RequireApiToken()),
             reader,
-            writer);
+            writer,
+            queue: null,
+            flatHistory: new FlatHistoryCatalog(captureSettings.TargetSchedulerDatabase));
     }
 
     protected static string? FindCurrentTargetName(ISequenceContainer? container)
