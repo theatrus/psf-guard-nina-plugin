@@ -219,7 +219,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
                 async token =>
                 {
                     var result = await CreateOrchestrator()
-                        .PullGradesAsync(token)
+                        .PullGradesAsync(token, CreateSyncProgress())
                         .ConfigureAwait(false);
                     return FormatApplyResult("Grade pull", result);
                 },
@@ -594,7 +594,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
             reader,
             writer,
             queue,
-            configuration.QueueDestination);
+            configuration.QueueDestination,
+            new FlatHistoryCatalog(configuration.TargetSchedulerDatabase));
     }
 
     private static PsfGuardSyncClient CreateClient(Uri serverUri, string apiToken) =>
@@ -1190,7 +1191,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
 
     private static string FormatApplyResult(string label, ApplyResult result) =>
         $"{label}: {result.Inserted} inserted, {result.Updated} updated, "
-        + $"{result.Unchanged} unchanged, {result.Skipped} skipped.";
+        + $"{result.Unchanged} unchanged, {result.Skipped} skipped."
+        + (result.FlatHistory is null ? string.Empty : " " + result.FlatHistory.Summary);
 
     private static string FormatReleasedUploads(int count) => count switch
     {
@@ -1206,13 +1208,15 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
             : $"{label} preview {receipt.PreviewId} is ready in PSF Guard";
         if (!receipt.TryGetChangeCounts(out var inserted, out var updated))
         {
-            return $"{message}.";
+            return $"{message}."
+                + (receipt.FlatHistory is null ? string.Empty : " " + receipt.FlatHistory.Summary);
         }
 
         return message
             + (receipt.Applied
                 ? $": {inserted} inserted, {updated} updated."
-                : $": {inserted} to insert, {updated} to update.");
+                : $": {inserted} to insert, {updated} to update.")
+            + (receipt.FlatHistory is null ? string.Empty : " " + receipt.FlatHistory.Summary);
     }
 
     private void RaisePropertyChanged([CallerMemberName] string? propertyName = null)

@@ -64,7 +64,9 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
                 new Uri(destination.ServerUrl, UriKind.Absolute),
                 captureSettings.RequireApiToken()),
             reader,
-            writer);
+            writer,
+            queue: null,
+            flatHistory: new FlatHistoryCatalog(captureSettings.TargetSchedulerDatabase));
     }
 
     protected async Task<string> CheckConnectionAsync(CancellationToken cancellationToken)

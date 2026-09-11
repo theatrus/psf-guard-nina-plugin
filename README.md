@@ -40,6 +40,8 @@ expose arbitrary SQL.
 - Preservation of telescope-side `acquired` and `accepted` plan counters.
 - Grade pulls update only `gradingStatus` and `rejectreason` on acquired-image
   rows, then reconcile the affected plans' accepted counts.
+- Grade pulls and applied reconciles synchronize Target Scheduler flat coverage
+  and apply explicit invalidations made in PSF Guard.
 - Pairing credentials stored in Windows Credential Manager and never shown in
   the plugin UI.
 - Optional Target Scheduler thumbnail transfer.
@@ -169,6 +171,40 @@ Errors naming the **remote server** refer to PSF Guard's catalog database;
 errors naming the **local Target Scheduler database** refer to the scheduler
 file configured in this plugin.
 
+## Suspect Flat Coverage
+
+Run **Pull grades** or an applied **Reconcile** to publish Target Scheduler's
+flat-history records to the paired PSF Guard database. In PSF Guard's calibration
+library, select the suspect **Scheduler flats** coverage records and invalidate
+them with a reason. The next grade pull or applied reconcile removes only the
+unchanged, explicitly selected coverage rows from the local scheduler database.
+Full catalog pull-back, global capture triggers, and image uploads are not
+required. Preview-only reconcile does not apply invalidations.
+
+Put **Pull PSF Guard grades** before the next Target Scheduler flats action.
+Target Scheduler reads coverage when that action starts; an action already in
+progress may retain its earlier decision or write new history afterward. Missing
+coverage makes flats eligible to be taken again, subject to the scheduler's
+normal profile, target, cadence, and recent-light rules. Its 45-day light cutoff
+can require manual flats for older runs.
+
+These are coverage records, not individual files. Select all suspect matching
+records when duplicate coverage exists; leaving an equivalent record can still
+satisfy Target Scheduler. Rejecting a frame or inspecting a bad master does not
+automatically invalidate history because Target Scheduler does not record which
+flat files backed each coverage row. Invalidation never deletes FITS/XISF files
+or changes a master. A changed row or a reused row ID is preserved and reported
+as a conflict, protecting flats taken after the snapshot.
+
+The plugin keeps a random origin ID for each configured scheduler database path
+under `%LOCALAPPDATA%\NINA\PsfGuardSync\flat-history-origins`. Keep that state
+when moving a plugin installation. Changing the database path creates a new
+origin; old-origin decisions are not applied to it. Every response must match
+both this origin and the paired catalog. Older PSF Guard servers continue normal
+catalog sync but report that flat-history support requires an update. If the flat
+stage fails after the catalog stage committed, the error says so explicitly;
+retrying finishes safely, including a lost acknowledgment after local deletion.
+
 ## Sequencer Instructions
 
 The plugin contributes these instructions under **PSF Guard Sync** in N.I.N.A.'s
@@ -188,7 +224,8 @@ advanced sequencer:
   templates, and plans to PSF Guard and waits for the preview or apply.
 - **Pull PSF Guard grades** applies reviewed grades and rejection reasons by
   unambiguous acquired-image GUID, then reconciles each affected Target
-  Scheduler plan's accepted count from its acquired images.
+  Scheduler plan's accepted count from its acquired images. It also syncs flat
+  coverage and applies explicit PSF Guard coverage invalidations.
 - **Push PSF Guard grades** sends reviewed Target Scheduler grades and rejection
   reasons to PSF Guard and waits for the preview or apply.
 - **Reconcile PSF Guard catalog** pushes a fresh full scheduler snapshot and

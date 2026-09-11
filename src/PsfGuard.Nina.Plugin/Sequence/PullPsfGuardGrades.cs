@@ -33,7 +33,7 @@ public sealed class PullPsfGuardGrades : PsfGuardSequenceItemBase
         var captureSettings = CaptureSettingsSnapshot();
         Report(progress, "Pulling grades...");
         await CreateOrchestrator(captureSettings)
-            .PullGradesAsync(token)
+            .PullGradesAsync(token, CreateSyncProgress(progress))
             .ConfigureAwait(false);
     }
 

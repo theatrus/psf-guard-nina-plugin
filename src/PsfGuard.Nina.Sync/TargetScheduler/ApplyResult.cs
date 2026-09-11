@@ -9,4 +9,6 @@ public sealed record ApplyResult
     public int Unchanged { get; init; }
 
     public int Skipped { get; init; }
+
+    public FlatHistorySyncResult? FlatHistory { get; init; }
 }
