@@ -20,6 +20,8 @@
 - Run:
 
   ```powershell
+  dotnet restore PsfGuard.Nina.sln --locked-mode
+  dotnet format PsfGuard.Nina.sln --verify-no-changes --no-restore
   dotnet test PsfGuard.Nina.sln --configuration Release
   dotnet build src\PsfGuard.Nina.Plugin\PsfGuard.Nina.Plugin.csproj --configuration Release
   ```

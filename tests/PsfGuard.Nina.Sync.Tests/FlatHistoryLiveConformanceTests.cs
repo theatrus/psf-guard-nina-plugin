@@ -88,7 +88,8 @@ public sealed class FlatHistoryLiveConformanceTests
             Assert.Equal(0L, CoverageCount(database));
             var pending = await client.GetPendingFlatHistoryAsync(new FlatHistoryPendingRequest
             {
-                CatalogId = catalogId, OriginId = snapshot.OriginId,
+                CatalogId = catalogId,
+                OriginId = snapshot.OriginId,
             }, token);
             Assert.Empty(pending.Decisions);
         }

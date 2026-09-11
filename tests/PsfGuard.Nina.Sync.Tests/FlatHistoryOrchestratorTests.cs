@@ -304,7 +304,9 @@ public sealed class FlatHistoryOrchestratorTests
                 case "/api/sync/v1/capabilities":
                     return Json(new SyncCapabilities
                     {
-                        ProtocolVersion = 1, Product = "PSF Guard", ProductVersion = "test",
+                        ProtocolVersion = 1,
+                        Product = "PSF Guard",
+                        ProductVersion = "test",
                         Capabilities = SupportsFlatHistory ? ["flat_history_v1", "exports"] : ["exports"],
                         Catalogs = [new SyncCatalogCapability { Id = "remote", Name = "Test", Readable = true, Writable = true }],
                     });
@@ -320,14 +322,17 @@ public sealed class FlatHistoryOrchestratorTests
                         var id = Guid.NewGuid().ToString("D");
                         decisions[id] = new FlatHistoryDecision
                         {
-                            RecordId = id, SourceRowId = record.SourceRowId,
-                            Fingerprint = record.Fingerprint, TargetGuid = record.TargetGuid,
+                            RecordId = id,
+                            SourceRowId = record.SourceRowId,
+                            Fingerprint = record.Fingerprint,
+                            TargetGuid = record.TargetGuid,
                             Reason = "Artifacts in flats",
                         };
                     }
                     return Json(new FlatHistorySnapshotResponse
                     {
-                        CatalogId = snapshot.CatalogId, OriginId = snapshot.OriginId,
+                        CatalogId = snapshot.CatalogId,
+                        OriginId = snapshot.OriginId,
                         Received = snapshot.Records.Count,
                     });
                 case "/api/sync/v1/flat-history/pending":
@@ -356,7 +361,8 @@ public sealed class FlatHistoryOrchestratorTests
                     }
                     return Json(new FlatHistoryAcknowledgeResponse
                     {
-                        CatalogId = ack.CatalogId, OriginId = ack.OriginId,
+                        CatalogId = ack.CatalogId,
+                        OriginId = ack.OriginId,
                         Acknowledged = ack.Results.Count,
                     });
                 default:

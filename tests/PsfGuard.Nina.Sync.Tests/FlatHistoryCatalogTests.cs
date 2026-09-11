@@ -381,7 +381,9 @@ public sealed class FlatHistoryCatalogTests
         {
             var connection = new SQLiteConnection(new SQLiteConnectionStringBuilder
             {
-                DataSource = DatabasePath, Pooling = false, FailIfMissing = true,
+                DataSource = DatabasePath,
+                Pooling = false,
+                FailIfMissing = true,
             }.ConnectionString);
             connection.Open();
             return connection;

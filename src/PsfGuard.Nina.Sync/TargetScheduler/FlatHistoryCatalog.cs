@@ -201,14 +201,14 @@ public sealed class FlatHistoryCatalog
 
     private static FlatHistoryAcknowledgment Acknowledge(
         FlatHistoryDecision decision, string status, string? detail = null) => new()
-    {
-        RecordId = decision.RecordId,
-        SourceRowId = decision.SourceRowId,
-        Fingerprint = decision.Fingerprint,
-        TargetGuid = decision.TargetGuid,
-        Status = status,
-        Detail = detail,
-    };
+        {
+            RecordId = decision.RecordId,
+            SourceRowId = decision.SourceRowId,
+            Fingerprint = decision.Fingerprint,
+            TargetGuid = decision.TargetGuid,
+            Status = status,
+            Detail = detail,
+        };
 
     private SQLiteConnection Open(bool readOnly)
     {
