@@ -20,7 +20,11 @@
             </Setter.Value>
           </Setter>
         </Style>
-        <Style x:Key="ActionStyle" TargetType="{x:Type Button}">
+        <Style x:Key="ActionLabelStyle" BasedOn="{StaticResource {x:Type TextBlock}}" TargetType="{x:Type TextBlock}">
+          <Setter Property="Margin" Value="{Binding Padding, RelativeSource={RelativeSource AncestorType={x:Type Button}}}" />
+          <Setter Property="Foreground" Value="{DynamicResource ButtonForegroundBrush}" />
+        </Style>
+        <Style x:Key="ActionStyle" BasedOn="{StaticResource StandardButton}" TargetType="{x:Type Button}">
           <Setter Property="MinWidth" Value="128" />
           <Setter Property="Margin" Value="0,0,8,8" />
           <Setter Property="Padding" Value="10,3" />
@@ -75,8 +79,9 @@
               MinWidth="96"
               Margin="8,0,0,0"
               Padding="10,2"
-              Command="{Binding PairCommand}"
-              Content="Pair" />
+              Command="{Binding PairCommand}">
+              <TextBlock Text="Pair" Style="{StaticResource ActionLabelStyle}" />
+            </Button>
           </Grid>
 
           <Button
@@ -84,8 +89,9 @@
             Margin="0,8,0,0"
             Padding="10,3"
             HorizontalAlignment="Left"
-            Command="{Binding TestConnectionCommand}"
-            Content="Test connection" />
+            Command="{Binding TestConnectionCommand}">
+            <TextBlock Text="Test connection" Style="{StaticResource ActionLabelStyle}" />
+          </Button>
         </StackPanel>
       </GroupBox>
 
@@ -134,12 +140,14 @@
         <WrapPanel>
           <Button
             Command="{Binding StartQueuedUploadsCommand}"
-            Content="Start queued uploads"
-            Style="{StaticResource ActionStyle}" />
+            Style="{StaticResource ActionStyle}">
+            <TextBlock Text="Start queued uploads" Style="{StaticResource ActionLabelStyle}" />
+          </Button>
           <Button
             Command="{Binding RetryBlockedCommand}"
-            Content="Retry blocked"
-            Style="{StaticResource ActionStyle}" />
+            Style="{StaticResource ActionStyle}">
+            <TextBlock Text="Retry blocked" Style="{StaticResource ActionLabelStyle}" />
+          </Button>
         </WrapPanel>
       </GroupBox>
 
@@ -173,34 +181,41 @@
           <WrapPanel>
             <Button
               Command="{Binding ReconcileCommand}"
-              Content="Reconcile"
-              Style="{StaticResource ActionStyle}" />
+              Style="{StaticResource ActionStyle}">
+              <TextBlock Text="Reconcile" Style="{StaticResource ActionLabelStyle}" />
+            </Button>
             <Button
               Command="{Binding PushAllCommand}"
-              Content="Push all"
-              Style="{StaticResource ActionStyle}" />
+              Style="{StaticResource ActionStyle}">
+              <TextBlock Text="Push all" Style="{StaticResource ActionLabelStyle}" />
+            </Button>
             <Button
               Command="{Binding PullMergedCatalogCommand}"
-              Content="Pull catalog"
-              Style="{StaticResource ActionStyle}" />
+              Style="{StaticResource ActionStyle}">
+              <TextBlock Text="Pull catalog" Style="{StaticResource ActionLabelStyle}" />
+            </Button>
           </WrapPanel>
           <WrapPanel>
             <Button
               Command="{Binding PushPlanningCommand}"
-              Content="Push planning"
-              Style="{StaticResource ActionStyle}" />
+              Style="{StaticResource ActionStyle}">
+              <TextBlock Text="Push planning" Style="{StaticResource ActionLabelStyle}" />
+            </Button>
             <Button
               Command="{Binding PullPlanningCommand}"
-              Content="Pull planning"
-              Style="{StaticResource ActionStyle}" />
+              Style="{StaticResource ActionStyle}">
+              <TextBlock Text="Pull planning" Style="{StaticResource ActionLabelStyle}" />
+            </Button>
             <Button
               Command="{Binding PushGradesCommand}"
-              Content="Push grades"
-              Style="{StaticResource ActionStyle}" />
+              Style="{StaticResource ActionStyle}">
+              <TextBlock Text="Push grades" Style="{StaticResource ActionLabelStyle}" />
+            </Button>
             <Button
               Command="{Binding PullGradesCommand}"
-              Content="Pull grades"
-              Style="{StaticResource ActionStyle}" />
+              Style="{StaticResource ActionStyle}">
+              <TextBlock Text="Pull grades" Style="{StaticResource ActionLabelStyle}" />
+            </Button>
           </WrapPanel>
 
           <Separator Margin="0,2,0,10" />
@@ -211,14 +226,16 @@
               MinWidth="110"
               Margin="0,0,8,8"
               Padding="10,3"
-              Command="{Binding ApplyPreviewCommand}"
-              Content="Apply preview" />
+              Command="{Binding ApplyPreviewCommand}">
+              <TextBlock Text="Apply preview" Style="{StaticResource ActionLabelStyle}" />
+            </Button>
             <Button
               MinWidth="110"
               Margin="0,0,8,8"
               Padding="10,3"
-              Command="{Binding ForgetPreviewCommand}"
-              Content="Forget preview" />
+              Command="{Binding ForgetPreviewCommand}">
+              <TextBlock Text="Forget preview" Style="{StaticResource ActionLabelStyle}" />
+            </Button>
           </WrapPanel>
         </StackPanel>
       </GroupBox>
