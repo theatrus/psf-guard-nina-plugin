@@ -14,6 +14,14 @@ public partial class Options : ResourceDictionary
         InitializeComponent();
     }
 
+    private void OptionsLoaded(object sender, RoutedEventArgs args)
+    {
+        if (sender is FrameworkElement { DataContext: PsfGuardPlugin plugin })
+        {
+            plugin.RefreshPairingState();
+        }
+    }
+
     private void StatusTextTargetUpdated(object sender, DataTransferEventArgs args)
     {
         if (sender is not UIElement element)

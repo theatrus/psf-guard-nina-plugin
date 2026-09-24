@@ -20,10 +20,22 @@ internal sealed class PluginSettings
 
     private readonly IProfileService profileService;
     private readonly PluginOptionsAccessor options;
+    private readonly Func<string, string?> readCredential;
+    private readonly Action<string, string?> writeCredential;
 
     public PluginSettings(IProfileService profileService)
+        : this(profileService, WindowsCredentialStore.Read, WindowsCredentialStore.Write)
+    {
+    }
+
+    internal PluginSettings(
+        IProfileService profileService,
+        Func<string, string?> readCredential,
+        Action<string, string?> writeCredential)
     {
         this.profileService = profileService;
+        this.readCredential = readCredential;
+        this.writeCredential = writeCredential;
         options = new PluginOptionsAccessor(profileService, PluginId);
         EnsurePairingMetadata();
     }
@@ -97,6 +109,10 @@ internal sealed class PluginSettings
     public bool HasPairingCredential =>
         GetPairingAvailability(ServerUrl) == PairingAvailability.Ready;
 
+    public bool HasPairingMetadata =>
+        !string.IsNullOrWhiteSpace(options.GetValueString(PairingMetadataOption, string.Empty))
+        || !string.IsNullOrWhiteSpace(options.GetValueString(nameof(CatalogId), string.Empty));
+
     public PairingAvailability GetPairingAvailability(string serverUrl)
     {
         var pairing = ReadPairingMetadata();
@@ -113,8 +129,8 @@ internal sealed class PluginSettings
         try
         {
             return string.IsNullOrWhiteSpace(
-                WindowsCredentialStore.Read(pairing.CredentialReference))
-                ? PairingAvailability.NotPaired
+                readCredential(pairing.CredentialReference))
+                ? PairingAvailability.CredentialMissing
                 : PairingAvailability.Ready;
         }
         catch (Win32Exception)
@@ -175,8 +191,8 @@ internal sealed class PluginSettings
             target.ServerUrl,
             normalizedCatalogId,
             credentialReference);
-        var previousApiToken = WindowsCredentialStore.Read(credentialReference);
-        WindowsCredentialStore.Write(credentialReference, apiToken.Trim());
+        var previousApiToken = readCredential(credentialReference);
+        writeCredential(credentialReference, apiToken.Trim());
         try
         {
             options.SetValueString(
@@ -187,7 +203,7 @@ internal sealed class PluginSettings
         {
             try
             {
-                WindowsCredentialStore.Write(credentialReference, previousApiToken);
+                writeCredential(credentialReference, previousApiToken);
             }
             catch (Exception rollbackException)
             {
@@ -203,6 +219,20 @@ internal sealed class PluginSettings
 
     public string CredentialReference =>
         ReadPairingMetadata()?.CredentialReference ?? string.Empty;
+
+    public void ResetPairing()
+    {
+        var pairing = ReadPairingMetadata();
+        if (pairing is not null)
+        {
+            writeCredential(pairing.CredentialReference, null);
+        }
+
+        // Stop legacy migration from restoring the cleared pairing. Keep the legacy
+        // destination mapping so re-pairing that catalog can recover its queued jobs.
+        options.SetValueString(nameof(CatalogId), string.Empty);
+        options.SetValueString(PairingMetadataOption, string.Empty);
+    }
 
     public void EnsurePairingMetadata()
     {
@@ -462,6 +492,7 @@ internal sealed record PairingMetadata(
 internal enum PairingAvailability
 {
     NotPaired,
+    CredentialMissing,
     Ready,
     ServerChanged,
     CredentialUnavailable,

@@ -13,7 +13,7 @@ namespace PsfGuard.Nina.Plugin.Tests;
 public sealed class OptionsButtonStyleTests
 {
     [Fact]
-    public void SettingsButtonsUseNinaTemplatesTextBrushesAndCommandStates()
+    public void SettingsButtonsUseNinaTemplatesAndSupportPairingRecovery()
     {
         Exception? failure = null;
         var thread = new Thread(() =>
@@ -42,6 +42,7 @@ public sealed class OptionsButtonStyleTests
         var application = new Application();
         try
         {
+            PairingRecoveryTests.VerifyMissingCredentialCommandStates();
             // Load the actual host templates, including their unusual foreground inheritance.
             foreach (var key in new[]
             {
@@ -68,7 +69,7 @@ public sealed class OptionsButtonStyleTests
 
             string[] commandNames =
             [
-                "PairCommand", "TestConnectionCommand", "StartQueuedUploadsCommand", "RetryBlockedCommand",
+                "PairCommand", "ResetPairingCommand", "TestConnectionCommand", "StartQueuedUploadsCommand", "RetryBlockedCommand",
                 "ReconcileCommand", "PushAllCommand", "PullMergedCatalogCommand", "PushPlanningCommand",
                 "PullPlanningCommand", "PushGradesCommand", "PullGradesCommand", "ApplyPreviewCommand",
                 "ForgetPreviewCommand",
