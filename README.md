@@ -91,6 +91,15 @@ Restart N.I.N.A., open **Plugins > Installed > PSF Guard Sync**, and configure:
 4. Confirm the connection, then select the optional Target Scheduler database.
 5. Choose the automatic capture, image upload, and catalog-reconcile policies.
 
+If the saved credential was deleted from Windows Credential Manager, generate a
+**new** one-time code in PSF Guard and pair again. A previously used pairing code
+cannot be reused. The plugin reports **Credential missing** when it detects the
+deletion. **Reset pairing** clears the active profile's pairing and catalog
+selection without changing its server URL, sync settings, or queued jobs. Then
+pair with a new code for the intended database. Pairing with the same database
+restores access to its queue; use **Retry blocked** to resume blocked jobs.
+Pairing with another database does not redirect the old database's jobs.
+
 Direct upload sends each saved light independently of scheduler sync. Enable
 **Also upload calibration frames** to include bias, dark, dark-flat, and flat
 saves. PSF Guard stores them in the receive directory selected for that

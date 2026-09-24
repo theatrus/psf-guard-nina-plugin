@@ -55,10 +55,18 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
     public PsfGuardPlugin(
         IProfileService profileService,
         IImageSaveMediator imageSaveMediator)
+        : this(profileService, imageSaveMediator, new PluginSettings(profileService))
+    {
+    }
+
+    internal PsfGuardPlugin(
+        IProfileService profileService,
+        IImageSaveMediator imageSaveMediator,
+        PluginSettings settings)
     {
         this.profileService = profileService;
         this.imageSaveMediator = imageSaveMediator;
-        settings = new PluginSettings(profileService);
+        this.settings = settings;
         queue = new DurablePushQueue(
             Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -82,6 +90,20 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         PairCommand = CreateManualCommand(
             () => RunCommandAsync(PairAsync, "Pairing with PSF Guard..."),
             CanPair);
+        ResetPairingCommand = CreateManualCommand(
+            () => RunCommandAsync(
+                _ =>
+                {
+                    settings.ResetPairing();
+                    ClearPairingCode();
+                    SetPendingPreview(null);
+                    RaisePropertyChanged(nameof(CatalogId));
+                    return Task.FromResult(
+                        "Pairing reset. Create a new one-time code in PSF Guard Settings "
+                        + "(Pair a client), then enter it here. Queued jobs were kept.");
+                },
+                "Resetting PSF Guard pairing..."),
+            () => settings.HasPairingMetadata);
         PushAllCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token =>
@@ -161,7 +183,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
                         + FormatApplyResult("Catalog pull-back", pulled);
                 },
                 "Starting PSF Guard preview apply..."),
-            () => HasPendingPreview);
+            () => HasPendingPreview && CanUseRemote());
         forgetPreviewCommand = CreateManualCommand(
             () =>
             {
@@ -242,6 +264,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
 
     public ICommand PairCommand { get; }
 
+    public ICommand ResetPairingCommand { get; }
+
     private string pairingCode = string.Empty;
 
     /// <summary>One-time code from PSF Guard Settings. Never persisted —
@@ -305,6 +329,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
     public string PairingStatus => settings.GetPairingAvailability(ServerUrl) switch
     {
         PairingAvailability.Ready => "Paired",
+        PairingAvailability.CredentialMissing => "Credential missing; pair with a new code",
         PairingAvailability.ServerChanged => "Server changed; pair again",
         PairingAvailability.CredentialUnavailable => "Credential unavailable",
         _ => "Not paired",
@@ -648,7 +673,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         await CommitPairingAsync(pairingTarget, paired).ConfigureAwait(false);
         return $"Paired with {paired.Product} {paired.ProductVersion}; "
             + $"catalog {paired.CatalogName} ({paired.CatalogId}). "
-            + "The credential is stored; the code is now used up.";
+            + "The credential is stored; the code is now used up. "
+            + "Use Retry blocked to resume any blocked jobs for this catalog.";
     }
 
     private async Task<string> TestConnectionAsync(CancellationToken cancellationToken)
@@ -1160,6 +1186,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         RaiseCommandStates();
     }
 
+    internal void RefreshPairingState() => RaiseCommandStates();
+
     private void RaiseCommandStates()
     {
         var dispatcher = Application.Current?.Dispatcher;
@@ -1171,6 +1199,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
 
         RaisePropertyChanged(nameof(IsOperationRunning));
         RaisePropertyChanged(nameof(IsSettingsEditable));
+        RaisePropertyChanged(nameof(HasStoredCredential));
+        RaisePropertyChanged(nameof(PairingStatus));
         foreach (var command in manualCommands)
         {
             command.RaiseCanExecuteChanged();

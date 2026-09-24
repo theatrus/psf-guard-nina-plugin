@@ -1,0 +1,209 @@
+using System.ComponentModel;
+using System.Reflection;
+using NINA.Profile.Interfaces;
+using NINA.WPF.Base.Interfaces.Mediator;
+
+namespace PsfGuard.Nina.Plugin.Tests;
+
+public sealed class PairingRecoveryTests
+{
+    [Fact]
+    public void DeletedCredentialCanBeReplacedWithoutChangingQueueIdentity()
+    {
+        var fixture = new Fixture();
+        fixture.Pair("catalog-a", "old-token");
+        var destination = fixture.Settings.CaptureSnapshot();
+        fixture.Credentials.Clear();
+
+        Assert.Equal(PairingAvailability.CredentialMissing,
+            fixture.Settings.GetPairingAvailability(fixture.Settings.ServerUrl));
+        Assert.False(fixture.Settings.HasPairingCredential);
+        Assert.True(fixture.Settings.HasPairingMetadata);
+
+        fixture.Pair("catalog-a", "new-token");
+
+        Assert.True(fixture.Settings.HasPairingCredential);
+        Assert.Equal(destination, fixture.Settings.CaptureSnapshot());
+        Assert.Equal("new-token", fixture.Credentials[fixture.Settings.CredentialReference]);
+    }
+
+    internal static void VerifyMissingCredentialCommandStates()
+    {
+        var fixture = new Fixture();
+        fixture.Pair("catalog-a", "old-token");
+        var plugin = new PsfGuardPlugin(fixture.Service, Stub<IImageSaveMediator>([]), fixture.Settings);
+        Assert.Equal("Paired", plugin.PairingStatus);
+        fixture.Credentials.Clear();
+        var changed = new List<string?>();
+        plugin.PropertyChanged += (_, args) => changed.Add(args.PropertyName);
+
+        plugin.RefreshPairingState();
+        plugin.PairingCode = "fresh-code";
+
+        Assert.Contains(nameof(plugin.PairingStatus), changed);
+        Assert.Contains(nameof(plugin.HasStoredCredential), changed);
+        Assert.Equal("Credential missing; pair with a new code", plugin.PairingStatus);
+        Assert.False(plugin.HasStoredCredential);
+        Assert.True(plugin.IsSettingsEditable);
+        Assert.True(plugin.PairCommand.CanExecute(null));
+        Assert.True(plugin.ResetPairingCommand.CanExecute(null));
+        Assert.False(plugin.TestConnectionCommand.CanExecute(null));
+
+        fixture.Pair("catalog-a", "new-token");
+        plugin.RefreshPairingState();
+        Assert.Equal("Paired", plugin.PairingStatus);
+        Assert.True(plugin.TestConnectionCommand.CanExecute(null));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ResetWorksWithPresentOrDeletedCredentials(bool deleted)
+    {
+        var fixture = new Fixture();
+        fixture.Settings.Enabled = true;
+        fixture.Settings.TargetSchedulerDatabase = "unchanged.sqlite";
+        fixture.Pair("catalog-a", "old-token");
+        var reference = fixture.Settings.CredentialReference;
+        fixture.Credentials["unrelated-profile"] = "keep";
+        if (deleted)
+        {
+            fixture.Credentials.Remove(reference);
+        }
+
+        fixture.Settings.ResetPairing();
+        fixture.Settings.EnsurePairingMetadata();
+
+        Assert.False(fixture.Settings.HasPairingMetadata);
+        Assert.Equal(string.Empty, fixture.Settings.CatalogId);
+        Assert.Equal(PairingAvailability.NotPaired,
+            fixture.Settings.GetPairingAvailability(fixture.Settings.ServerUrl));
+        Assert.False(fixture.Credentials.ContainsKey(reference));
+        Assert.Equal("keep", fixture.Credentials["unrelated-profile"]);
+        Assert.True(fixture.Settings.Enabled);
+        Assert.Equal("unchanged.sqlite", fixture.Settings.TargetSchedulerDatabase);
+        Assert.Throws<InvalidOperationException>(() => fixture.Settings.CaptureSnapshot().RequireQueueDestination());
+
+        fixture.Pair("catalog-a", "new-token");
+        Assert.Equal(reference, fixture.Settings.CredentialReference);
+        Assert.True(fixture.Settings.HasPairingCredential);
+    }
+
+    [Fact]
+    public void ResetDoesNotMigrateOldPairingBackAndPreservesLegacyQueueReference()
+    {
+        var fixture = new Fixture();
+        fixture.Options.SetValue(PluginSettings.PluginId, "CatalogId", "legacy-catalog");
+        fixture.Settings.EnsurePairingMetadata();
+        var reference = fixture.Settings.CredentialReference;
+        Assert.Equal(PluginSettings.LegacyCredentialReferenceFor(fixture.ProfileId), reference);
+
+        fixture.Settings.ResetPairing();
+        fixture.Settings.EnsurePairingMetadata();
+        Assert.False(fixture.Settings.HasPairingMetadata);
+        Assert.Equal(string.Empty, fixture.Settings.CatalogId);
+
+        fixture.Pair("other-catalog", "other-token");
+        Assert.NotEqual(reference, fixture.Settings.CredentialReference);
+        var otherReference = fixture.Settings.CredentialReference;
+        fixture.Pair("legacy-catalog", "replacement-token");
+        Assert.Equal(reference, fixture.Settings.CredentialReference);
+        Assert.Equal("other-token", fixture.Credentials[otherReference]);
+    }
+
+    [Fact]
+    public void ResetClearsMalformedMetadataWithoutDeletingUnrelatedCredentials()
+    {
+        var fixture = new Fixture();
+        fixture.Options.SetValue(PluginSettings.PluginId, "PairingMetadataV1", "not json");
+        fixture.Credentials["unrelated"] = "keep";
+        Assert.True(fixture.Settings.HasPairingMetadata);
+
+        fixture.Settings.ResetPairing();
+
+        Assert.False(fixture.Settings.HasPairingMetadata);
+        Assert.Single(fixture.Credentials);
+    }
+
+    [Fact]
+    public void CredentialStoreFailureLeavesPairingMetadataIntact()
+    {
+        var fixture = new Fixture();
+        fixture.Pair("catalog-a", "old-token");
+        fixture.FailCredentialAccess = true;
+
+        Assert.Equal(PairingAvailability.CredentialUnavailable,
+            fixture.Settings.GetPairingAvailability(fixture.Settings.ServerUrl));
+        Assert.Throws<Win32Exception>(fixture.Settings.ResetPairing);
+        Assert.True(fixture.Settings.HasPairingMetadata);
+        Assert.Equal("catalog-a", fixture.Settings.CatalogId);
+        fixture.FailCredentialAccess = false;
+        Assert.True(fixture.Settings.HasPairingCredential);
+    }
+
+    private sealed class Fixture
+    {
+        public Guid ProfileId { get; } = Guid.NewGuid();
+        public NINA.Profile.PluginSettings Options { get; } = new();
+        public Dictionary<string, string?> Credentials { get; } = [];
+        public PluginSettings Settings { get; }
+        public IProfileService Service { get; }
+        public bool FailCredentialAccess { get; set; }
+
+        public Fixture()
+        {
+            var profile = Stub<IProfile>(new()
+            {
+                ["get_Id"] = ProfileId,
+                ["get_Name"] = "Isolated test profile",
+                ["get_PluginSettings"] = Options,
+            });
+            Service = Stub<IProfileService>(new() { ["get_ActiveProfile"] = profile });
+            Settings = new PluginSettings(Service,
+                target =>
+                {
+                    if (FailCredentialAccess)
+                    {
+                        throw new Win32Exception(5);
+                    }
+                    return Credentials.GetValueOrDefault(target);
+                },
+                (target, value) =>
+                {
+                    if (FailCredentialAccess)
+                    {
+                        throw new Win32Exception(5);
+                    }
+                    if (value is null)
+                    {
+                        Credentials.Remove(target);
+                    }
+                    else
+                    {
+                        Credentials[target] = value;
+                    }
+                });
+            Settings.ServerUrl = "https://psf.example/";
+        }
+
+        public void Pair(string catalogId, string token) =>
+            Settings.StorePairing(Settings.CapturePairingTarget(), catalogId, token);
+    }
+
+    private static T Stub<T>(Dictionary<string, object?> values) where T : class
+    {
+        var stub = DispatchProxy.Create<T, GetterProxy>();
+        ((GetterProxy)(object)stub).Values = values;
+        return stub;
+    }
+
+    public class GetterProxy : DispatchProxy
+    {
+        public Dictionary<string, object?> Values { get; set; } = [];
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args) =>
+            Values.TryGetValue(targetMethod!.Name, out var value)
+                ? value
+                : throw new NotSupportedException(targetMethod.Name);
+    }
+}
