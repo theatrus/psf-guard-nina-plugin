@@ -1,5 +1,11 @@
 using System.ComponentModel;
+using System.Diagnostics;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
+using System.Text;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Automation.Peers;
 using System.Windows.Automation.Provider;
@@ -145,6 +151,105 @@ public sealed class PairingRecoveryTests
         box.SetCurrentValue(TextBox.TextProperty, text);
         DrainBindings();
         Assert.NotNull(BindingOperations.GetBindingExpression(box, TextBox.TextProperty));
+    }
+
+    internal static void VerifyResetThenPairExchange(DataTemplate template)
+    {
+        using var portReservation = new TcpListener(IPAddress.Loopback, 0);
+        portReservation.Start();
+        var port = ((IPEndPoint)portReservation.LocalEndpoint).Port;
+        portReservation.Stop();
+        using var server = new HttpListener();
+        server.Prefixes.Add($"http://127.0.0.1:{port}/");
+        server.Start();
+
+        var fixture = new Fixture();
+        fixture.Settings.ServerUrl = $"http://127.0.0.1:{port}/";
+        fixture.Pair("catalog-a", "old-token");
+        var originalDestination = fixture.Settings.CaptureSnapshot();
+        fixture.Credentials.Clear();
+        var errors = new List<string>();
+        var plugin = new PsfGuardPlugin(fixture.Service, Stub<IImageSaveMediator>([]), fixture.Settings,
+            notifySuccess: _ => { }, notifyError: errors.Add);
+        var panel = (FrameworkElement)template.LoadContent();
+        panel.DataContext = plugin;
+        panel.Measure(new Size(760, double.PositiveInfinity));
+        panel.Arrange(new Rect(panel.DesiredSize));
+        panel.UpdateLayout();
+        DrainBindings();
+
+        var buttons = Descendants<Button>(panel).ToArray();
+        var pair = buttons.Single(button => ReferenceEquals(button.Command, plugin.PairCommand));
+        var reset = buttons.Single(button => ReferenceEquals(button.Command, plugin.ResetPairingCommand));
+        var code = Descendants<TextBox>(panel).Single(box => box.Name == "PairingCodeBox");
+        Click(reset);
+        DrainBindings();
+        Assert.Equal("Not paired", plugin.PairingStatus);
+        Assert.False(plugin.IsOperationRunning);
+        Assert.Equal(originalDestination.ServerUrl, plugin.ServerUrl);
+
+        foreach (var succeed in new[] { false, true })
+        {
+            var pairingCode = succeed ? "fresh-code" : "expired-code";
+            var requestTask = server.GetContextAsync();
+            EnterText(code, pairingCode);
+            Assert.True(pair.IsEnabled);
+            Click(pair);
+            PumpUntil(() => requestTask.IsCompleted);
+            var context = requestTask.GetAwaiter().GetResult();
+            Assert.True(plugin.IsOperationRunning);
+            Assert.False(pair.IsEnabled);
+            Assert.False(code.IsEnabled);
+            Assert.False(reset.IsEnabled);
+            Assert.Equal("POST", context.Request.HttpMethod);
+            Assert.Equal("/api/sync/v1/pair", context.Request.Url!.AbsolutePath);
+            Assert.Null(context.Request.Headers["Authorization"]);
+            using (var reader = new StreamReader(context.Request.InputStream))
+            using (var body = JsonDocument.Parse(reader.ReadToEnd()))
+            {
+                Assert.Equal(pairingCode, body.RootElement.GetProperty("pairing_token").GetString());
+            }
+
+            var response = succeed
+                ? """
+                  {"success":true,"data":{"catalog_id":"catalog-a","catalog_name":"Test catalog",
+                  "client_uuid":"client-1","token":"new-token","product":"PSF Guard","product_version":"0.10.1"}}
+                  """
+                : """{"success":false,"error":"Pairing code expired"}""";
+            var bytes = Encoding.UTF8.GetBytes(response);
+            context.Response.StatusCode = succeed ? 200 : 401;
+            context.Response.ContentType = "application/json";
+            context.Response.ContentLength64 = bytes.Length;
+            context.Response.OutputStream.Write(bytes);
+            context.Response.Close();
+            PumpUntil(() => !plugin.IsOperationRunning && code.IsEnabled && (succeed || pair.IsEnabled));
+            if (!succeed)
+            {
+                Assert.Single(errors);
+                Assert.Contains("Pairing code expired", plugin.LastStatus);
+                Assert.False(plugin.HasStoredCredential);
+            }
+        }
+
+        Assert.Equal("Paired", plugin.PairingStatus);
+        Assert.Equal("catalog-a", plugin.CatalogId);
+        Assert.Empty(code.Text);
+        Assert.Equal("new-token", fixture.Credentials[fixture.Settings.CredentialReference]);
+        Assert.Equal(originalDestination, fixture.Settings.CaptureSnapshot());
+        Assert.True(plugin.TestConnectionCommand.CanExecute(null));
+        Assert.True(reset.IsEnabled);
+        panel.DataContext = null;
+    }
+
+    private static void PumpUntil(Func<bool> completed)
+    {
+        var elapsed = Stopwatch.StartNew();
+        while (!completed() && elapsed.Elapsed < TimeSpan.FromSeconds(10))
+        {
+            DrainBindings();
+            Thread.Sleep(5);
+        }
+        Assert.True(completed(), "Pairing exchange did not complete.");
     }
 
     private static void Click(Button button) =>

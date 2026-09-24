@@ -58,7 +58,7 @@ public sealed class OptionsButtonStyleTests
             BindingOperations.SetBinding(foreground, SolidColorBrush.ColorProperty,
                 new Binding(nameof(SolidColorBrush.Color)) { Source = palette });
             application.Resources["ButtonForegroundBrush"] = foreground;
-            foreach (var file in new[] { "Button", "TextBlock" })
+            foreach (var file in new[] { "Button", "TextBlock", "TextBox" })
             {
                 application.Resources.MergedDictionaries.Add(new ResourceDictionary
                 {
@@ -84,6 +84,7 @@ public sealed class OptionsButtonStyleTests
             viewModel["IsSettingsEditable"] = true;
             var template = (DataTemplate)application.Resources["PSF Guard Sync_Options"];
             PairingRecoveryTests.VerifyResetAndPairButtons(template);
+            PairingRecoveryTests.VerifyResetThenPairExchange(template);
             var panel = (FrameworkElement)template.LoadContent();
             panel.DataContext = viewModel;
             panel.Measure(new Size(760, double.PositiveInfinity));
