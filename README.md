@@ -100,6 +100,11 @@ pair with a new code for the intended database. Pairing with the same database
 restores access to its queue; use **Retry blocked** to resume blocked jobs.
 Pairing with another database does not redirect the old database's jobs.
 
+**Pair** remains available while no manual operation is running. Missing codes
+and invalid server URLs report an error in the status area instead of silently
+disabling the button. Remote servers require a full HTTPS URL; plain HTTP is
+supported only for loopback addresses such as `http://127.0.0.1:3000`.
+
 Direct upload sends each saved light independently of scheduler sync. Enable
 **Also upload calibration frames** to include bias, dark, dark-flat, and flat
 saves. PSF Guard stores them in the receive directory selected for that

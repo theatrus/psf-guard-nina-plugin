@@ -29,6 +29,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
     private readonly IProfileService profileService;
     private readonly IImageSaveMediator imageSaveMediator;
     private readonly PluginSettings settings;
+    private readonly Action<string> notifySuccess;
+    private readonly Action<string> notifyError;
     private readonly CancellationTokenSource lifetime = new();
     private readonly DurablePushQueue queue;
     private readonly DurableImageUploadQueue imageUploadQueue;
@@ -62,11 +64,15 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
     internal PsfGuardPlugin(
         IProfileService profileService,
         IImageSaveMediator imageSaveMediator,
-        PluginSettings settings)
+        PluginSettings settings,
+        Action<string>? notifySuccess = null,
+        Action<string>? notifyError = null)
     {
         this.profileService = profileService;
         this.imageSaveMediator = imageSaveMediator;
         this.settings = settings;
+        this.notifySuccess = notifySuccess ?? Notification.ShowSuccess;
+        this.notifyError = notifyError ?? Notification.ShowError;
         queue = new DurablePushQueue(
             Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -88,8 +94,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
             () => RunCommandAsync(TestConnectionAsync, "Testing the PSF Guard connection..."),
             CanUseRemote);
         PairCommand = CreateManualCommand(
-            () => RunCommandAsync(PairAsync, "Pairing with PSF Guard..."),
-            CanPair);
+            () => RunCommandAsync(PairAsync, "Pairing with PSF Guard..."));
         ResetPairingCommand = CreateManualCommand(
             () => RunCommandAsync(
                 _ =>
@@ -726,7 +731,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
             SetOperationStatus(operationId, startingStatus);
             var result = await operation(lifetime.Token).ConfigureAwait(false);
             SetOperationStatus(operationId, result);
-            Notification.ShowSuccess(result);
+            notifySuccess(result);
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
         {
@@ -735,7 +740,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         {
             Logger.Error(exception);
             SetOperationStatus(operationId, exception.Message);
-            Notification.ShowError(exception.Message);
+            notifyError(exception.Message);
         }
         finally
         {
@@ -1013,10 +1018,6 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
 
         RaiseCommandStates();
     }
-
-    private bool CanPair() =>
-        !string.IsNullOrWhiteSpace(PairingCode)
-        && TryGetServerUri(ServerUrl, out _);
 
     private bool CanUseRemote() =>
         settings.IsPairedForServer(ServerUrl)

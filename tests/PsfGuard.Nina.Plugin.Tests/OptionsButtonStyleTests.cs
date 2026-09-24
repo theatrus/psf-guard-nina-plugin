@@ -83,6 +83,7 @@ public sealed class OptionsButtonStyleTests
             viewModel["Enabled"] = true;
             viewModel["IsSettingsEditable"] = true;
             var template = (DataTemplate)application.Resources["PSF Guard Sync_Options"];
+            PairingRecoveryTests.VerifyResetAndPairButtons(template);
             var panel = (FrameworkElement)template.LoadContent();
             panel.DataContext = viewModel;
             panel.Measure(new Size(760, double.PositiveInfinity));

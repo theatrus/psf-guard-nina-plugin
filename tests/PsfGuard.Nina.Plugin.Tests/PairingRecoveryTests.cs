@@ -1,5 +1,12 @@
 using System.ComponentModel;
 using System.Reflection;
+using System.Windows;
+using System.Windows.Automation.Peers;
+using System.Windows.Automation.Provider;
+using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Media;
+using System.Windows.Threading;
 using NINA.Profile.Interfaces;
 using NINA.WPF.Base.Interfaces.Mediator;
 
@@ -53,6 +60,113 @@ public sealed class PairingRecoveryTests
         plugin.RefreshPairingState();
         Assert.Equal("Paired", plugin.PairingStatus);
         Assert.True(plugin.TestConnectionCommand.CanExecute(null));
+    }
+
+    internal static void VerifyResetAndPairButtons(DataTemplate template)
+    {
+        foreach (var deleted in new[] { false, true })
+        {
+            var fixture = new Fixture();
+            fixture.Settings.TargetSchedulerDatabase = string.Empty;
+            fixture.Pair("catalog-a", "old-token");
+            if (deleted)
+            {
+                fixture.Credentials.Clear();
+            }
+            var errors = new List<string>();
+            PsfGuardPlugin? plugin = null;
+            plugin = new PsfGuardPlugin(fixture.Service, Stub<IImageSaveMediator>([]), fixture.Settings,
+                notifySuccess: _ => Assert.False(plugin!.PairCommand.CanExecute(null)),
+                notifyError: message =>
+                {
+                    Assert.False(plugin!.PairCommand.CanExecute(null));
+                    errors.Add(message);
+                });
+            var panel = (FrameworkElement)template.LoadContent();
+            panel.DataContext = plugin;
+            panel.Measure(new Size(760, double.PositiveInfinity));
+            panel.Arrange(new Rect(panel.DesiredSize));
+            panel.UpdateLayout();
+            DrainBindings();
+
+            var buttons = Descendants<Button>(panel).ToArray();
+            var pair = buttons.Single(button => ReferenceEquals(button.Command, plugin.PairCommand));
+            var reset = buttons.Single(button => ReferenceEquals(button.Command, plugin.ResetPairingCommand));
+            var code = Descendants<TextBox>(panel).Single(box => box.Name == "PairingCodeBox");
+            var url = Descendants<TextBox>(panel).Single(box => box.Name == "ServerUrlBox");
+            Assert.True(reset.IsEnabled);
+            Click(reset);
+            DrainBindings();
+            Assert.False(plugin.IsOperationRunning);
+            Assert.Equal("Not paired", plugin.PairingStatus);
+            Assert.Empty(fixture.Credentials);
+            Assert.False(reset.IsEnabled);
+
+            EnterText(code, "fresh-code");
+            Assert.Equal("fresh-code", plugin.PairingCode);
+            Assert.True(pair.IsEnabled);
+            Assert.False(plugin.Enabled); // Manual pairing does not require automation.
+            Assert.Empty(plugin.TargetSchedulerDatabase);
+
+            foreach (var invalidUrl in new[] { "", "psf.example", "http://192.168.1.10:3000", "ftp://psf.example" })
+            {
+                EnterText(url, invalidUrl);
+                EnterText(code, "fresh-code");
+                Assert.True(pair.IsEnabled);
+                Click(pair);
+                DrainBindings();
+                Assert.Contains("HTTPS", plugin.LastStatus);
+                Assert.Equal(plugin.LastStatus, errors[^1]);
+                Assert.DoesNotContain("fresh-code", plugin.LastStatus);
+                Assert.False(plugin.IsOperationRunning);
+                Assert.True(pair.IsEnabled);
+                Assert.Empty(fixture.Credentials);
+            }
+
+            foreach (var validUrl in new[] { "https://psf.example", "http://127.0.0.1:3000", "http://[::1]:3000" })
+            {
+                EnterText(url, validUrl);
+                Assert.Empty(code.Text);
+                Assert.True(pair.IsEnabled);
+                Click(pair);
+                DrainBindings();
+                Assert.Contains("Enter the pairing code", plugin.LastStatus);
+                EnterText(code, "fresh-code");
+                Assert.True(pair.IsEnabled);
+                Assert.True(plugin.IsSettingsEditable);
+            }
+
+            panel.DataContext = null;
+        }
+    }
+
+    private static void EnterText(TextBox box, string text)
+    {
+        box.SetCurrentValue(TextBox.TextProperty, text);
+        DrainBindings();
+        Assert.NotNull(BindingOperations.GetBindingExpression(box, TextBox.TextProperty));
+    }
+
+    private static void Click(Button button) =>
+        ((IInvokeProvider)new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke)).Invoke();
+
+    private static void DrainBindings() =>
+        Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+
+    private static IEnumerable<T> Descendants<T>(DependencyObject parent) where T : DependencyObject
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is T match)
+            {
+                yield return match;
+            }
+            foreach (var descendant in Descendants<T>(child))
+            {
+                yield return descendant;
+            }
+        }
     }
 
     [Theory]
