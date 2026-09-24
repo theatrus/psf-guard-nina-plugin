@@ -65,6 +65,44 @@ Target Scheduler's default database is:
 
 ## Build
 
+### Pairing recovery verification
+
+To opt into testing the real Windows credential store on a development machine:
+
+```powershell
+$env:PSF_GUARD_TEST_NATIVE_CREDENTIALS = '1'
+dotnet test tests\PsfGuard.Nina.Plugin.Tests\PsfGuard.Nina.Plugin.Tests.csproj --configuration Release --filter FullyQualifiedName~OptionsButtonStyleTests
+Remove-Item Env:\PSF_GUARD_TEST_NATIVE_CREDENTIALS
+```
+
+This creates a disposable credential under a random test profile ID, deletes
+that exact entry with `cmdkey` while the plugin controls remain loaded, resets,
+and re-pairs against a temporary loopback HTTP fixture. It checks rejection and
+retry as well as success. Cleanup removes only credentials created by the test.
+Normal test runs use an in-memory store. Neither mode runs the full NINA host.
+
+For a manual check in the actual NINA application:
+
+1. Use a disposable NINA profile and PSF Guard catalog. Record the NINA and
+   plugin versions, pair successfully, and leave the plugin settings open.
+2. In Windows Credential Manager, remove only the test profile's
+   `PSFGuard.Nina.Plugin/<profile-id>/...` entry. Keep NINA running.
+3. Return to the same settings page, select **Reset pairing**, generate a
+   fresh one-time code for the same catalog, and enter it without changing the
+   server URL. Check whether **Pair** enables and whether pairing succeeds.
+4. If it stays disabled, capture the connection section and status with the
+   code hidden before navigating away. Record whether the server URL and code
+   fields are editable, and whether **Reset pairing** is still enabled.
+5. Only after capturing the stuck state, close/reopen the plugin settings,
+   then restart NINA if necessary. Record which step restores the button.
+6. Repeat with a sync operation in progress at deletion time using only test
+   data. Record when the operation ends and whether controls recover afterward.
+
+Keep codes and credential values out of screenshots and shared logs. Revoke
+the disposable server pairing and remove its local credential when finished.
+
+### Compile
+
 ```powershell
 dotnet restore PsfGuard.Nina.sln
 dotnet test PsfGuard.Nina.sln --configuration Release

@@ -153,7 +153,7 @@ public sealed class PairingRecoveryTests
         Assert.NotNull(BindingOperations.GetBindingExpression(box, TextBox.TextProperty));
     }
 
-    internal static void VerifyResetThenPairExchange(DataTemplate template)
+    internal static void VerifyResetThenPairExchange(DataTemplate template, bool nativeCredentials = false)
     {
         using var portReservation = new TcpListener(IPAddress.Loopback, 0);
         portReservation.Start();
@@ -163,11 +163,10 @@ public sealed class PairingRecoveryTests
         server.Prefixes.Add($"http://127.0.0.1:{port}/");
         server.Start();
 
-        var fixture = new Fixture();
+        using var fixture = new Fixture(nativeCredentials);
         fixture.Settings.ServerUrl = $"http://127.0.0.1:{port}/";
         fixture.Pair("catalog-a", "old-token");
         var originalDestination = fixture.Settings.CaptureSnapshot();
-        fixture.Credentials.Clear();
         var errors = new List<string>();
         var plugin = new PsfGuardPlugin(fixture.Service, Stub<IImageSaveMediator>([]), fixture.Settings,
             notifySuccess: _ => { }, notifyError: errors.Add);
@@ -182,6 +181,11 @@ public sealed class PairingRecoveryTests
         var pair = buttons.Single(button => ReferenceEquals(button.Command, plugin.PairCommand));
         var reset = buttons.Single(button => ReferenceEquals(button.Command, plugin.ResetPairingCommand));
         var code = Descendants<TextBox>(panel).Single(box => box.Name == "PairingCodeBox");
+        Assert.Equal("Paired", plugin.PairingStatus);
+        // Delete outside the plugin while its controls are still bound and loaded.
+        fixture.DeleteCredentialExternally();
+        Assert.Equal("Credential missing; pair with a new code", plugin.PairingStatus);
+        Assert.False(plugin.TestConnectionCommand.CanExecute(null));
         Click(reset);
         DrainBindings();
         Assert.Equal("Not paired", plugin.PairingStatus);
@@ -234,7 +238,7 @@ public sealed class PairingRecoveryTests
         Assert.Equal("Paired", plugin.PairingStatus);
         Assert.Equal("catalog-a", plugin.CatalogId);
         Assert.Empty(code.Text);
-        Assert.Equal("new-token", fixture.Credentials[fixture.Settings.CredentialReference]);
+        Assert.Equal("new-token", fixture.ReadCredential(fixture.Settings.CredentialReference));
         Assert.Equal(originalDestination, fixture.Settings.CaptureSnapshot());
         Assert.True(plugin.TestConnectionCommand.CanExecute(null));
         Assert.True(reset.IsEnabled);
@@ -360,8 +364,10 @@ public sealed class PairingRecoveryTests
         Assert.True(fixture.Settings.HasPairingCredential);
     }
 
-    private sealed class Fixture
+    private sealed class Fixture : IDisposable
     {
+        private readonly bool nativeCredentials;
+        private readonly HashSet<string> ownedCredentials = [];
         public Guid ProfileId { get; } = Guid.NewGuid();
         public NINA.Profile.PluginSettings Options { get; } = new();
         public Dictionary<string, string?> Credentials { get; } = [];
@@ -369,8 +375,9 @@ public sealed class PairingRecoveryTests
         public IProfileService Service { get; }
         public bool FailCredentialAccess { get; set; }
 
-        public Fixture()
+        public Fixture(bool nativeCredentials = false)
         {
+            this.nativeCredentials = nativeCredentials;
             var profile = Stub<IProfile>(new()
             {
                 ["get_Id"] = ProfileId,
@@ -385,13 +392,23 @@ public sealed class PairingRecoveryTests
                     {
                         throw new Win32Exception(5);
                     }
-                    return Credentials.GetValueOrDefault(target);
+                    return ReadCredential(target);
                 },
                 (target, value) =>
                 {
                     if (FailCredentialAccess)
                     {
                         throw new Win32Exception(5);
+                    }
+                    if (nativeCredentials)
+                    {
+                        if (!ownedCredentials.Contains(target))
+                        {
+                            Assert.Null(WindowsCredentialStore.Read(target));
+                            ownedCredentials.Add(target);
+                        }
+                        WindowsCredentialStore.Write(target, value);
+                        return;
                     }
                     if (value is null)
                     {
@@ -407,6 +424,48 @@ public sealed class PairingRecoveryTests
 
         public void Pair(string catalogId, string token) =>
             Settings.StorePairing(Settings.CapturePairingTarget(), catalogId, token);
+
+        public string? ReadCredential(string target) => nativeCredentials
+            ? WindowsCredentialStore.Read(target)
+            : Credentials.GetValueOrDefault(target);
+
+        public void DeleteCredentialExternally()
+        {
+            var target = Settings.CredentialReference;
+            if (!nativeCredentials)
+            {
+                Credentials.Remove(target);
+                return;
+            }
+
+            Assert.Contains(target, ownedCredentials);
+            var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmdkey.exe"))
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            start.ArgumentList.Add($"/delete:{target}");
+            using var process = Process.Start(start)!;
+            if (!process.WaitForExit(5000))
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit();
+                throw new TimeoutException("Deleting the disposable test credential timed out.");
+            }
+            Assert.Equal(0, process.ExitCode);
+            Assert.Null(WindowsCredentialStore.Read(target));
+        }
+
+        public void Dispose()
+        {
+            foreach (var target in ownedCredentials)
+            {
+                WindowsCredentialStore.Write(target, null);
+                Assert.Null(WindowsCredentialStore.Read(target));
+            }
+        }
     }
 
     private static T Stub<T>(Dictionary<string, object?> values) where T : class

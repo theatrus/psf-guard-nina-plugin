@@ -85,6 +85,10 @@ public sealed class OptionsButtonStyleTests
             var template = (DataTemplate)application.Resources["PSF Guard Sync_Options"];
             PairingRecoveryTests.VerifyResetAndPairButtons(template);
             PairingRecoveryTests.VerifyResetThenPairExchange(template);
+            if (Environment.GetEnvironmentVariable("PSF_GUARD_TEST_NATIVE_CREDENTIALS") == "1")
+            {
+                PairingRecoveryTests.VerifyResetThenPairExchange(template, nativeCredentials: true);
+            }
             var panel = (FrameworkElement)template.LoadContent();
             panel.DataContext = viewModel;
             panel.Measure(new Size(760, double.PositiveInfinity));
