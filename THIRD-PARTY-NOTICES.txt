@@ -9,11 +9,37 @@ Corresponding source, build instructions, and dependency lock files:
 https://github.com/theatrus/psf-guard-nina-plugin
 
 Each release's source tag matches its four-part plugin version. For example,
-the source for version 0.4.0.17 is:
-https://github.com/theatrus/psf-guard-nina-plugin/tree/0.4.0.17
+the source for version 0.4.0.18 is:
+https://github.com/theatrus/psf-guard-nina-plugin/tree/0.4.0.18
 
 The release archive includes debug symbols for the two plugin assemblies.
 N.I.N.A. and its .NET runtime are installed separately, not bundled here.
+
+N.I.N.A. Target Scheduler - database compatibility
+================================================
+
+Credit: Tom Palmer (@tcpalmer) and Target Scheduler contributors.
+Project and source: https://github.com/tcpalmer/nina.plugin.targetscheduler
+Documentation: https://tcpalmer.github.io/nina-scheduler/
+License: Mozilla Public License 2.0 (MPL-2.0).
+Upstream license:
+https://github.com/tcpalmer/nina.plugin.targetscheduler/blob/main/LICENSE.txt
+The full MPL-2.0 text is also included in this archive as LICENSE.
+
+PSF Guard Sync's database compatibility work and test fixtures are based on
+Target Scheduler's database definitions and behavior: projects, targets,
+exposure templates and plans, acquired images, grading and accepted-count
+semantics, thumbnails, and flat-history coverage. Thank you to Tom Palmer
+and the contributors who built and maintain that foundation.
+
+Database schema and migrations:
+https://github.com/tcpalmer/nina.plugin.targetscheduler/tree/main/NINA.Plugin.TargetScheduler/Database
+
+Target Scheduler itself is installed separately; no Target Scheduler plugin
+assembly is bundled in this archive. These credits describe the software
+and database-format provenance, not ownership or licensing of the user's
+catalog entries, observing metadata, or image files. Synchronization does
+not place that user data under MPL-2.0.
 
 System.Data.SQLite Core 1.0.119
 ==============================
@@ -27,9 +53,17 @@ Copyright statement:
 https://system.data.sqlite.org/home/doc/trunk/www/copyright.wiki
 SQLite copyright statement: https://www.sqlite.org/copyright.html
 
-The shipped SQLite core and ADO.NET provider are dedicated to the public
-domain by their authors. The System.Data.SQLite LINQ and EF6 assemblies
-contain separate MS-PL code; neither assembly is included in this package.
+The shipped SQLite core and ADO.NET provider are public domain software,
+dedicated by their authors. The original code may be used, modified, and
+redistributed in source or binary form for any purpose. This public-domain
+statement applies to the shipped library, not to the contents of a user's
+SQLite database.
 
-This inventory covers the runtime files actually shipped in the plugin ZIP,
-not every development dependency or assembly provided by N.I.N.A.
+The System.Data.SQLite LINQ and EF6 assemblies contain separate MS-PL code;
+neither assembly is included in this package. The provider license must not
+be confused with Target Scheduler's MPL-2.0 database software or the user's
+catalog and image data.
+
+This inventory covers the runtime files actually shipped in the plugin ZIP
+and credits Target Scheduler's database contract. It does not list every
+development dependency or assembly provided by N.I.N.A.

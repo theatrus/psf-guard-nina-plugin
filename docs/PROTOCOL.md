@@ -4,6 +4,15 @@ This document pins the client contract used by the N.I.N.A. plugin. It follows
 PSF Guard's data-transfer design: the wire format is versioned and moves
 logical rows, never a live SQLite file.
 
+The Target Scheduler database contract comes from Tom Palmer (@tcpalmer) and
+contributors' [MPL-2.0 project](https://github.com/tcpalmer/nina.plugin.targetscheduler).
+Our compatibility layer and fixture schemas follow its table relationships,
+grading meanings, progress counters, and flat-history behavior. See
+[third-party notices](../THIRD-PARTY-NOTICES.txt) for attribution and database
+license details. Target Scheduler assemblies are not bundled; the shipped
+SQLite engine and ADO.NET provider are public domain. These software notices
+do not relicense users' catalog or image data.
+
 ## Transport
 
 - Base path: `/api/sync/v1`

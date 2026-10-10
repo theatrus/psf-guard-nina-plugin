@@ -19,6 +19,9 @@
 - A protocol change requires matching updates to `docs/PROTOCOL.md` and tests.
 - Never open a PR against upstream `isbeorn/nina.plugin.manifests`. Yann
   handles upstream submissions; provide suggested submission text in chat.
+- Preserve Target Scheduler's database-format attribution to Tom Palmer and
+  contributors. Keep shipped database dependency versions and licenses in
+  `THIRD-PARTY-NOTICES.txt`; do not imply they license users' catalog contents.
 - Run:
 
   ```powershell

@@ -3,6 +3,8 @@ using System.IO;
 
 namespace PsfGuard.Nina.Sync.Tests;
 
+// Compatibility fixture based on Tom Palmer's MPL-2.0 Target Scheduler
+// database definitions. See THIRD-PARTY-NOTICES.txt for attribution and source.
 internal sealed class TestDatabase : IDisposable
 {
     public TestDatabase()

@@ -37,18 +37,23 @@ try {
     } 'Missing package source'
 
     # Mutate separate archives so each guard is exercised independently.
-    foreach ($case in @('missing', 'extra', 'duplicate', 'changed-notice', 'checksum')) {
+    foreach ($case in @('missing', 'missing-db-notice', 'extra', 'duplicate', 'changed-notice', 'changed-db-notice', 'checksum')) {
         $archive = Join-Path $testRoot "$case.zip"
         Copy-Item -LiteralPath $validZip -Destination $archive
         $zip = [IO.Compression.ZipFile]::Open($archive, [IO.Compression.ZipArchiveMode]::Update)
         try {
             switch ($case) {
                 'missing' { $zip.GetEntry('LICENSE').Delete() }
+                'missing-db-notice' { $zip.GetEntry('THIRD-PARTY-NOTICES.txt').Delete() }
                 'extra' { $null = $zip.CreateEntry('unexpected.dll') }
                 'duplicate' { $null = $zip.CreateEntry('LICENSE') }
                 'changed-notice' {
                     $zip.GetEntry('PRIVACY.md').Delete()
                     $null = $zip.CreateEntry('PRIVACY.md')
+                }
+                'changed-db-notice' {
+                    $zip.GetEntry('THIRD-PARTY-NOTICES.txt').Delete()
+                    $null = $zip.CreateEntry('THIRD-PARTY-NOTICES.txt')
                 }
                 'checksum' { $null = $zip.CreateEntry('checksum-mismatch') }
             }
@@ -58,6 +63,7 @@ try {
         if ($case -ne 'checksum') { Write-TestManifest $archive }
         $expected = switch ($case) {
             'changed-notice' { 'notice differs from source' }
+            'changed-db-notice' { 'notice differs from source' }
             'checksum' { 'checksum does not match' }
             default { 'missing, extra, or duplicate' }
         }

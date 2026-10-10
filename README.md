@@ -478,6 +478,22 @@ validate releases, and confirm licensing before distribution or an upstream
 submission. Report bugs in the
 [issue tracker](https://github.com/theatrus/psf-guard-nina-plugin/issues).
 
+## Acknowledgements
+
+[Target Scheduler](https://github.com/tcpalmer/nina.plugin.targetscheduler)
+by **Tom Palmer (@tcpalmer) and contributors** provides the database foundation
+this integration works with. Its project, target, exposure-plan, capture,
+grading, and flat-history definitions guide our compatibility layer and test
+fixtures. Target Scheduler is MPL-2.0 software and is installed separately,
+not bundled in PSF Guard Sync.
+
+Database access uses the public-domain SQLite engine and System.Data.SQLite
+ADO.NET provider. The separate MS-PL LINQ/EF6 assemblies are not shipped.
+See [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) for source, license, and
+database-provenance details. That file and the full MPL-2.0 license are included
+in every release ZIP. Software licenses do not change ownership or licensing
+of the user's catalogs, metadata, or image files.
+
 ## License
 
 Mozilla Public License 2.0. See [LICENSE](LICENSE).
