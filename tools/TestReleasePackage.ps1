@@ -42,6 +42,26 @@ try {
             $stream.Dispose()
         }
     }
+    $reader = [IO.StreamReader]::new($zip.GetEntry('THIRD-PARTY-NOTICES.txt').Open())
+    try {
+        $databaseNotices = $reader.ReadToEnd()
+        foreach ($credit in @(
+            'Tom Palmer (@tcpalmer)',
+            'https://github.com/tcpalmer/nina.plugin.targetscheduler',
+            'MPL-2.0',
+            'System.Data.SQLite',
+            'https://www.sqlite.org/copyright.html',
+            'public domain',
+            'MS-PL',
+            'neither assembly is included'
+        )) {
+            if (!$databaseNotices.Contains($credit, [StringComparison]::Ordinal)) {
+                throw "Missing database attribution in the release package: $credit"
+            }
+        }
+    } finally {
+        $reader.Dispose()
+    }
 } finally {
     $zip.Dispose()
 }
