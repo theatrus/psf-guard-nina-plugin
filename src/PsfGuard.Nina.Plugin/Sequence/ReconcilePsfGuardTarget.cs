@@ -7,7 +7,7 @@ using NINA.Sequencer.SequenceItem;
 namespace PsfGuard.Nina.Plugin.Sequence;
 
 [ExportMetadata("Name", "Reconcile current target with PSF Guard")]
-[ExportMetadata("Description", "Push the enclosing target's structure and captures, then wait for the remote preview")]
+[ExportMetadata("Description", "Push the enclosing target's structure and captures, then apply the remote preview")]
 [ExportMetadata("Icon", "LoopSVG")]
 [ExportMetadata("Category", "PSF Guard Sync")]
 [Export(typeof(ISequenceItem))]
@@ -38,7 +38,7 @@ public sealed class ReconcilePsfGuardTarget : PsfGuardSequenceItemBase
         await CreateOrchestrator(captureSettings)
             .ReconcileTargetAsync(
                 targetName,
-                captureSettings.AutoApplyPushes,
+                apply: true,
                 token,
                 CreateSyncProgress(progress))
             .ConfigureAwait(false);

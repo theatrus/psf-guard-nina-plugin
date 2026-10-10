@@ -40,8 +40,6 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
         }
     }
 
-    protected bool AutoApplyPushes => settings.AutoApplyPushes;
-    protected bool RoundTripReconcile => settings.RoundTripReconcile;
     protected virtual bool RequiresTargetScheduler => true;
 
     private protected PluginSettingsSnapshot CaptureSettingsSnapshot() =>

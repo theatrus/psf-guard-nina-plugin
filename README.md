@@ -208,9 +208,11 @@ PSF Guard applies the incoming snapshot, the plugin downloads the resulting
 catalog with `include_thumbnails: false` and transactionally merges it back into
 Target Scheduler. This requires the thumbnail export option introduced by
 [PSF Guard #353](https://github.com/theatrus/psf-guard/pull/353). The plugin
-rejects a legacy response that still contains `imagedata`. Sequencer round trips
-require automatic preview apply; ordinary sequencer pushes may leave a staged
-preview for PSF Guard #353's Data Transfer UI.
+rejects a legacy response that still contains `imagedata`. Sequencer reconcile
+instructions always apply their preview, regardless of **Apply remote previews
+automatically**, so round trips work with that setting off too. Other sequencer
+push instructions still follow that setting and may leave a staged preview for
+PSF Guard's Data Transfer UI.
 
 Queue records retain their original server, catalog, and profile-specific
 Credential Manager reference. They never store the pairing credential itself
@@ -281,15 +283,16 @@ advanced sequencer:
 - **Push PSF Guard grades** sends reviewed Target Scheduler grades and rejection
   reasons to PSF Guard and waits for the preview or apply.
 - **Reconcile PSF Guard catalog** pushes a fresh full scheduler snapshot and
-  waits until PSF Guard creates, and optionally applies, its preview. It is
+  waits until PSF Guard creates and applies its preview. It is
   suitable for session-end instructions.
 - **Reconcile current target with PSF Guard** pushes only the enclosing target's
-  project, plans, captures, and optional thumbnails. Put it inside a target
-  container near that target's end.
+  project, plans, captures, and optional thumbnails, then applies the preview.
+  Put it inside a target container near that target's end.
 - **PSF Guard target sync** is an Advanced Sequencer
   trigger. Add it to a target or an ancestor trigger set and choose how many
   successfully completed light exposures occur between target-scoped
-  reconciliations. Its counter resets when the active target changes.
+  reconciliations. It applies each preview before returning. Its counter resets
+  when the active target changes.
 - **PSF Guard exposure sync** waits for the completed save and Target Scheduler
   commit, then pushes only that acquired-image row and its required parent
   records. Its optional **Upload image** switch sends the same saved file after

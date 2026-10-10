@@ -1,4 +1,5 @@
 using System.Data.SQLite;
+using System.IO;
 
 namespace PsfGuard.Nina.Sync.Tests;
 

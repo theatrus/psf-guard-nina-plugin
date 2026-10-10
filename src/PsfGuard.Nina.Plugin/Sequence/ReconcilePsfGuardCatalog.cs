@@ -7,7 +7,7 @@ using NINA.Sequencer.SequenceItem;
 namespace PsfGuard.Nina.Plugin.Sequence;
 
 [ExportMetadata("Name", "Reconcile PSF Guard catalog")]
-[ExportMetadata("Description", "Push a current Target Scheduler snapshot, including captures, and wait for the remote preview")]
+[ExportMetadata("Description", "Push a current Target Scheduler snapshot, including captures, and apply the remote preview")]
 [ExportMetadata("Icon", "LoopSVG")]
 [ExportMetadata("Category", "PSF Guard Sync")]
 [Export(typeof(ISequenceItem))]
@@ -31,13 +31,7 @@ public sealed class ReconcilePsfGuardCatalog : PsfGuardSequenceItemBase
     {
         using var status = BeginStatus(progress);
         var captureSettings = CaptureSettingsSnapshot();
-        var autoApply = captureSettings.AutoApplyPushes;
         var roundTrip = captureSettings.RoundTripReconcile;
-        if (roundTrip && !autoApply)
-        {
-            throw new InvalidOperationException(
-                "Full round-trip reconcile requires automatic preview apply for sequencer use.");
-        }
         Report(progress, "Waiting for scheduler...");
         await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
         Report(progress, "Reconciling catalog...");
@@ -53,7 +47,7 @@ public sealed class ReconcilePsfGuardCatalog : PsfGuardSequenceItemBase
         }
 
         var receipt = await orchestrator
-            .ReconcileCatalogAsync(autoApply, token, reconcileProgress)
+            .ReconcileCatalogAsync(apply: true, token, reconcileProgress)
             .ConfigureAwait(false);
         if (roundTrip && receipt.Applied)
         {
@@ -67,13 +61,4 @@ public sealed class ReconcilePsfGuardCatalog : PsfGuardSequenceItemBase
 
     public override string ToString() =>
         $"Category: {Category}, Item: {nameof(ReconcilePsfGuardCatalog)}";
-
-    protected override void AddValidationIssues(List<string> validationIssues)
-    {
-        if (RoundTripReconcile && !AutoApplyPushes)
-        {
-            validationIssues.Add(
-                "Full round-trip reconcile requires automatic preview apply for sequencer use.");
-        }
-    }
 }

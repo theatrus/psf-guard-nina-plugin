@@ -9,6 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="..\PsfGuard.Nina.Sync.Tests\TestDatabase.cs" Link="TestDatabase.cs" />
     <ProjectReference Include="..\..\src\PsfGuard.Nina.Plugin\PsfGuard.Nina.Plugin.csproj" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
     <PackageReference Include="xunit" Version="2.9.2" />
