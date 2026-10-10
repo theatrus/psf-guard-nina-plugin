@@ -11,7 +11,7 @@ using NINA.Sequencer.Trigger;
 namespace PsfGuard.Nina.Plugin.Sequence;
 
 [ExportMetadata("Name", "PSF Guard target sync")]
-[ExportMetadata("Description", "Push the current target to PSF Guard after a configurable number of completed light exposures")]
+[ExportMetadata("Description", "Reconcile and apply the current target in PSF Guard after a configurable number of completed light exposures")]
 [ExportMetadata("Icon", "LoopSVG")]
 [ExportMetadata("Category", "PSF Guard Sync")]
 [Export(typeof(ISequenceTrigger))]
@@ -96,7 +96,7 @@ public sealed class ReconcilePsfGuardTargetAfterExposures : PsfGuardSequenceTrig
         await CreateOrchestrator(captureSettings)
             .ReconcileTargetAsync(
                 targetName,
-                captureSettings.AutoApplyPushes,
+                apply: true,
                 token,
                 CreateSyncProgress(progress))
             .ConfigureAwait(false);
