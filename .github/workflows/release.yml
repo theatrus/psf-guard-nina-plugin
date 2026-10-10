@@ -57,14 +57,9 @@ jobs:
       - name: Prepare plugin package
         shell: pwsh
         run: |
-          $package = "artifacts/package/${{ env.PLUGIN_NAME }}"
-          New-Item -ItemType Directory -Force -Path "$package/dll/x64" | Out-Null
-          Copy-Item "artifacts/plugin/${{ env.PLUGIN_DLL_NAME }}.dll" $package
-          Copy-Item "artifacts/plugin/${{ env.PLUGIN_DLL_NAME }}.pdb" $package
-          Copy-Item "artifacts/plugin/PsfGuard.Nina.Sync.dll" $package
-          Copy-Item "artifacts/plugin/PsfGuard.Nina.Sync.pdb" $package
-          Copy-Item "artifacts/plugin/System.Data.SQLite.dll" $package
-          Copy-Item "artifacts/plugin/runtimes/win-x64/native/SQLite.Interop.dll" "$package/dll/x64"
+          ./tools/PreparePluginPackage.ps1 `
+            -BuildOutput artifacts/plugin `
+            -PackageDirectory "artifacts/package/${{ env.PLUGIN_NAME }}"
 
       - name: Generate archive and manifest
         shell: pwsh
@@ -85,6 +80,13 @@ jobs:
           ./CreateManifest.ps1 @manifestArgs
           Move-Item "${{ env.PLUGIN_DLL_NAME }}.zip" "${{ env.RELEASE_PREFIX }}.${{ env.RELEASE_VERSION }}.zip"
           Move-Item "manifest.json" "${{ env.RELEASE_PREFIX }}.${{ env.RELEASE_VERSION }}.manifest.json"
+
+      - name: Verify archive and bundled notices
+        shell: pwsh
+        run: |
+          ./tools/TestReleasePackage.ps1 `
+            -Archive "${{ env.RELEASE_PREFIX }}.${{ env.RELEASE_VERSION }}.zip" `
+            -Manifest "${{ env.RELEASE_PREFIX }}.${{ env.RELEASE_VERSION }}.manifest.json"
 
       - name: Create GitHub release
         if: github.event_name == 'push'

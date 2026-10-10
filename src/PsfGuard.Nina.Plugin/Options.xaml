@@ -46,6 +46,16 @@
             IsEnabled="{Binding IsSettingsEditable}"
             Text="{Binding ServerUrl, UpdateSourceTrigger=PropertyChanged}" />
 
+          <TextBlock Margin="0,8,0,4" TextWrapping="Wrap"
+            Text="Pair only with a server you trust. Pairing sends your machine and profile names; sync can send catalog metadata and file paths, and uploads send original images and their headers." />
+          <TextBlock Margin="0,0,0,4" TextWrapping="Wrap">
+            <Hyperlink
+              Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type TextBlock}}}"
+              NavigateUri="https://github.com/theatrus/psf-guard-nina-plugin/blob/main/docs/PRIVACY.md"
+              RequestNavigate="PrivacyLinkRequestNavigate">Data and privacy</Hyperlink>
+            <Run Text=". Pairing does not enable capture automation or image uploads." />
+          </TextBlock>
+
           <StackPanel Margin="0,9,0,3" Orientation="Horizontal">
             <TextBlock Margin="0,0,8,0" Text="Pairing status" />
             <TextBlock FontWeight="SemiBold" Text="{Binding PairingStatus}" />
@@ -111,6 +121,8 @@
             Content="Enable PSF Guard for this N.I.N.A. profile"
             IsChecked="{Binding Enabled}"
             Style="{StaticResource OptionStyle}" />
+          <TextBlock Margin="0,0,0,8" TextWrapping="Wrap"
+            Text="Turning this off stops new capture automation and sequencer sync, not queued transfers. Manual commands remain available." />
           <Separator Margin="0,0,0,10" />
           <StackPanel Margin="20,0,0,0" IsEnabled="{Binding Enabled}">
             <TextBlock
@@ -145,18 +157,22 @@
       </GroupBox>
 
       <GroupBox Header="Queue recovery" Style="{StaticResource SectionStyle}">
-        <WrapPanel>
-          <Button
-            Command="{Binding StartQueuedUploadsCommand}"
-            Style="{StaticResource ActionStyle}">
-            <TextBlock Text="Start queued uploads" Style="{StaticResource ActionLabelStyle}" />
-          </Button>
-          <Button
-            Command="{Binding RetryBlockedCommand}"
-            Style="{StaticResource ActionStyle}">
-            <TextBlock Text="Retry blocked" Style="{StaticResource ActionLabelStyle}" />
-          </Button>
-        </WrapPanel>
+        <StackPanel>
+          <TextBlock Margin="0,0,0,8" TextWrapping="Wrap"
+            Text="Queued transfers can resume when N.I.N.A. starts, even with automation off. They keep their original server, catalog, and profile. Close N.I.N.A. to stop local transfers; revoke the pairing on the server to prevent future access." />
+          <WrapPanel>
+            <Button
+              Command="{Binding StartQueuedUploadsCommand}"
+              Style="{StaticResource ActionStyle}">
+              <TextBlock Text="Start queued uploads" Style="{StaticResource ActionLabelStyle}" />
+            </Button>
+            <Button
+              Command="{Binding RetryBlockedCommand}"
+              Style="{StaticResource ActionStyle}">
+              <TextBlock Text="Retry blocked" Style="{StaticResource ActionLabelStyle}" />
+            </Button>
+          </WrapPanel>
+        </StackPanel>
       </GroupBox>
 
       <GroupBox Header="Catalog synchronization" Style="{StaticResource SectionStyle}">
@@ -186,6 +202,8 @@
 
       <GroupBox Header="Catalog actions" Style="{StaticResource SectionStyle}">
         <StackPanel>
+          <TextBlock Margin="0,0,0,8" TextWrapping="Wrap"
+            Text="Pulls and round-trip reconcile change the local Target Scheduler database. Grades update accepted counts; explicit flat coverage invalidations can cause flats to be retaken. Back up first, and pull planning or a full catalog only when Target Scheduler is not running a target container." />
           <WrapPanel>
             <Button
               Command="{Binding ReconcileCommand}"

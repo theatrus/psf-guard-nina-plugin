@@ -10,6 +10,8 @@ using System.Runtime.Versioning;
 [assembly: AssemblyMetadata("Homepage", "https://psf-guard.com")]
 [assembly: AssemblyMetadata("ChangelogURL", "https://github.com/theatrus/psf-guard-nina-plugin/releases")]
 [assembly: AssemblyMetadata("FeaturedImageURL", "https://raw.githubusercontent.com/theatrus/psf-guard-nina-plugin/main/assets/psf-guard-sync.png")]
+[assembly: AssemblyMetadata("ScreenshotURL", "https://raw.githubusercontent.com/theatrus/psf-guard-nina-plugin/main/docs/images/settings-pairing.png")]
+[assembly: AssemblyMetadata("AltScreenshotURL", "https://raw.githubusercontent.com/theatrus/psf-guard-nina-plugin/main/docs/images/settings-catalog.png")]
 [assembly: AssemblyMetadata("Tags", "psf guard,target scheduler,image grading,sync")]
 [assembly: AssemblyMetadata("LongDescription", "Synchronizes Target Scheduler planning, captures, and reviewed grades with a remote PSF Guard catalog. It can upload saved FITS and XISF light or calibration frames, even without Target Scheduler, and adds Advanced Sequencer actions and triggers for connection checks, per-exposure sync, target reconciliation, and full-catalog reconciliation.")]
 [assembly: ComVisible(false)]
