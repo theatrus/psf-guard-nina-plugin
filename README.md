@@ -121,6 +121,8 @@ pwsh -File tools\TestPackageChecks.ps1 -BuildOutput src\PsfGuard.Nina.Plugin\bin
 
 For `0.4.0.17`, local validation on 2026-10-10 passed 223 automated tests,
 locked restore, formatting, release build, and positive/negative package checks.
+The generated manifest passed the current upstream JSON schema. It includes
+the two settings screenshots for N.I.N.A.'s plugin browser.
 An isolated N.I.N.A. `3.2.0.9001` profile loaded the plugin and displayed the
 pairing disclosure, disabled automation defaults, queue warning, catalog
 controls, and activity status. No hardware connected or catalog operations ran
