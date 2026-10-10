@@ -21,6 +21,26 @@ namespace PsfGuard.Nina.Plugin.Tests;
 public sealed class PairingRecoveryTests
 {
     [Fact]
+    public void PairingLeavesAllDataSharingAutomationOptIn()
+    {
+        var fixture = new Fixture();
+        AssertAutomationOff();
+        fixture.Pair("catalog-a", "test-token");
+        AssertAutomationOff();
+        Assert.True(fixture.Settings.HasPairingCredential);
+
+        void AssertAutomationOff()
+        {
+            Assert.False(fixture.Settings.Enabled);
+            Assert.False(fixture.Settings.AutoPushCaptures);
+            Assert.False(fixture.Settings.UploadCapturedImages);
+            Assert.False(fixture.Settings.UploadCalibrationImages);
+            Assert.False(fixture.Settings.IncludeThumbnails);
+            Assert.False(fixture.Settings.RoundTripReconcile);
+        }
+    }
+
+    [Fact]
     public void DeletedCredentialCanBeReplacedWithoutChangingQueueIdentity()
     {
         var fixture = new Fixture();

@@ -6,6 +6,11 @@ A N.I.N.A. 3.2 plugin that synchronizes a live Target Scheduler catalog with a
 remote PSF Guard catalog and can upload captured lights and calibration frames
 directly.
 
+Read [Data and privacy](docs/PRIVACY.md) before pairing. Sync can send private
+catalog metadata and file paths to your chosen server; image uploads send the
+original files, including their headers. Pairing does not enable capture
+automation or uploads.
+
 The plugin subscribes to N.I.N.A.'s `IImageSaveMediator.ImageSaved` event. For
 each saved light it can durably queue the FITS or XISF file for direct upload.
 An additional opt-in includes bias, dark, dark-flat, and flat saves. If Target
@@ -79,7 +84,9 @@ This creates a disposable credential under a random test profile ID, deletes
 that exact entry with `cmdkey` while the plugin controls remain loaded, resets,
 and re-pairs against a temporary loopback HTTP fixture. It checks rejection and
 retry as well as success. Cleanup removes only credentials created by the test.
-Normal test runs use an in-memory store. Neither mode runs the full NINA host.
+These pairing UI tests use an in-memory store unless opted in. The sequencer
+tests also use disposable native credentials for their loopback fixtures.
+Neither suite runs the full NINA host.
 
 For a manual check in the actual NINA application:
 
@@ -107,7 +114,28 @@ the disposable server pairing and remove its local credential when finished.
 dotnet restore PsfGuard.Nina.sln
 dotnet test PsfGuard.Nina.sln --configuration Release
 dotnet build src\PsfGuard.Nina.Plugin\PsfGuard.Nina.Plugin.csproj --configuration Release
+pwsh -File tools\TestPackageChecks.ps1 -BuildOutput src\PsfGuard.Nina.Plugin\bin\Release\net8.0-windows7.0
 ```
+
+### Settings validation
+
+For `0.4.0.17`, local validation on 2026-10-10 passed 223 automated tests,
+locked restore, formatting, release build, and positive/negative package checks.
+An isolated N.I.N.A. `3.2.0.9001` profile loaded the plugin and displayed the
+pairing disclosure, disabled automation defaults, queue warning, catalog
+controls, and activity status. No hardware connected or catalog operations ran
+in that host check. It is UI evidence, not an end-to-end acquisition test.
+The host's unavailable loopback registry fixture logged a fetch error unrelated
+to the plugin.
+
+<details>
+<summary>N.I.N.A. settings screenshots</summary>
+
+![Pairing disclosure and opt-in automation](docs/images/settings-pairing.png)
+
+![Queue recovery and local catalog mutation warning](docs/images/settings-catalog.png)
+
+</details>
 
 For local N.I.N.A. development, copy the build output into the versioned plugin
 directory:
@@ -121,6 +149,8 @@ dotnet build src\PsfGuard.Nina.Plugin\PsfGuard.Nina.Plugin.csproj `
 Restart N.I.N.A., open **Plugins > Installed > PSF Guard Sync**, and configure:
 
 1. Enter the PSF Guard server URL.
+   Read the data-sharing disclosure and [privacy guide](docs/PRIVACY.md), and
+   use a server whose operator you trust.
 2. In PSF Guard database settings, create a one-time client pairing code.
 3. Enter that code in the plugin and select **Pair**. Pairing stores the
    catalog ID and a server-bound credential for the active N.I.N.A. profile;
@@ -185,6 +215,14 @@ durable global queue owns the file and does not send it twice.
 
 Profile-wide capture automation requires **Enable PSF Guard for this N.I.N.A.
 profile**. It does not require an Advanced Sequencer trigger.
+
+Turning it off stops new capture automation and sequencer sync. It does not
+cancel queued work, pause transfers, or disable explicit manual commands.
+Existing queue jobs can resume on N.I.N.A. startup even with automation off.
+Close N.I.N.A. to stop local transfers, and revoke the relevant pairing in PSF
+Guard to prevent future access. Reset pairing clears the active credential but
+does not erase queued jobs or undo requests already in flight. See
+[consent and queued work](docs/PRIVACY.md#consent-and-queued-work).
 
 Use **Test connection** before enabling automatic work. When direct image
 upload is selected, the check also verifies that the chosen PSF Guard database
@@ -310,9 +348,9 @@ catalog-sync policy for those exposures.
 
 Reconciliation instructions wait two seconds for final Target Scheduler image
 transactions before taking one consistent, read-only SQLite snapshot. They then
-await the remote preview, making them actual sequence barriers rather than
-queue-only actions. **Apply remote previews automatically** controls whether the
-barrier also applies the preview or leaves it staged in PSF Guard. Automatic
+await and apply the remote preview, making them actual sequence barriers rather
+than queue-only actions. They apply even when **Apply remote previews
+automatically** is off. Other push instructions follow that setting. Automatic
 per-capture pushes remain durably queued and retry independently.
 
 Current-target reconciliation matches the enclosing N.I.N.A. target name
@@ -376,6 +414,13 @@ resumes after the next plugin start.
 
 ## Pull Safety
 
+Back up the local Target Scheduler database before a pull or round trip. Pulls
+can change later acquisition: planning changes targets and requested exposures,
+grade pulls change accepted counts, and explicit flat coverage invalidations
+make matching flats eligible to be taken again. Full-catalog pull-back can also
+merge capture records. These are local database writes, not a remote equipment
+control API.
+
 Planning and grade pulls are explicit commands. Planning upserts are one
 SQLite transaction and preserve the destination plan's progress counters.
 Grade pulls match only unambiguous image GUIDs and change only the grade and
@@ -383,7 +428,8 @@ reject reason on acquired-image rows. After the pull, the plugin recomputes the
 accepted count for each affected exposure plan from those acquired-image
 grades.
 
-Do not pull planning while a Target Scheduler Container is actively executing.
+Do not pull planning or a full catalog while a Target Scheduler Container is
+actively executing.
 The database write is transactional, but Target Scheduler can still hold an
 older in-memory plan until its next refresh.
 
@@ -401,7 +447,10 @@ docs/PROTOCOL.md           PSF Guard remote contract expected by the client
 Release tags use the four-part N.I.N.A. plugin version format, such as
 `0.1.0.0`. Pushing a matching tag builds the plugin, packages only its runtime
 dependencies, generates a registry-compatible manifest, and publishes both
-files on the GitHub release.
+files on the GitHub release. Every ZIP includes the MPL license, matching-tag
+source instructions, [third-party notices](THIRD-PARTY-NOTICES.txt), and the
+privacy guide. CI and release builds check the exact package inventory and
+manifest checksum; release builds verify the bundled notices against source.
 
 `PLUGIN_IS_BETA` in the release workflow controls both the GitHub prerelease
 flag and the manifest's N.I.N.A. channel. Keep it disabled for stable releases
@@ -410,11 +459,22 @@ and enable it only when publishing a prerelease.
 The workflow can also be dispatched manually to build and validate a release
 candidate without creating a tag or GitHub release.
 
-The generated manifest belongs at
-`manifests/p/PSF Guard Sync/3.2.0.9001/manifest.json` in a fork of
-[`isbeorn/nina.plugin.manifests`](https://github.com/isbeorn/nina.plugin.manifests).
-Run `npm install` and `node gather.js` in that repository before proposing the
-manifest upstream.
+For an upstream submission, place the generated manifest at
+`manifests/p/PSF Guard Sync/3.2.0.9001/<version>/manifest.json` in a fork of
+[`isbeorn/nina.plugin.manifests`](https://github.com/isbeorn/nina.plugin.manifests),
+validate it against the current schema, and run `npm install` and `node gather.js`.
+Include the release URL, package checksum, test results, host smoke-test evidence,
+privacy guide, and AI-use disclosure in the proposed PR. Yann handles upstream
+submissions manually; automation must not open upstream PRs.
+
+## Development and Maintenance
+
+Yann Ramin (@theatrus) maintains this plugin. Development uses AI assistance,
+including code, tests, documentation, and review. Automated checks and local
+tests do not replace the maintainer's responsibility to understand the code,
+validate releases, and confirm licensing before distribution or an upstream
+submission. Report bugs in the
+[issue tracker](https://github.com/theatrus/psf-guard-nina-plugin/issues).
 
 ## License
 

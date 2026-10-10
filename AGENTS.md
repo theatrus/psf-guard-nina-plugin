@@ -17,6 +17,8 @@
   origin, row ID, target GUID, and full-row fingerprint still match. Never
   infer invalidation from missing snapshot rows or delete calibration files.
 - A protocol change requires matching updates to `docs/PROTOCOL.md` and tests.
+- Never open a PR against upstream `isbeorn/nina.plugin.manifests`. Yann
+  handles upstream submissions; provide suggested submission text in chat.
 - Run:
 
   ```powershell

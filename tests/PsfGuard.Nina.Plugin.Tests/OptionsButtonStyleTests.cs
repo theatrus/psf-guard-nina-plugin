@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Automation.Peers;
 using System.Windows.Controls;
 using System.Windows.Data;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -95,6 +96,21 @@ public sealed class OptionsButtonStyleTests
             panel.Arrange(new Rect(panel.DesiredSize));
             panel.UpdateLayout();
             DrainBindings();
+
+            var textBlocks = Descendants<TextBlock>(panel).ToArray();
+            var privacy = Assert.Single(textBlocks.SelectMany(block => block.Inlines.OfType<Hyperlink>()));
+            Assert.Equal("https://github.com/theatrus/psf-guard-nina-plugin/blob/main/docs/PRIVACY.md",
+                privacy.NavigateUri.AbsoluteUri);
+            Assert.True(privacy.IsEnabled);
+            Assert.Same(textBlocks.Single(block => block.Inlines.Contains(privacy)).Foreground, privacy.Foreground);
+            Assert.Contains(textBlocks, block => block.Text.Contains("Pair only with a server you trust", StringComparison.Ordinal));
+            Assert.Contains(textBlocks, block => block.Text.Contains("not queued transfers", StringComparison.Ordinal));
+            Assert.Contains(textBlocks, block => block.Text.Contains("explicit flat coverage invalidations", StringComparison.Ordinal));
+            viewModel["Enabled"] = false;
+            DrainBindings();
+            Assert.True(privacy.IsEnabled);
+            Assert.All(textBlocks.Where(block => block.Text.Contains("Queued transfers", StringComparison.Ordinal)),
+                block => Assert.True(block.IsEnabled));
 
             var buttons = Descendants<Button>(panel).ToArray();
             Assert.Equal(commandNames.Length, buttons.Length);

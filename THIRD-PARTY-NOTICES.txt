@@ -1,0 +1,35 @@
+PSF Guard Sync
+==============
+
+Copyright (c) 2026 Yann Ramin (@theatrus) and contributors.
+PSF Guard Sync.dll and PsfGuard.Nina.Sync.dll are distributed under the
+Mozilla Public License 2.0. The full license is in LICENSE.
+
+Corresponding source, build instructions, and dependency lock files:
+https://github.com/theatrus/psf-guard-nina-plugin
+
+Each release's source tag matches its four-part plugin version. For example,
+the source for version 0.4.0.17 is:
+https://github.com/theatrus/psf-guard-nina-plugin/tree/0.4.0.17
+
+The release archive includes debug symbols for the two plugin assemblies.
+N.I.N.A. and its .NET runtime are installed separately, not bundled here.
+
+System.Data.SQLite Core 1.0.119
+==============================
+
+Files: System.Data.SQLite.dll, dll/x64/SQLite.Interop.dll
+Publisher: SQLite Development Team
+NuGet packages: System.Data.SQLite.Core 1.0.119 and
+Stub.System.Data.SQLite.Core.NetStandard 1.0.119
+Project and source: https://system.data.sqlite.org/
+Copyright statement:
+https://system.data.sqlite.org/home/doc/trunk/www/copyright.wiki
+SQLite copyright statement: https://www.sqlite.org/copyright.html
+
+The shipped SQLite core and ADO.NET provider are dedicated to the public
+domain by their authors. The System.Data.SQLite LINQ and EF6 assemblies
+contain separate MS-PL code; neither assembly is included in this package.
+
+This inventory covers the runtime files actually shipped in the plugin ZIP,
+not every development dependency or assembly provided by N.I.N.A.
