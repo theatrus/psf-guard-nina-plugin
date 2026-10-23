@@ -38,7 +38,7 @@ GET /api/sync/v1/capabilities
   "protocol_version": 1,
   "product": "psf-guard",
   "product_version": "0.6.0",
-  "capabilities": ["merge", "push_planning", "push_grades", "preview_apply", "preview_refresh", "async_preview_jobs", "exports", "image_upload"],
+  "capabilities": ["merge", "push_planning", "push_grades", "preview_apply", "preview_refresh", "async_preview_jobs", "exports", "image_upload", "project_tombstones_v1"],
   "catalogs": [
     {
       "id": "review",
@@ -143,7 +143,8 @@ POST /api/sync/v1/exports
   "catalog_id": "review",
   "operation": "merge",
   "reviewed_only": false,
-  "include_thumbnails": false
+  "include_thumbnails": false,
+  "include_project_tombstones": true
 }
 ```
 
@@ -151,6 +152,14 @@ For a full `merge` export, `include_thumbnails` defaults to `false` on PSF Guard
 versions that implement the option. An older server may ignore the field and
 return `imagedata`, so the plugin verifies that the returned merge bundle is
 thumbnail-free before applying it locally.
+
+`include_project_tombstones` defaults to `false`. The plugin sends it, set to
+`true`, only on `push_planning` and `merge` exports and only when the server's
+capabilities include `project_tombstones_v1`. Otherwise the request leaves the
+field out, so a server without the capability never sees it. The plugin reads
+the capabilities once per pull: a merge pull reuses the round-trip check, and
+a planning pull reads them before its export. See
+[Deleted projects](#deleted-projects).
 
 The server may return a ready export immediately:
 
@@ -178,8 +187,102 @@ The plugin accepts these export operations:
   planning and `acquiredimage` tables and must not contain `imagedata`
 
 Catalog bundles do not accept remote SQL, table names outside the allowlist,
-deletes, or an arbitrary local database path. Flat coverage uses the separate
+or an arbitrary local database path. The only deletes a bundle can cause are
+the deleted-project rule below, limited to projects that its
+`psf_guard_removed_project` table lists. Flat coverage uses the separate
 guarded protocol below, not the GUID-keyed bundle merge.
+
+## Deleted Projects
+
+PSF Guard can delete a project from a catalog. It keeps a tombstone so later
+syncs and imports do not bring the project back, and a user can later allow
+the project back. Servers that implement this advertise `project_tombstones_v1`.
+
+When the export request sets `include_project_tombstones: true`, `push_planning`
+and `merge` bundles carry an optional table `psf_guard_removed_project` with
+one row per project deleted in that catalog:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `project_guid` | TEXT | Target Scheduler GUID of the deleted project; required |
+| `name` | TEXT | Project name, used in messages; required column, may be NULL |
+| `removed_at` | INTEGER | Unix seconds when the project was deleted; optional |
+| `allowed_back_at` | INTEGER | Unix seconds when it was allowed back, or NULL; optional |
+
+The plugin applies a row as a deletion only when `allowed_back_at` is absent
+or NULL. A row with a value describes a project that was allowed back; it is
+for PSF Guard peers, and the plugin ignores it. A server without the
+`allowed_back_at` column sends only standing deletions. The plugin ignores any
+other columns.
+
+The plugin validates the table before it opens the Target Scheduler database.
+It refuses the whole bundle, and writes nothing, when the `project_guid` or
+`name` column is missing. A row whose `project_guid` is null, not text, or not
+a valid non-empty GUID is skipped; the apply result counts it and reports that
+it was skipped. The other rows still apply. A bundle without the table
+applies exactly as before.
+
+Inside the planning or merge apply transaction, the plugin first applies the
+planning rows and, for a merge, the captured images. Targets moving into live
+projects keep their existing local IDs, flat history, exposure order and
+filter cadence. It then handles each standing deletion:
+
+1. It matches the GUID against `project.guid` case-insensitively, ignoring
+   surrounding spaces. A GUID that matches no project changes nothing.
+2. When the bundle's own `project` table contains the GUID, the project is
+   live in PSF Guard. The plugin keeps it and reports it as kept because it is
+   live in PSF Guard.
+3. When more than one project has the GUID, it keeps them all.
+4. When a target still under the project appears in the incoming bundle, a
+   move could not be applied safely. The plugin keeps the former project and
+   its remaining targets and reports the conflict.
+5. When Target Scheduler has acquired images for the project, either rows with
+   its `projectId` or rows on any of its targets, it keeps the project. The
+   apply result lists the project and the number of images.
+6. Otherwise it deletes the project's rows, child first, probing optional
+   tables and columns: for each target `overrideexposureorderitem`,
+   `filtercadenceitem`, `flathistory` and `exposureplan`; then `target`; then
+   `ruleweight`; then any PSF Guard records in the file keyed by the targets'
+   GUIDs (`psf_guard_director_target`, `psf_guard_director_plan`,
+   `psf_guard_collaboration_plan`, `psf_guard_scheduler_flat_history`) or by
+   the project's GUID (`psf_guard_director_target`,
+   `psf_guard_director_project`); then `project`. Exposure templates belong
+   to the profile and stay.
+
+Image-ownership checks use one grouped scan for all candidate projects, not a
+separate capture-history scan per deletion. A frame counts toward both
+projects when its direct project and target ownership differ, but only once
+when both links name the same project. All upserts and deletions commit
+together; a deletion failure rolls back target moves and other updates too.
+
+The apply result reports `ProjectsDeleted`, `ProjectsKept`,
+`ProjectRowsSkipped` and one message per project or skipped-row group, next to
+the inserted, updated, unchanged and skipped counts.
+
+## Refused Uploads
+
+A server with `project_tombstones_v1` refuses some image uploads with
+`410 Gone` and its standard error envelope, `{"success":false,"error":"..."}`.
+It does this for a file whose project was deleted from that catalog, and for a
+file it removed as a reject. The error message explains the reason and how to
+undo it in PSF Guard, for example by allowing the project back or restoring
+the reject.
+
+The plugin treats `410` from the upload endpoint as a refusal, not a failure:
+
+- It does not retry the upload and does not mark the job blocked.
+- It reports `PSF Guard refused <file>: <server message>` in the status line
+  and the N.I.N.A. log.
+- It keeps the job in the queue, marked as refused. **Retry blocked**
+  re-queues refused uploads for the current destination together with blocked
+  jobs, and its result shows how many refused uploads it re-queued. Undo the
+  deletion in PSF Guard first; otherwise the server refuses the file again.
+- A combined capture job whose scheduler phase already applied keeps its
+  applied receipt. Re-queueing it repeats only the upload.
+- A sequence upload trigger without deferral reports the refusal and lets the
+  sequence continue.
+
+Older servers never answer `410` for an upload.
 
 ## Flat Coverage
 
@@ -305,6 +408,9 @@ basename and digest is idempotent.
 - Planning apply preserves destination `acquired` and `accepted`.
 - Grade apply changes only `gradingStatus` and `rejectreason` on acquired-image
   rows, then reconciles `exposureplan.accepted` for each affected plan.
-- Version 1 catalog bundles never delete a destination row. The separate
-  `flat_history_v1` exchange only removes explicitly invalidated, unchanged
-  Target Scheduler coverage rows.
+- Catalog bundles delete destination rows only for a project their optional
+  `psf_guard_removed_project` table lists as a standing deletion, only when the
+  bundle does not also hold it as live, and only when Target Scheduler has no
+  acquired images for it; see [Deleted projects](#deleted-projects). The
+  separate `flat_history_v1` exchange only removes explicitly invalidated,
+  unchanged Target Scheduler coverage rows.

@@ -10,6 +10,7 @@ public sealed class SyncOrchestrator
 {
     public const string ExportsCapability = "exports";
     public const string FlatHistoryCapability = "flat_history_v1";
+    public const string ProjectTombstonesCapability = "project_tombstones_v1";
 
     private const int MaximumImmediatePreviewAttempts = 3;
     private const int FlatHistoryBatchSize = 1000;
@@ -26,6 +27,10 @@ public sealed class SyncOrchestrator
     private readonly RemoteQueueDestination? queueDestination;
     private readonly FlatHistoryCatalog? flatHistory;
     private int roundTripSupportConfirmed;
+
+    // 0 until a capabilities response is seen, then 1 when the server
+    // advertises project tombstones and -1 when it does not.
+    private int projectTombstonesSupport;
 
     public SyncOrchestrator(
         string destinationCatalogId,
@@ -220,14 +225,44 @@ public sealed class SyncOrchestrator
 
     public async Task<ApplyResult> PullPlanningAsync(CancellationToken cancellationToken)
     {
+        var includeProjectTombstones = await ProjectTombstonesSupportedAsync(cancellationToken)
+            .ConfigureAwait(false);
         var bundle = await WithClientAsync(
                 client => client.DownloadExportAsync(
                     destinationCatalogId,
                     SyncOperation.PushPlanning,
                     reviewedOnly: false,
+                    includeThumbnails: null,
+                    includeProjectTombstones,
                     cancellationToken))
             .ConfigureAwait(false);
         return await writer.ApplyPlanningAsync(bundle, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Whether the server lists deleted projects in planning and merge
+    /// exports. Uses the capabilities this orchestrator already read, and
+    /// reads them once otherwise.
+    /// </summary>
+    private async Task<bool> ProjectTombstonesSupportedAsync(CancellationToken cancellationToken)
+    {
+        var known = Volatile.Read(ref projectTombstonesSupport);
+        if (known != 0)
+        {
+            return known > 0;
+        }
+
+        var capabilities = await TestConnectionAsync(cancellationToken).ConfigureAwait(false);
+        return RecordCapabilities(capabilities);
+    }
+
+    private bool RecordCapabilities(SyncCapabilities capabilities)
+    {
+        var supported = capabilities.Capabilities.Contains(
+            ProjectTombstonesCapability,
+            StringComparer.Ordinal);
+        Volatile.Write(ref projectTombstonesSupport, supported ? 1 : -1);
+        return supported;
     }
 
     public Task EnsureRoundTripSupportedAsync(CancellationToken cancellationToken) =>
@@ -259,6 +294,7 @@ public sealed class SyncOrchestrator
                     + $"({FormatElapsed(elapsed)})...",
                 cancellationToken)
             .ConfigureAwait(false);
+        RecordCapabilities(capabilities);
         if (!capabilities.Capabilities.Contains(
                 ExportsCapability,
                 StringComparer.Ordinal))
@@ -286,6 +322,8 @@ public sealed class SyncOrchestrator
     {
         var activity = TrackProgress(progress);
         await EnsureRoundTripSupportedAsync(cancellationToken, activity).ConfigureAwait(false);
+        var includeProjectTombstones = await ProjectTombstonesSupportedAsync(cancellationToken)
+            .ConfigureAwait(false);
         SyncProgressReporter.Report(
             activity,
             new SyncProgress
@@ -300,8 +338,9 @@ public sealed class SyncOrchestrator
                         SyncOperation.Merge,
                         reviewedOnly: false,
                         includeThumbnails: false,
-                        cancellationToken: cancellationToken,
-                        progress: activity),
+                        includeProjectTombstones,
+                        cancellationToken,
+                        activity),
                     activity,
                     SyncProgressStage.DownloadingCatalog,
                     elapsed => $"Processing the merged PSF Guard catalog "
@@ -338,7 +377,8 @@ public sealed class SyncOrchestrator
                 Stage = SyncProgressStage.Completed,
                 Message = $"Merged PSF Guard into Target Scheduler: {result.Inserted:N0} inserted, "
                     + $"{result.Updated:N0} updated, {result.Unchanged:N0} unchanged, "
-                    + $"{result.Skipped:N0} skipped.",
+                    + $"{result.Skipped:N0} skipped."
+                    + (result.DeletedProjectsSummary is { } deleted ? " " + deleted : string.Empty),
             });
         return result;
     }

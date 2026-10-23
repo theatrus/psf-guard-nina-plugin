@@ -172,6 +172,59 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
         return retried;
     }
 
+    /// <summary>
+    /// Re-queue uploads for <paramref name="destination"/> that PSF Guard
+    /// refused with 410 Gone, for example after the project was allowed back
+    /// or the reject was restored in PSF Guard. Returns how many were
+    /// re-queued.
+    /// </summary>
+    public async Task<int> RetryRefusedUploadsAsync(
+        RemoteQueueDestination destination,
+        CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(destination);
+        destination.Validate();
+        if (!Directory.Exists(queueDirectory))
+        {
+            return 0;
+        }
+
+        var retried = 0;
+        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            foreach (var file in QueueFiles())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
+                if (job is null || !job.UploadRefused || !destination.Matches(job.Destination))
+                {
+                    continue;
+                }
+
+                job.UploadRefused = false;
+                job.RefusalReason = null;
+                job.Attempts = 0;
+                job.PrerequisiteAttempts = 0;
+                job.NextAttemptUtc = DateTimeOffset.UtcNow;
+                await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+                retried++;
+            }
+        }
+        finally
+        {
+            mutationGate.Release();
+        }
+
+        if (retried > 0)
+        {
+            Wake();
+        }
+
+        return retried;
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0)
@@ -256,7 +309,7 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
                 mutationGate.Release();
             }
 
-            if (job.ImageUploadDeferred || job.Blocked)
+            if (job.ImageUploadDeferred || job.Blocked || job.UploadRefused)
             {
                 continue;
             }
@@ -302,6 +355,12 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
             {
                 throw;
             }
+            catch (PsfGuardUploadRefusedException exception)
+            {
+                await RecordRefusedAsync(job, exception, cancellationToken)
+                    .ConfigureAwait(false);
+                continue;
+            }
             catch (Exception exception)
             {
                 var delay = exception is FileNotFoundException or DirectoryNotFoundException
@@ -326,6 +385,20 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
         return soonest < TimeSpan.FromMilliseconds(100)
             ? TimeSpan.FromMilliseconds(100)
             : soonest;
+    }
+
+    private async Task RecordRefusedAsync(
+        QueuedImageUploadJob job,
+        PsfGuardUploadRefusedException exception,
+        CancellationToken cancellationToken)
+    {
+        // Not a failure and not retried: the job stays in the queue so the
+        // operator can re-queue it after undoing the deletion in PSF Guard.
+        job.UploadRefused = true;
+        job.RefusalReason = exception.Message;
+        job.LastError = null;
+        await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
+        ReportStatus(exception.Message + " " + QueueFailurePolicy.RefusedUploadAdvice);
     }
 
     private async Task<TimeSpan?> RecordFailureAsync(

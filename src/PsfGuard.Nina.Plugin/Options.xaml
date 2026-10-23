@@ -159,7 +159,7 @@
       <GroupBox Header="Queue recovery" Style="{StaticResource SectionStyle}">
         <StackPanel>
           <TextBlock Margin="0,0,0,8" TextWrapping="Wrap"
-            Text="Queued transfers can resume when N.I.N.A. starts, even with automation off. They keep their original server, catalog, and profile. Close N.I.N.A. to stop local transfers; revoke the pairing on the server to prevent future access." />
+            Text="Queued transfers can resume when N.I.N.A. starts, even with automation off. They keep their original server, catalog, and profile. Close N.I.N.A. to stop local transfers; revoke the pairing on the server to prevent future access. Retry blocked also re-queues uploads that PSF Guard refused because their project was deleted or the frame was removed as a reject; undo that in PSF Guard first." />
           <WrapPanel>
             <Button
               Command="{Binding StartQueuedUploadsCommand}"

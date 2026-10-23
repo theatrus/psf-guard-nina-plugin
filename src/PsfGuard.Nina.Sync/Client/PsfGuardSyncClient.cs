@@ -131,7 +131,54 @@ public sealed class PsfGuardSyncClient : IDisposable
         };
         request.Headers.Add("X-PSF-Guard-Database-ID", catalogId);
         request.Headers.Add("X-Content-SHA256", digest);
-        await SendAsync<JsonElement>(request, cancellationToken).ConfigureAwait(false);
+        using var response = await httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.Gone)
+        {
+            // PSF Guard answers 410 for a file whose project was deleted from
+            // this catalog or that it removed as a reject. Its message says
+            // which. Older servers never send 410 for an upload.
+            var body = await response.Content.ReadAsStringAsync(cancellationToken)
+                .ConfigureAwait(false);
+            throw new PsfGuardUploadRefusedException(
+                Path.GetFileName(fullPath),
+                ServerErrorMessage(body));
+        }
+
+        await ReadAsync<JsonElement>(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The <c>error</c> text of PSF Guard's standard
+    /// <c>{"success":false,"error":"..."}</c> envelope, or the start of a
+    /// body that is not one.
+    /// </summary>
+    private static string? ServerErrorMessage(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind == JsonValueKind.Object
+                && document.RootElement.TryGetProperty("error", out var error)
+                && error.ValueKind == JsonValueKind.String)
+            {
+                return error.GetString();
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        var text = body.Trim();
+        return text.Length > 500 ? text[..500] : text;
     }
 
     public Task<SyncPreview> CreatePreviewAsync(
@@ -287,6 +334,7 @@ public sealed class PsfGuardSyncClient : IDisposable
             operation,
             reviewedOnly,
             includeThumbnails: null,
+            includeProjectTombstones: false,
             cancellationToken: cancellationToken,
             progress: null);
 
@@ -303,6 +351,33 @@ public sealed class PsfGuardSyncClient : IDisposable
                 operation,
                 reviewedOnly,
                 includeThumbnails,
+                includeProjectTombstones: false,
+                cancellationToken,
+                progress)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Download an export. <paramref name="includeProjectTombstones"/> adds
+    /// <c>include_project_tombstones: true</c> to the request; pass true only
+    /// when the server advertises <c>project_tombstones_v1</c>. When false the
+    /// request leaves the field out, as older clients do.
+    /// </summary>
+    public async Task<CatalogBundle> DownloadExportAsync(
+        string catalogId,
+        SyncOperation operation,
+        bool reviewedOnly,
+        bool? includeThumbnails,
+        bool includeProjectTombstones,
+        CancellationToken cancellationToken,
+        IProgress<SyncProgress>? progress = null)
+    {
+        return await DownloadExportCoreAsync(
+                catalogId,
+                operation,
+                reviewedOnly,
+                includeThumbnails,
+                includeProjectTombstones,
                 cancellationToken,
                 progress)
             .ConfigureAwait(false);
@@ -313,6 +388,7 @@ public sealed class PsfGuardSyncClient : IDisposable
         SyncOperation operation,
         bool reviewedOnly,
         bool? includeThumbnails,
+        bool includeProjectTombstones,
         CancellationToken cancellationToken,
         IProgress<SyncProgress>? progress)
     {
@@ -322,6 +398,7 @@ public sealed class PsfGuardSyncClient : IDisposable
             Operation = operation,
             ReviewedOnly = reviewedOnly,
             IncludeThumbnails = includeThumbnails,
+            IncludeProjectTombstones = includeProjectTombstones ? true : null,
         };
         using var request = new HttpRequestMessage(HttpMethod.Post, "api/sync/v1/exports")
         {

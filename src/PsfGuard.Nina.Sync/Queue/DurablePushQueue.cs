@@ -362,7 +362,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
                 mutationGate.Release();
             }
 
-            if (job.Blocked)
+            if (job.Blocked || job.UploadRefused)
             {
                 continue;
             }
@@ -472,16 +472,31 @@ public sealed class DurablePushQueue : IAsyncDisposable
                 job.PrerequisiteAttempts = 0;
                 uploadingImage = true;
                 ReportStatus($"Uploading {Path.GetFileName(uploadPath)} after scheduler sync...");
+                PsfGuardUploadRefusedException? refused = null;
                 using (var client = clientFactory(job.Destination))
                 {
-                    await client.UploadImageAsync(
-                            job.Destination.CatalogId,
-                            uploadPath,
-                            cancellationToken)
-                        .ConfigureAwait(false);
+                    try
+                    {
+                        await client.UploadImageAsync(
+                                job.Destination.CatalogId,
+                                uploadPath,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    catch (PsfGuardUploadRefusedException exception)
+                    {
+                        refused = exception;
+                    }
                 }
 
                 uploadingImage = false;
+                if (refused is not null)
+                {
+                    await RecordRefusedUploadAsync(job, receipt, refused, cancellationToken)
+                        .ConfigureAwait(false);
+                    continue;
+                }
+
                 await CompleteJobAsync(
                         job,
                         file,
@@ -679,6 +694,8 @@ public sealed class DurablePushQueue : IAsyncDisposable
     {
         job.Completed = true;
         job.LastError = null;
+        job.UploadRefused = false;
+        job.RefusalReason = null;
         await PersistAndDeleteWorkerJobAsync(job, file, cancellationToken)
             .ConfigureAwait(false);
         var status = FormatPushStatus(receipt);
@@ -689,6 +706,80 @@ public sealed class DurablePushQueue : IAsyncDisposable
 
         ReportStatus(status);
         PublishPushed(receipt);
+    }
+
+    /// <summary>
+    /// Hold a combined capture job whose scheduler phase applied but whose
+    /// image PSF Guard refused with 410 Gone. The job keeps its applied
+    /// receipt, so re-queueing it repeats only the upload.
+    /// </summary>
+    private async Task RecordRefusedUploadAsync(
+        QueuedBundleJob job,
+        PushReceipt receipt,
+        PsfGuardUploadRefusedException exception,
+        CancellationToken cancellationToken)
+    {
+        job.UploadRefused = true;
+        job.RefusalReason = exception.Message;
+        job.LastError = null;
+        await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
+        ReportStatus(
+            $"{FormatPushStatus(receipt)} {exception.Message} "
+            + QueueFailurePolicy.RefusedUploadAdvice);
+        PublishPushed(receipt);
+    }
+
+    /// <summary>
+    /// Re-queue the image uploads for <paramref name="destination"/> that PSF
+    /// Guard refused with 410 Gone. Their scheduler phase has already
+    /// applied, so only the upload runs again. Returns how many were
+    /// re-queued.
+    /// </summary>
+    public async Task<int> RetryRefusedUploadsAsync(
+        RemoteQueueDestination destination,
+        CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(destination);
+        destination.Validate();
+        if (!Directory.Exists(queueDirectory))
+        {
+            return 0;
+        }
+
+        var retried = 0;
+        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            foreach (var file in QueueFiles())
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
+                if (job is null || !job.UploadRefused || !destination.Matches(job.Destination))
+                {
+                    continue;
+                }
+
+                job.UploadRefused = false;
+                job.RefusalReason = null;
+                job.Attempts = 0;
+                job.PrerequisiteAttempts = 0;
+                job.NextAttemptUtc = DateTimeOffset.UtcNow;
+                await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+                retried++;
+            }
+        }
+        finally
+        {
+            mutationGate.Release();
+        }
+
+        if (retried > 0)
+        {
+            Wake();
+        }
+
+        return retried;
     }
 
     private async Task<bool> TryResolveCaptureAsync(

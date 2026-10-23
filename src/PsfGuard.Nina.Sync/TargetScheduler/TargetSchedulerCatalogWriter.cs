@@ -30,6 +30,39 @@ public sealed class TargetSchedulerCatalogWriter
         "acquiredimage",
     ];
 
+    /// <summary>
+    /// Optional planning and merge table listing projects deleted in PSF
+    /// Guard. The server sends it only when the export request opts in.
+    /// </summary>
+    internal const string RemovedProjectTable = "psf_guard_removed_project";
+
+    // Rows that belong to each target of a deleted project, child first.
+    // Target Scheduler declares no cascades.
+    private static readonly (string Table, string Column)[] TargetChildTables =
+    [
+        ("overrideexposureorderitem", "targetid"),
+        ("filtercadenceitem", "targetid"),
+        ("flathistory", "targetId"),
+        ("exposureplan", "targetId"),
+    ];
+
+    // PSF Guard records that a rig's Target Scheduler file may hold, keyed by
+    // the GUID of a target of the deleted project.
+    private static readonly string[] TargetGuidSideTables =
+    [
+        "psf_guard_director_target",
+        "psf_guard_director_plan",
+        "psf_guard_collaboration_plan",
+        "psf_guard_scheduler_flat_history",
+    ];
+
+    // PSF Guard records keyed by the deleted project's GUID.
+    private static readonly string[] ProjectGuidSideTables =
+    [
+        "psf_guard_director_target",
+        "psf_guard_director_project",
+    ];
+
     private readonly string databasePath;
 
     public TargetSchedulerCatalogWriter(string databasePath)
@@ -231,6 +264,7 @@ public sealed class TargetSchedulerCatalogWriter
     {
         ValidateBundle(bundle, SyncOperation.PushPlanning);
         EnsureBundleTables(bundle, PlanningTables, "Planning");
+        var removedProjects = ReadRemovedProjects(bundle);
 
         using var session = OpenReadWrite(cancellationToken);
         var connection = session.Connection;
@@ -242,6 +276,13 @@ public sealed class TargetSchedulerCatalogWriter
             bundle,
             result,
             preservePlanProgress: true,
+            cancellationToken);
+        DeleteRemovedProjects(
+            connection,
+            transaction,
+            removedProjects,
+            bundle,
+            result,
             cancellationToken);
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -267,6 +308,7 @@ public sealed class TargetSchedulerCatalogWriter
             EnsureRequiredColumns(imageData, "acquiredimageid", "tag");
         }
 
+        var removedProjects = ReadRemovedProjects(bundle);
         cancellationToken.ThrowIfCancellationRequested();
         using var session = OpenReadWrite(cancellationToken);
         var connection = session.Connection;
@@ -307,6 +349,13 @@ public sealed class TargetSchedulerCatalogWriter
                 transaction,
                 affectedExposurePlans,
                 ReadExposurePlanCounts(connection, transaction));
+            DeleteRemovedProjects(
+                connection,
+                transaction,
+                removedProjects,
+                bundle,
+                result,
+                cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             transaction.Commit();
             return result.ToImmutable();
@@ -768,6 +817,432 @@ public sealed class TargetSchedulerCatalogWriter
                 result.Inserted++;
             }
         }
+    }
+
+    /// <summary>
+    /// The standing deletions in the bundle's optional
+    /// <c>psf_guard_removed_project</c> table, one per GUID. Empty when the
+    /// table is absent, as it is from servers without
+    /// <c>project_tombstones_v1</c>. A row with an <c>allowed_back_at</c> value
+    /// was allowed back in PSF Guard and is for PSF Guard peers, so it is
+    /// ignored. A row whose GUID is not usable is counted and skipped.
+    /// </summary>
+    private static RemovedProjects ReadRemovedProjects(CatalogBundle bundle)
+    {
+        if (!bundle.Tables.TryGetValue(RemovedProjectTable, out var table))
+        {
+            return new RemovedProjects([], 0);
+        }
+
+        EnsureRequiredColumns(table, "project_guid", "name");
+        var projects = new List<RemovedProject>();
+        var seen = new HashSet<Guid>();
+        var invalidRows = 0;
+        foreach (var row in RowsByColumn(table))
+        {
+            if (DatabaseValue(row, "allowed_back_at") is not null)
+            {
+                continue;
+            }
+
+            if (!TryParseGuid(DatabaseValue(row, "project_guid"), out var guid))
+            {
+                invalidRows++;
+                continue;
+            }
+
+            if (seen.Add(guid))
+            {
+                var name = (DatabaseValue(row, "name") as string)?.Trim();
+                projects.Add(new RemovedProject(guid, string.IsNullOrEmpty(name) ? null : name));
+            }
+        }
+
+        return new RemovedProjects(projects, invalidRows);
+    }
+
+    /// <summary>
+    /// GUIDs of the projects in the bundle's own <c>project</c> table: live in
+    /// PSF Guard, so never deleted here even if a deletion also lists them.
+    /// </summary>
+    private static HashSet<Guid> LiveProjectGuids(CatalogBundle bundle)
+    {
+        var live = new HashSet<Guid>();
+        foreach (var row in RowsByColumn(bundle.Tables["project"]))
+        {
+            if (TryParseGuid(DatabaseValue(row, "guid"), out var guid))
+            {
+                live.Add(guid);
+            }
+        }
+
+        return live;
+    }
+
+    /// <summary>
+    /// Delete each listed project that Target Scheduler has, that the bundle
+    /// does not hold as live, and that has no captured images here, with its
+    /// targets, their exposure plans and the rows that refer to them. Other
+    /// listed projects stay and are reported. Runs after upserts in the same
+    /// transaction so targets moving to surviving projects keep their IDs and
+    /// local children. Exposure templates belong to the profile and stay.
+    /// </summary>
+    private static void DeleteRemovedProjects(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        RemovedProjects removedProjects,
+        CatalogBundle bundle,
+        MutableApplyResult result,
+        CancellationToken cancellationToken)
+    {
+        if (removedProjects.InvalidRows > 0)
+        {
+            result.ProjectRowsSkipped += removedProjects.InvalidRows;
+            result.ProjectMessages.Add(
+                $"Skipped {removedProjects.InvalidRows:N0} deleted-project "
+                + (removedProjects.InvalidRows == 1 ? "entry" : "entries")
+                + " from PSF Guard without a valid project GUID.");
+        }
+
+        if (removedProjects.Projects.Count == 0)
+        {
+            return;
+        }
+
+        var liveProjects = LiveProjectGuids(bundle);
+        var localProjects = ReadLocalProjects(connection, transaction);
+        var candidates = removedProjects.Projects
+            .Where(project => !liveProjects.Contains(project.Guid))
+            .Select(project => localProjects.GetValueOrDefault(project.Guid))
+            .Where(matches => matches is { Count: 1 })
+            .Select(matches => matches![0].Id)
+            .ToHashSet();
+        var survivingTargetProjects = ReadSurvivingTargetProjects(
+            connection, transaction, bundle.Tables["target"], candidates, cancellationToken);
+        candidates.ExceptWith(survivingTargetProjects);
+        var imageCounts = ReadProjectImageCounts(
+            connection, transaction, candidates, cancellationToken);
+        foreach (var removed in removedProjects.Projects)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!localProjects.TryGetValue(removed.Guid, out var matches))
+            {
+                continue;
+            }
+
+            var name = matches[0].Name ?? removed.Name ?? removed.Guid.ToString("D");
+            if (liveProjects.Contains(removed.Guid))
+            {
+                result.ProjectsKept++;
+                result.ProjectMessages.Add(
+                    $"Kept project {name} because it is live in PSF Guard.");
+                continue;
+            }
+
+            if (matches.Count > 1)
+            {
+                result.ProjectsKept++;
+                result.ProjectMessages.Add(
+                    $"Kept project {name} because more than one Target Scheduler project has its GUID.");
+                continue;
+            }
+
+            var project = matches[0];
+            if (survivingTargetProjects.Contains(project.Id))
+            {
+                result.ProjectsKept++;
+                result.ProjectMessages.Add(
+                    $"Kept project {name} because one of its targets is still live in PSF Guard "
+                    + "and could not be moved safely.");
+                continue;
+            }
+
+            var images = imageCounts.GetValueOrDefault(project.Id);
+            if (images > 0)
+            {
+                result.ProjectsKept++;
+                result.ProjectMessages.Add(
+                    $"Kept project {name} because Target Scheduler has {images:N0} captured "
+                    + (images == 1 ? "image" : "images") + " for it.");
+                continue;
+            }
+
+            var targets = DeleteProject(connection, transaction, project, cancellationToken);
+            result.ProjectsDeleted++;
+            result.ProjectMessages.Add(
+                $"Deleted project {name} with {targets:N0} "
+                + (targets == 1 ? "target." : "targets."));
+        }
+    }
+
+    private static HashSet<long> ReadSurvivingTargetProjects(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        BundleTable targets,
+        IReadOnlySet<long> candidates,
+        CancellationToken cancellationToken)
+    {
+        var projects = new HashSet<long>();
+        if (candidates.Count == 0)
+        {
+            return projects;
+        }
+
+        var liveTargets = RowsByColumn(targets)
+            .Select(row => OptionalText(row, "guid")?.Trim())
+            .Where(guid => !string.IsNullOrEmpty(guid))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (liveTargets.Count == 0)
+        {
+            return projects;
+        }
+
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT projectId, guid FROM target";
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!reader.IsDBNull(0)
+                && candidates.Contains(reader.GetInt64(0))
+                && !reader.IsDBNull(1)
+                && liveTargets.Contains(reader.GetString(1).Trim()))
+            {
+                projects.Add(reader.GetInt64(0));
+            }
+        }
+
+        return projects;
+    }
+
+    private static Dictionary<Guid, List<LocalProject>> ReadLocalProjects(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT Id, guid, name FROM project";
+        using var reader = command.ExecuteReader();
+        var projects = new Dictionary<Guid, List<LocalProject>>();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(1)
+                || !TryParseGuid(reader.GetValue(1), out var guid))
+            {
+                continue;
+            }
+
+            var project = new LocalProject(
+                reader.GetInt64(0),
+                reader.GetString(1).Trim(),
+                reader.IsDBNull(2) ? null : Convert.ToString(reader.GetValue(2)));
+            if (!projects.TryGetValue(guid, out var list))
+            {
+                projects[guid] = list = [];
+            }
+
+            list.Add(project);
+        }
+
+        return projects;
+    }
+
+    private static Dictionary<long, long> ReadProjectImageCounts(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        IReadOnlySet<long> candidates,
+        CancellationToken cancellationToken)
+    {
+        var counts = new Dictionary<long, long>();
+        if (candidates.Count == 0)
+        {
+            return counts;
+        }
+
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        // Count both native ownership links in one scan. An image belonging to
+        // the same project through both links must only be counted once.
+        command.CommandText =
+            "SELECT image.projectId, target.projectId, COUNT(*) FROM acquiredimage AS image "
+            + "LEFT JOIN target ON target.Id = image.targetId "
+            + "GROUP BY image.projectId, target.projectId";
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var count = reader.GetInt64(2);
+            long? projectId = reader.IsDBNull(0) ? null : reader.GetInt64(0);
+            long? targetProjectId = reader.IsDBNull(1) ? null : reader.GetInt64(1);
+            if (projectId.HasValue && candidates.Contains(projectId.Value))
+            {
+                counts[projectId.Value] = counts.GetValueOrDefault(projectId.Value) + count;
+            }
+
+            if (targetProjectId.HasValue
+                && targetProjectId != projectId
+                && candidates.Contains(targetProjectId.Value))
+            {
+                counts[targetProjectId.Value] = counts.GetValueOrDefault(targetProjectId.Value) + count;
+            }
+        }
+
+        return counts;
+    }
+
+    /// <summary>
+    /// Delete one project and the rows that belong to it, child first,
+    /// probing the optional tables and columns. Returns its target count.
+    /// </summary>
+    private static int DeleteProject(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        LocalProject project,
+        CancellationToken cancellationToken)
+    {
+        var targetGuids = new List<string>();
+        var targetCount = 0;
+        var targetHasGuid = HasColumn(connection, transaction, "target", "guid");
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = targetHasGuid
+                ? "SELECT guid FROM target WHERE projectId = @projectId"
+                : "SELECT NULL FROM target WHERE projectId = @projectId";
+            command.Parameters.AddWithValue("@projectId", project.Id);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                targetCount++;
+                if (!reader.IsDBNull(0)
+                    && Convert.ToString(reader.GetValue(0))?.Trim() is { Length: > 0 } guid)
+                {
+                    targetGuids.Add(guid);
+                }
+            }
+        }
+
+        foreach (var (table, column) in TargetChildTables)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (HasColumn(connection, transaction, table, column))
+            {
+                Execute(
+                    connection,
+                    transaction,
+                    $"DELETE FROM {Quote(table)} WHERE {Quote(column)} IN "
+                    + "(SELECT Id FROM target WHERE projectId = @projectId)",
+                    ("@projectId", project.Id));
+            }
+        }
+
+        Execute(
+            connection,
+            transaction,
+            "DELETE FROM target WHERE projectId = @projectId",
+            ("@projectId", project.Id));
+        if (HasColumn(connection, transaction, "ruleweight", "projectId"))
+        {
+            Execute(
+                connection,
+                transaction,
+                "DELETE FROM ruleweight WHERE projectId = @projectId",
+                ("@projectId", project.Id));
+        }
+
+        foreach (var table in TargetGuidSideTables)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!HasColumn(connection, transaction, table, "target_guid"))
+            {
+                continue;
+            }
+
+            foreach (var guid in targetGuids)
+            {
+                Execute(
+                    connection,
+                    transaction,
+                    $"DELETE FROM {Quote(table)} WHERE lower(trim(target_guid)) = lower(@guid)",
+                    ("@guid", guid));
+            }
+        }
+
+        var projectGuids = new[]
+        {
+            project.Guid,
+            TryParseGuid(project.Guid, out var parsed) ? parsed.ToString("D") : project.Guid,
+        };
+        foreach (var table in ProjectGuidSideTables)
+        {
+            if (!HasColumn(connection, transaction, table, "project_guid"))
+            {
+                continue;
+            }
+
+            Execute(
+                connection,
+                transaction,
+                $"DELETE FROM {Quote(table)} WHERE lower(trim(project_guid)) "
+                + "IN (lower(@raw), lower(@canonical))",
+                ("@raw", projectGuids[0]),
+                ("@canonical", projectGuids[1]));
+        }
+
+        Execute(
+            connection,
+            transaction,
+            "DELETE FROM project WHERE Id = @projectId",
+            ("@projectId", project.Id));
+        return targetCount;
+    }
+
+    private static bool HasColumn(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        string table,
+        string column)
+    {
+        ValidateDeletableTable(table);
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"PRAGMA table_info({Quote(table)})";
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(1), column, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void Execute(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        string sql,
+        params (string Name, object Value)[] parameters)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = sql;
+        foreach (var (name, value) in parameters)
+        {
+            command.Parameters.AddWithValue(name, value);
+        }
+
+        command.ExecuteNonQuery();
+    }
+
+    private static bool TryParseGuid(object? value, out Guid guid)
+    {
+        guid = Guid.Empty;
+        return value is string text
+            && Guid.TryParse(text.Trim(), out guid)
+            && guid != Guid.Empty;
     }
 
     private WriteSession OpenReadWrite(CancellationToken cancellationToken)
@@ -1462,6 +1937,27 @@ public sealed class TargetSchedulerCatalogWriter
         }
     }
 
+    private static void ValidateDeletableTable(string table)
+    {
+        if (table is not (
+            "project"
+            or "target"
+            or "ruleweight"
+            or "overrideexposureorderitem"
+            or "filtercadenceitem"
+            or "flathistory"
+            or "exposureplan"
+            or "psf_guard_director_target"
+            or "psf_guard_director_plan"
+            or "psf_guard_director_project"
+            or "psf_guard_collaboration_plan"
+            or "psf_guard_scheduler_flat_history"))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(table), table, "Table is not part of a deleted project.");
+        }
+    }
+
     private static string Quote(string identifier) =>
         $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
@@ -1481,6 +1977,14 @@ public sealed class TargetSchedulerCatalogWriter
 
     private sealed record ImageDataKey(long AcquiredImageId, string? Tag);
 
+    private sealed record RemovedProject(Guid Guid, string? Name);
+
+    private sealed record RemovedProjects(
+        IReadOnlyList<RemovedProject> Projects,
+        int InvalidRows);
+
+    private sealed record LocalProject(long Id, string Guid, string? Name);
+
     private readonly record struct ExposurePlanCounts(long Acquired, long Accepted);
 
     private sealed class MutableApplyResult
@@ -1493,12 +1997,24 @@ public sealed class TargetSchedulerCatalogWriter
 
         public int Skipped { get; set; }
 
+        public int ProjectsDeleted { get; set; }
+
+        public int ProjectsKept { get; set; }
+
+        public int ProjectRowsSkipped { get; set; }
+
+        public List<string> ProjectMessages { get; } = [];
+
         public ApplyResult ToImmutable() => new()
         {
             Inserted = Inserted,
             Updated = Updated,
             Unchanged = Unchanged,
             Skipped = Skipped,
+            ProjectsDeleted = ProjectsDeleted,
+            ProjectsKept = ProjectsKept,
+            ProjectRowsSkipped = ProjectRowsSkipped,
+            ProjectMessages = ProjectMessages.ToArray(),
         };
     }
 }

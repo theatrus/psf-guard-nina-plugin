@@ -425,6 +425,24 @@ control API.
 
 Planning and grade pulls are explicit commands. Planning upserts are one
 SQLite transaction and preserve the destination plan's progress counters.
+
+When a project is deleted in PSF Guard, a planning pull or full-catalog
+pull-back from a PSF Guard version that supports deleted projects also deletes
+it from Target Scheduler, with its targets, exposure plans and their order,
+cadence and flat-history rows. PSF Guard Sync deletes a project only when
+Target Scheduler has no captured images for it. Targets moved into another
+project keep their local IDs, flat history, exposure order and filter cadence.
+An ambiguous move keeps the former project and reports the conflict instead
+of deleting the target. A project with captured images
+stays, and the pull result shows its name and why it was kept; delete it in
+Target Scheduler if you no longer need it. Exposure templates stay. A project
+that was allowed back in PSF Guard is not deleted.
+
+PSF Guard refuses an upload of a file whose project was deleted, or of a file
+it removed as a reject. The status line and N.I.N.A. log show PSF Guard's
+explanation, and the upload stays in the queue without retrying. After you
+allow the project back or restore the reject in PSF Guard, select **Retry
+blocked** to upload the file again.
 Grade pulls match only unambiguous image GUIDs and change only the grade and
 reject reason on acquired-image rows. After the pull, the plugin recomputes the
 accepted count for each affected exposure plan from those acquired-image

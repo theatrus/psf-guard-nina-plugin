@@ -7,8 +7,16 @@ internal static class QueueFailurePolicy
 {
     public const int MaximumAttempts = 12;
 
+    public const string RefusedUploadAdvice =
+        "The upload is held. After you undo this in PSF Guard, use Retry blocked to upload it again.";
+
     public static bool ShouldRetry(Exception exception, bool resolvingCapture = false)
     {
+        if (IsUploadRefused(exception))
+        {
+            return false;
+        }
+
         if (exception is Client.PsfGuardRemoteJobException remoteJobException)
         {
             return remoteJobException.IsTransient;
@@ -33,6 +41,14 @@ internal static class QueueFailurePolicy
             or TaskCanceledException
             or IOException and not FileNotFoundException and not DirectoryNotFoundException;
     }
+
+    /// <summary>
+    /// PSF Guard refused the upload with 410 Gone. Retrying cannot succeed
+    /// until the operator undoes the deletion in PSF Guard, so the queue holds
+    /// the job as refused instead of counting it as a failure.
+    /// </summary>
+    public static bool IsUploadRefused(Exception exception) =>
+        exception is Client.PsfGuardUploadRefusedException;
 
     public static TimeSpan RetryDelay(int attempts)
     {
