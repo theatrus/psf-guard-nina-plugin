@@ -102,18 +102,77 @@ public sealed class CombinedCaptureDeliveryTests
 
         Assert.Equal([PreviewPath, ApplyPath, UploadPath], requests.ToArray());
         Assert.True(Assert.Single(receipts).Applied);
-        var jobPath = Assert.Single(Directory.EnumerateFiles(queuePath, "*.json"));
-        var held = await ReadJobAsync<QueuedBundleJob>(jobPath);
+        Assert.Empty(Directory.EnumerateFiles(queuePath, "*.json"));
+        var heldPath = Assert.Single(
+            Directory.EnumerateFiles(Path.Combine(queuePath, "refused"), "*.json"));
+        var held = await ReadJobAsync<QueuedBundleJob>(heldPath);
         Assert.True(held.UploadRefused);
         Assert.True(held.SchedulerApplied);
+        Assert.True(held.PushPublished);
         Assert.False(held.Blocked);
+        Assert.Equal(1, await queue.CountRefusedUploadsAsync(Destination(), CancellationToken.None));
         Assert.Equal(0, await queue.RetryBlockedAsync(Destination(), CancellationToken.None));
 
         Volatile.Write(ref refuse, 0);
         Assert.Equal(1, await queue.RetryRefusedUploadsAsync(Destination(), CancellationToken.None));
-        await WaitUntilAsync(() => !File.Exists(jobPath), TimeSpan.FromSeconds(3));
+        await WaitUntilAsync(
+            () => !File.Exists(heldPath)
+                && !Directory.EnumerateFiles(queuePath, "*.json").Any()
+                && requests.Count == 4,
+            TimeSpan.FromSeconds(3));
+        await Task.Delay(150);
 
         Assert.Equal([PreviewPath, ApplyPath, UploadPath, UploadPath], requests.ToArray());
+        Assert.Single(receipts);
+        Assert.Equal(0, await queue.CountRefusedUploadsAsync(Destination(), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ForgettingARefusedCaptureUploadKeepsTheAppliedSchedulerRow()
+    {
+        using var directory = new TestDirectory();
+        using var database = new TestDatabase();
+        var imagePath = SeedCapture(database, directory, createImage: true);
+        var requests = new ConcurrentQueue<string>();
+        var queuePath = directory.Child("queue");
+        await using var queue = new DurablePushQueue(
+            queuePath,
+            destination => Client(
+                destination,
+                (request, _) =>
+                {
+                    var path = request.RequestUri!.AbsolutePath;
+                    requests.Enqueue(path);
+                    return Task.FromResult(
+                        path == UploadPath
+                            ? Json(
+                                """{"success":false,"data":null,"error":"Removed as a reject."}""",
+                                HttpStatusCode.Gone)
+                            : ResponseFor(path));
+                }));
+
+        await queue.EnqueueCaptureAsync(
+            Destination(),
+            database.Path,
+            "5.9.6.0",
+            imagePath,
+            default,
+            includeThumbnail: false,
+            autoApply: true,
+            uploadImageAfterApply: true,
+            CancellationToken.None);
+        queue.Start();
+        await WaitUntilAsync(
+            () => Directory.Exists(Path.Combine(queuePath, "refused"))
+                && Directory.EnumerateFiles(Path.Combine(queuePath, "refused"), "*.json").Any(),
+            TimeSpan.FromSeconds(3));
+
+        Assert.Equal(1, await queue.ForgetRefusedUploadsAsync(Destination(), CancellationToken.None));
+
+        Assert.Empty(Directory.EnumerateFiles(Path.Combine(queuePath, "refused"), "*.json"));
+        Assert.Empty(Directory.EnumerateFiles(queuePath, "*.json"));
+        Assert.True(File.Exists(imagePath));
+        Assert.Equal([PreviewPath, ApplyPath, UploadPath], requests.ToArray());
     }
 
     [Fact]
