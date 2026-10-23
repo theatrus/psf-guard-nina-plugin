@@ -32,9 +32,13 @@ public sealed class PullPsfGuardPlanning : PsfGuardSequenceItemBase
         using var status = BeginStatus(progress);
         var captureSettings = CaptureSettingsSnapshot();
         Report(progress, "Pulling planning...");
-        await CreateOrchestrator(captureSettings)
+        var result = await CreateOrchestrator(captureSettings)
             .PullPlanningAsync(token)
             .ConfigureAwait(false);
+        if (result.DeletedProjectsSummary is { } deletedProjects)
+        {
+            Report(progress, deletedProjects);
+        }
     }
 
     public override object Clone() => new PullPsfGuardPlanning(this);

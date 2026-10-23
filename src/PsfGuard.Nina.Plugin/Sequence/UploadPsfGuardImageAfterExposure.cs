@@ -149,7 +149,7 @@ public sealed class UploadPsfGuardImageAfterExposure : PsfGuardSequenceTriggerBa
         }
 
         Report(progress, "Uploading image...");
-        await UploadImageAsync(captureSettings, capture.ImagePath, token)
+        await UploadImageAsync(captureSettings, capture.ImagePath, progress, token)
             .ConfigureAwait(false);
     }
 

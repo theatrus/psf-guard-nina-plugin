@@ -16,6 +16,12 @@
   `flathistory` row only for an explicit server decision whose persistent
   origin, row ID, target GUID, and full-row fingerprint still match. Never
   infer invalidation from missing snapshot rows or delete calibration files.
+- Planning and merge pulls delete a Target Scheduler project only when the
+  bundle's optional `psf_guard_removed_project` table lists its GUID and
+  Target Scheduler has no acquired images for it or its targets. That deletion
+  also removes its targets' `flathistory` rows; nothing else in a bundle
+  deletes rows. Request the table only from servers that advertise
+  `project_tombstones_v1`.
 - A protocol change requires matching updates to `docs/PROTOCOL.md` and tests.
 - Never open a PR against upstream `isbeorn/nina.plugin.manifests`. Yann
   handles upstream submissions; provide suggested submission text in chat.

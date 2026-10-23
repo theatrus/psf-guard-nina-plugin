@@ -53,6 +53,62 @@ public sealed class CombinedCaptureDeliveryTests
     }
 
     [Fact]
+    public async Task CombinedCaptureRecordsAnUploadOfADeletedProjectAsSkipped()
+    {
+        using var directory = new TestDirectory();
+        using var database = new TestDatabase();
+        var imagePath = SeedCapture(database, directory, createImage: true);
+        var requests = new ConcurrentQueue<string>();
+        var statuses = new ConcurrentQueue<string>();
+        var completed = new TaskCompletionSource<PushReceipt>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var queue = new DurablePushQueue(
+            directory.Child("queue"),
+            destination => Client(
+                destination,
+                (request, _) =>
+                {
+                    var path = request.RequestUri!.AbsolutePath;
+                    requests.Enqueue(path);
+                    return Task.FromResult(
+                        path == UploadPath
+                            ? Json(
+                                """{"success":false,"data":null,"error":"Project M 31 was deleted."}""",
+                                HttpStatusCode.Gone)
+                            : ResponseFor(path));
+                }),
+            statuses.Enqueue);
+        queue.Pushed += (_, receipt) => completed.TrySetResult(receipt);
+
+        await queue.EnqueueCaptureAsync(
+            Destination(),
+            database.Path,
+            "5.9.6.0",
+            imagePath,
+            default,
+            includeThumbnail: false,
+            autoApply: true,
+            uploadImageAfterApply: true,
+            CancellationToken.None);
+        queue.Start();
+
+        var receipt = await completed.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await Task.Delay(250);
+
+        Assert.True(receipt.Applied);
+        Assert.Equal([PreviewPath, ApplyPath, UploadPath], requests.ToArray());
+        Assert.Contains(
+            statuses,
+            status => status.Contains(
+                "Skipped capture.fit: the project was deleted in PSF Guard.",
+                StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            statuses,
+            status => status.Contains("blocked", StringComparison.OrdinalIgnoreCase));
+        Assert.Empty(Directory.EnumerateFiles(directory.Child("queue"), "*.json"));
+    }
+
+    [Fact]
     public async Task CombinedCaptureDoesNotUploadWhileApplyIsPendingOrAfterItFails()
     {
         using var directory = new TestDirectory();

@@ -1,0 +1,749 @@
+using System.Data.SQLite;
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using PsfGuard.Nina.Sync.Client;
+using PsfGuard.Nina.Sync.Protocol;
+using PsfGuard.Nina.Sync.TargetScheduler;
+
+namespace PsfGuard.Nina.Sync.Tests;
+
+// Projects deleted in PSF Guard: the export opt-in, the optional
+// psf_guard_removed_project table, and the Target Scheduler deletions it causes.
+public sealed class ProjectTombstoneTests
+{
+    private const string EmptyProjectGuid = "6f1c2f6e-3a0b-4c55-9f43-0e5a52a1d001";
+    private const string EmptyTargetGuid = "6f1c2f6e-3a0b-4c55-9f43-0e5a52a1d002";
+    private const string CapturedProjectGuid = "6f1c2f6e-3a0b-4c55-9f43-0e5a52a1d011";
+    private const string CapturedTargetGuid = "6f1c2f6e-3a0b-4c55-9f43-0e5a52a1d012";
+    private const string OtherProjectGuid = "6f1c2f6e-3a0b-4c55-9f43-0e5a52a1d021";
+    private const string OtherTargetGuid = "6f1c2f6e-3a0b-4c55-9f43-0e5a52a1d022";
+    private const string UnknownProjectGuid = "6f1c2f6e-3a0b-4c55-9f43-0e5a52a1d031";
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ApplyDeletesAFramelessProjectAndKeepsOneWithCapturedImages(bool merge)
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        AddOptionalTables(destination);
+        SeedProject(source, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: true);
+        SeedProject(destination, 200, EmptyProjectGuid, EmptyTargetGuid, "Deleted empty", withImage: false);
+        SeedProject(destination, 300, CapturedProjectGuid, CapturedTargetGuid, "Deleted captured", withImage: true);
+        SeedProject(destination, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: true);
+        SeedChildren(destination, 200, EmptyProjectGuid, EmptyTargetGuid);
+        SeedChildren(destination, 300, CapturedProjectGuid, CapturedTargetGuid);
+        SeedChildren(destination, 400, OtherProjectGuid, OtherTargetGuid);
+
+        var bundle = await BuildBundleAsync(source, merge);
+        // The local GUID matches case-insensitively and with spaces trimmed;
+        // an unknown GUID and extra columns are ignored.
+        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] = RemovedProjects(
+            ($"  {EmptyProjectGuid.ToUpperInvariant()} ", "Deleted empty"),
+            (CapturedProjectGuid, "Deleted captured"),
+            (UnknownProjectGuid, "Never on this rig"));
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+
+        var result = merge
+            ? await writer.ApplyMergeAsync(bundle, CancellationToken.None)
+            : await writer.ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(1, result.ProjectsDeleted);
+        Assert.Equal(1, result.ProjectsKept);
+        Assert.Contains(result.ProjectMessages, message =>
+            message.Contains("Deleted project Deleted empty", StringComparison.Ordinal));
+        Assert.Contains(result.ProjectMessages, message =>
+            message.Contains("Kept project Deleted captured", StringComparison.Ordinal)
+            && message.Contains("1 captured image", StringComparison.Ordinal));
+        Assert.NotNull(result.DeletedProjectsSummary);
+
+        using var connection = destination.Open();
+        Assert.Equal(0, CountRows(connection, "project", "Id = 201"));
+        Assert.Equal(0, CountRows(connection, "target", "projectId = 201"));
+        Assert.Equal(0, CountRows(connection, "exposureplan", "targetId = 202"));
+        Assert.Equal(0, CountRows(connection, "ruleweight", "projectId = 201"));
+        Assert.Equal(0, CountRows(connection, "overrideexposureorderitem", "targetid = 202"));
+        Assert.Equal(0, CountRows(connection, "filtercadenceitem", "targetid = 202"));
+        Assert.Equal(0, CountRows(connection, "flathistory", "targetId = 202"));
+        foreach (var table in SideTables)
+        {
+            Assert.Equal(0, CountGuidRows(connection, table, EmptyProjectGuid, EmptyTargetGuid));
+        }
+
+        // Exposure templates belong to the profile and stay.
+        Assert.Equal(1, CountRows(connection, "exposuretemplate", "Id = 203"));
+
+        foreach (var offset in new[] { 300, 400 })
+        {
+            Assert.Equal(1, CountRows(connection, "project", $"Id = {offset + 1}"));
+            Assert.Equal(1, CountRows(connection, "target", $"projectId = {offset + 1}"));
+            Assert.Equal(1, CountRows(connection, "exposureplan", $"targetId = {offset + 2}"));
+            Assert.Equal(1, CountRows(connection, "ruleweight", $"projectId = {offset + 1}"));
+            Assert.Equal(1, CountRows(connection, "overrideexposureorderitem", $"targetid = {offset + 2}"));
+            Assert.Equal(1, CountRows(connection, "filtercadenceitem", $"targetid = {offset + 2}"));
+            Assert.Equal(1, CountRows(connection, "flathistory", $"targetId = {offset + 2}"));
+            Assert.Equal(1, CountRows(connection, "acquiredimage", $"projectId = {offset + 1}"));
+        }
+
+        foreach (var table in SideTables)
+        {
+            Assert.True(CountGuidRows(connection, table, CapturedProjectGuid, CapturedTargetGuid) > 0);
+            Assert.True(CountGuidRows(connection, table, OtherProjectGuid, OtherTargetGuid) > 0);
+        }
+    }
+
+    [Fact]
+    public async Task ProjectWithCapturesOnlyOnItsTargetsIsKept()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        SeedProject(source, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: false);
+        SeedProject(destination, 200, EmptyProjectGuid, EmptyTargetGuid, "Deleted empty", withImage: false);
+        SeedProject(destination, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: false);
+        using (var connection = destination.Open())
+        {
+            // A frame recorded under another project on the deleted project's target.
+            connection.Execute(
+                """
+                INSERT INTO acquiredimage
+                    (Id, projectId, targetId, acquireddate, filtername, gradingStatus, metadata, guid)
+                VALUES (900, 401, 202, 1, 'L', 0, '{}', '6f1c2f6e-3a0b-4c55-9f43-0e5a52a1d900');
+                """);
+        }
+
+        var bundle = await BuildBundleAsync(source, merge: false);
+        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] =
+            RemovedProjects((EmptyProjectGuid, "Deleted empty"));
+
+        var result = await new TargetSchedulerCatalogWriter(destination.Path)
+            .ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(0, result.ProjectsDeleted);
+        Assert.Equal(1, result.ProjectsKept);
+        using var check = destination.Open();
+        Assert.Equal(1, CountRows(check, "project", "Id = 201"));
+        Assert.Equal(1, CountRows(check, "target", "Id = 202"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ADeletedGuidInTheBundlesProjectTableIsNotInserted(bool merge)
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        SeedProject(source, 200, EmptyProjectGuid, EmptyTargetGuid, "Deleted empty", withImage: true);
+        SeedProject(source, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: true);
+
+        var bundle = await BuildBundleAsync(source, merge);
+        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] =
+            RemovedProjects((EmptyProjectGuid, "Deleted empty"));
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+
+        var result = merge
+            ? await writer.ApplyMergeAsync(bundle, CancellationToken.None)
+            : await writer.ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(0, result.ProjectsDeleted);
+        Assert.True(result.Skipped > 0);
+        using var connection = destination.Open();
+        Assert.Equal(0, CountWhere(connection, "project", "guid", EmptyProjectGuid));
+        Assert.Equal(0, CountWhere(connection, "target", "guid", EmptyTargetGuid));
+        Assert.Equal(0, CountRows(connection, "exposureplan", "guid = 'plan-201'"));
+        Assert.Equal(0, CountRows(connection, "acquiredimage", "guid = 'image-201'"));
+        Assert.Equal(1, CountWhere(connection, "project", "guid", OtherProjectGuid));
+        Assert.Equal(1, CountWhere(connection, "target", "guid", OtherTargetGuid));
+        Assert.Equal(merge ? 1 : 0, CountRows(connection, "acquiredimage", "guid = 'image-401'"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task BundleWithoutTheTableLeavesLocalProjectsAlone(bool merge)
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        AddOptionalTables(destination);
+        SeedProject(source, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: true);
+        SeedProject(destination, 200, EmptyProjectGuid, EmptyTargetGuid, "Local only", withImage: false);
+        SeedChildren(destination, 200, EmptyProjectGuid, EmptyTargetGuid);
+
+        var bundle = await BuildBundleAsync(source, merge);
+        Assert.DoesNotContain(TargetSchedulerCatalogWriter.RemovedProjectTable, bundle.Tables.Keys);
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+
+        var result = merge
+            ? await writer.ApplyMergeAsync(bundle, CancellationToken.None)
+            : await writer.ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(0, result.ProjectsDeleted);
+        Assert.Equal(0, result.ProjectsKept);
+        Assert.Empty(result.ProjectMessages);
+        Assert.Null(result.DeletedProjectsSummary);
+        Assert.Equal(0, result.Skipped);
+        Assert.True(result.Inserted > 0);
+        using var connection = destination.Open();
+        Assert.Equal(1, CountRows(connection, "project", "Id = 201"));
+        Assert.Equal(1, CountRows(connection, "overrideexposureorderitem", "targetid = 202"));
+        Assert.Equal(1, CountRows(connection, "psf_guard_director_project", "global_project_id = 'global-201'"));
+        Assert.Equal(1, CountWhere(connection, "project", "guid", OtherProjectGuid));
+    }
+
+    [Theory]
+    [InlineData("not-a-guid")]
+    [InlineData("00000000-0000-0000-0000-000000000000")]
+    public async Task MalformedDeletedProjectGuidFailsBeforeAnyWrite(string guid)
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        SeedProject(source, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: false);
+        SeedProject(destination, 200, EmptyProjectGuid, EmptyTargetGuid, "Deleted empty", withImage: false);
+        var bundle = await BuildBundleAsync(source, merge: false);
+        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] = RemovedProjects(
+            (EmptyProjectGuid, "Deleted empty"),
+            (guid, "Broken"));
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => new TargetSchedulerCatalogWriter(destination.Path)
+                .ApplyPlanningAsync(bundle, CancellationToken.None));
+
+        using var connection = destination.Open();
+        Assert.Equal(1, CountRows(connection, "project", "Id = 201"));
+        Assert.Equal(0, CountWhere(connection, "project", "guid", OtherProjectGuid));
+    }
+
+    [Fact]
+    public async Task DeletedProjectTableWithoutRequiredColumnsIsRefused()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        SeedProject(source, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: false);
+        SeedProject(destination, 200, EmptyProjectGuid, EmptyTargetGuid, "Deleted empty", withImage: false);
+        var bundle = await BuildBundleAsync(source, merge: false);
+        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] = new BundleTable
+        {
+            Columns = [Column("project_guid", "TEXT")],
+            Rows = [new BundleRow { Values = [WireValue.Text(EmptyProjectGuid)] }],
+        };
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(
+            () => new TargetSchedulerCatalogWriter(destination.Path)
+                .ApplyPlanningAsync(bundle, CancellationToken.None));
+
+        Assert.Contains("name", exception.Message, StringComparison.Ordinal);
+        using var connection = destination.Open();
+        Assert.Equal(1, CountRows(connection, "project", "Id = 201"));
+    }
+
+    [Fact]
+    public async Task ProjectWhoseGuidIsNotUniqueIsKept()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        SeedProject(source, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: false);
+        SeedProject(destination, 200, EmptyProjectGuid, EmptyTargetGuid, "First copy", withImage: false);
+        using (var connection = destination.Open())
+        {
+            connection.Execute(
+                $"""
+                INSERT INTO project (Id, profileId, name, state, priority, guid)
+                VALUES (501, 'profile', 'Second copy', 1, 1, '{EmptyProjectGuid.ToUpperInvariant()}');
+                """);
+        }
+
+        var bundle = await BuildBundleAsync(source, merge: false);
+        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] =
+            RemovedProjects((EmptyProjectGuid, "Deleted"));
+
+        var result = await new TargetSchedulerCatalogWriter(destination.Path)
+            .ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(0, result.ProjectsDeleted);
+        Assert.Equal(1, result.ProjectsKept);
+        Assert.Contains("more than one", Assert.Single(result.ProjectMessages), StringComparison.Ordinal);
+        using var check = destination.Open();
+        Assert.Equal(2, CountRows(check, "project", "Id IN (201, 501)"));
+    }
+
+    [Fact]
+    public async Task ExportRequestCarriesTheOptInOnlyWhenAsked()
+    {
+        var bodies = new List<string>();
+        var bundle = EmptyBundle(SyncOperation.PushPlanning);
+        var handler = new StubHandler(
+            async request =>
+            {
+                bodies.Add(await request.Content!.ReadAsStringAsync());
+                return Json(
+                    $$"""
+                    {"export_id":"export-1","state":"ready","bundle":{{ProtocolJson.Serialize(bundle)}}}
+                    """);
+            });
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(handler),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        await client.DownloadExportAsync(
+            "review",
+            SyncOperation.PushPlanning,
+            reviewedOnly: false,
+            includeThumbnails: null,
+            includeProjectTombstones: true,
+            CancellationToken.None);
+        await client.DownloadExportAsync(
+            "review",
+            SyncOperation.PushPlanning,
+            reviewedOnly: false,
+            includeThumbnails: null,
+            includeProjectTombstones: false,
+            CancellationToken.None);
+        await client.DownloadExportAsync(
+            "review",
+            SyncOperation.PushPlanning,
+            reviewedOnly: false,
+            CancellationToken.None);
+
+        using (var optedIn = JsonDocument.Parse(bodies[0]))
+        {
+            Assert.True(optedIn.RootElement.GetProperty("include_project_tombstones").GetBoolean());
+            Assert.False(optedIn.RootElement.TryGetProperty("include_thumbnails", out _));
+        }
+
+        foreach (var body in bodies.Skip(1))
+        {
+            using var json = JsonDocument.Parse(body);
+            Assert.False(json.RootElement.TryGetProperty("include_project_tombstones", out _));
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task PlanningPullOptsInOnlyWhenTheServerAdvertisesTombstones(bool advertised)
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        SeedProject(source, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: false);
+        SeedProject(destination, 200, EmptyProjectGuid, EmptyTargetGuid, "Deleted empty", withImage: false);
+        var bundle = await BuildBundleAsync(source, merge: false);
+        if (advertised)
+        {
+            bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] =
+                RemovedProjects((EmptyProjectGuid, "Deleted empty"));
+        }
+
+        var capabilityRequests = 0;
+        string? exportRequest = null;
+        var orchestrator = Orchestrator(
+            destination.Path,
+            request =>
+            {
+                if (request.Method == HttpMethod.Get)
+                {
+                    capabilityRequests++;
+                    return Capabilities(
+                        advertised
+                            ? [SyncOrchestrator.ExportsCapability, SyncOrchestrator.ProjectTombstonesCapability]
+                            : [SyncOrchestrator.ExportsCapability]);
+                }
+
+                exportRequest = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+                return Json(
+                    $$"""
+                    {"export_id":"export-1","state":"ready","bundle":{{ProtocolJson.Serialize(bundle)}}}
+                    """);
+            });
+
+        var result = await orchestrator.PullPlanningAsync(CancellationToken.None);
+
+        Assert.Equal(1, capabilityRequests);
+        using var json = JsonDocument.Parse(exportRequest!);
+        if (advertised)
+        {
+            Assert.True(json.RootElement.GetProperty("include_project_tombstones").GetBoolean());
+            Assert.Equal(1, result.ProjectsDeleted);
+        }
+        else
+        {
+            Assert.False(json.RootElement.TryGetProperty("include_project_tombstones", out _));
+            Assert.Equal(0, result.ProjectsDeleted);
+        }
+
+        using var connection = destination.Open();
+        Assert.Equal(advertised ? 0 : 1, CountRows(connection, "project", "Id = 201"));
+    }
+
+    [Fact]
+    public async Task MergePullReusesTheRoundTripCapabilityCheckAndReportsDeletions()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        SeedProject(source, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: true);
+        SeedProject(destination, 200, EmptyProjectGuid, EmptyTargetGuid, "Deleted empty", withImage: false);
+        var bundle = await BuildBundleAsync(source, merge: true);
+        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] =
+            RemovedProjects((EmptyProjectGuid, "Deleted empty"));
+        var capabilityRequests = 0;
+        string? exportRequest = null;
+        var updates = new List<SyncProgress>();
+        var orchestrator = Orchestrator(
+            destination.Path,
+            request =>
+            {
+                if (request.Method == HttpMethod.Get)
+                {
+                    capabilityRequests++;
+                    return Capabilities(
+                        [SyncOrchestrator.ExportsCapability, SyncOrchestrator.ProjectTombstonesCapability]);
+                }
+
+                exportRequest = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+                return Json(
+                    $$"""
+                    {"export_id":"export-merge","state":"ready","bundle":{{ProtocolJson.Serialize(bundle)}}}
+                    """);
+            });
+
+        await orchestrator.EnsureRoundTripSupportedAsync(CancellationToken.None);
+        var result = await orchestrator.PullMergedCatalogAsync(
+            CancellationToken.None,
+            new RecordingProgress<SyncProgress>(updates.Add));
+
+        Assert.Equal(1, capabilityRequests);
+        using var json = JsonDocument.Parse(exportRequest!);
+        Assert.True(json.RootElement.GetProperty("include_project_tombstones").GetBoolean());
+        Assert.False(json.RootElement.GetProperty("include_thumbnails").GetBoolean());
+        Assert.Equal(1, result.ProjectsDeleted);
+        Assert.Contains(updates, update => update.Stage == SyncProgressStage.Completed
+            && update.Message.Contains("Deleted project Deleted empty", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task MergePullOmitsTheOptInForAServerWithoutTombstones()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        SeedProject(source, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: true);
+        var bundle = await BuildBundleAsync(source, merge: true);
+        string? exportRequest = null;
+        var orchestrator = Orchestrator(
+            destination.Path,
+            request =>
+            {
+                if (request.Method == HttpMethod.Get)
+                {
+                    return Capabilities([SyncOrchestrator.ExportsCapability]);
+                }
+
+                exportRequest = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+                return Json(
+                    $$"""
+                    {"export_id":"export-merge","state":"ready","bundle":{{ProtocolJson.Serialize(bundle)}}}
+                    """);
+            });
+
+        var result = await orchestrator.PullMergedCatalogAsync(CancellationToken.None);
+
+        using var json = JsonDocument.Parse(exportRequest!);
+        Assert.False(json.RootElement.TryGetProperty("include_project_tombstones", out _));
+        Assert.Null(result.DeletedProjectsSummary);
+    }
+
+    [Fact]
+    public async Task UploadRefusedWithGoneReportsTheDeletedProject()
+    {
+        var directory = Directory.CreateTempSubdirectory("psf-guard-gone-test-");
+        try
+        {
+            var path = Path.Combine(directory.FullName, "capture.fit");
+            await File.WriteAllTextAsync(path, "SIMPLE");
+            var handler = new StubHandler(
+                _ => Task.FromResult(Json(
+                    """{"success":false,"data":null,"error":"Project M 31 was deleted from this catalog."}""",
+                    HttpStatusCode.Gone)));
+            using var client = new PsfGuardSyncClient(
+                new HttpClient(handler),
+                new Uri("https://psf.example/"),
+                "remote-key");
+
+            var exception = await Assert.ThrowsAsync<PsfGuardProjectDeletedException>(
+                () => client.UploadImageAsync("catalog-a", path, CancellationToken.None));
+
+            Assert.Equal(HttpStatusCode.Gone, exception.StatusCode);
+            Assert.Equal("capture.fit", exception.FileName);
+            Assert.Equal("Project M 31 was deleted from this catalog.", exception.ServerMessage);
+            Assert.StartsWith(
+                "Skipped capture.fit: the project was deleted in PSF Guard.",
+                exception.Message,
+                StringComparison.Ordinal);
+            Assert.False(Queue.QueueFailurePolicy.ShouldRetry(exception));
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    private static readonly string[] SideTables =
+    [
+        "psf_guard_director_project",
+        "psf_guard_director_target",
+        "psf_guard_director_plan",
+        "psf_guard_collaboration_plan",
+        "psf_guard_scheduler_flat_history",
+    ];
+
+    private static async Task<CatalogBundle> BuildBundleAsync(TestDatabase source, bool merge)
+    {
+        var reader = new TargetSchedulerCatalogReader(source.Path, "5.9.6.0");
+        return merge
+            ? await reader.BuildFullMergeBundleAsync(includeThumbnails: false, CancellationToken.None)
+            : await reader.BuildPlanningBundleAsync(CancellationToken.None);
+    }
+
+    private static void SeedProject(
+        TestDatabase database,
+        long offset,
+        string projectGuid,
+        string targetGuid,
+        string name,
+        bool withImage)
+    {
+        using var connection = database.Open();
+        connection.Execute(
+            """
+            INSERT INTO project (Id, profileId, name, description, state, priority, guid)
+                VALUES (@projectId, 'profile', @name, NULL, 1, 1, @projectGuid);
+            INSERT INTO ruleweight (Id, name, weight, projectId)
+                VALUES (@ruleId, 'Altitude', 1.5, @projectId);
+            INSERT INTO target (Id, name, active, ra, dec, projectId, guid)
+                VALUES (@targetId, @name, 1, 0.7, 41.2, @projectId, @targetGuid);
+            INSERT INTO exposuretemplate (Id, profileId, name, filtername, gain, guid)
+                VALUES (@templateId, 'profile', 'L 120', 'L', 100, @templateGuid);
+            INSERT INTO exposureplan
+                (Id, profileId, exposure, desired, acquired, accepted, targetId, exposureTemplateId, guid)
+                VALUES (@planId, 'profile', 120, 20, 0, 0, @targetId, @templateId, @planGuid);
+            """,
+            new Dictionary<string, object?>
+            {
+                ["@projectId"] = offset + 1,
+                ["@targetId"] = offset + 2,
+                ["@templateId"] = offset + 3,
+                ["@planId"] = offset + 4,
+                ["@ruleId"] = offset + 6,
+                ["@name"] = name,
+                ["@projectGuid"] = projectGuid,
+                ["@targetGuid"] = targetGuid,
+                ["@templateGuid"] = $"template-{offset + 1}",
+                ["@planGuid"] = $"plan-{offset + 1}",
+            });
+        if (withImage)
+        {
+            connection.Execute(
+                """
+                INSERT INTO acquiredimage
+                    (Id, projectId, targetId, acquireddate, filtername, gradingStatus, metadata,
+                     rejectreason, profileId, exposureId, guid)
+                VALUES (@imageId, @projectId, @targetId, 1, 'L', 0, '{}', NULL, 'profile', @planId, @imageGuid);
+                """,
+                new Dictionary<string, object?>
+                {
+                    ["@imageId"] = offset + 5,
+                    ["@projectId"] = offset + 1,
+                    ["@targetId"] = offset + 2,
+                    ["@planId"] = offset + 4,
+                    ["@imageGuid"] = $"image-{offset + 1}",
+                });
+        }
+    }
+
+    // Target Scheduler's optional per-target tables and the PSF Guard
+    // records a rig's database may hold.
+    private static void AddOptionalTables(TestDatabase database)
+    {
+        using var connection = database.Open();
+        connection.Execute(
+            """
+            CREATE TABLE overrideexposureorderitem (
+                Id INTEGER PRIMARY KEY, targetid INTEGER, "order" INTEGER,
+                action INTEGER, referenceIdx INTEGER);
+            CREATE TABLE filtercadenceitem (
+                Id INTEGER PRIMARY KEY, targetid INTEGER, "order" INTEGER,
+                action INTEGER, referenceIdx INTEGER);
+            CREATE TABLE flathistory (
+                Id INTEGER PRIMARY KEY, targetId INTEGER, lightSessionDate INTEGER,
+                profileId TEXT);
+            CREATE TABLE psf_guard_director_project (
+                project_guid TEXT PRIMARY KEY NOT NULL, global_project_id TEXT NOT NULL);
+            CREATE TABLE psf_guard_director_target (
+                target_guid TEXT PRIMARY KEY NOT NULL, project_guid TEXT NOT NULL);
+            CREATE TABLE psf_guard_director_plan (
+                exposureplan_guid TEXT PRIMARY KEY NOT NULL, target_guid TEXT NOT NULL);
+            CREATE TABLE psf_guard_collaboration_plan (import_id TEXT, target_guid TEXT);
+            CREATE TABLE psf_guard_scheduler_flat_history (record_id TEXT, target_guid TEXT);
+            """);
+    }
+
+    private static void SeedChildren(
+        TestDatabase database,
+        long offset,
+        string projectGuid,
+        string targetGuid)
+    {
+        using var connection = database.Open();
+        connection.Execute(
+            """
+            INSERT INTO overrideexposureorderitem (targetid, "order", action, referenceIdx)
+                VALUES (@targetId, 0, 0, 0);
+            INSERT INTO filtercadenceitem (targetid, "order", action, referenceIdx)
+                VALUES (@targetId, 0, 0, 0);
+            INSERT INTO flathistory (targetId, lightSessionDate, profileId)
+                VALUES (@targetId, 1, 'profile');
+            INSERT INTO psf_guard_director_project (project_guid, global_project_id)
+                VALUES (upper(@projectGuid), @globalId);
+            INSERT INTO psf_guard_director_target (target_guid, project_guid)
+                VALUES (@targetGuid, @projectGuid);
+            INSERT INTO psf_guard_director_plan (exposureplan_guid, target_guid)
+                VALUES (@planGuid, @targetGuid);
+            INSERT INTO psf_guard_collaboration_plan (import_id, target_guid)
+                VALUES ('import', upper(@targetGuid));
+            INSERT INTO psf_guard_scheduler_flat_history (record_id, target_guid)
+                VALUES (@planGuid, @targetGuid);
+            """,
+            new Dictionary<string, object?>
+            {
+                ["@targetId"] = offset + 2,
+                ["@projectGuid"] = projectGuid,
+                ["@targetGuid"] = targetGuid,
+                ["@planGuid"] = $"plan-{offset + 1}",
+                ["@globalId"] = $"global-{offset + 1}",
+            });
+    }
+
+    private static BundleTable RemovedProjects(params (string Guid, string Name)[] projects) => new()
+    {
+        Columns =
+        [
+            Column("project_guid", "TEXT"),
+            Column("name", "TEXT"),
+            Column("removed_at", "INTEGER"),
+        ],
+        Rows = projects
+            .Select(project => new BundleRow
+            {
+                Values =
+                [
+                    WireValue.Text(project.Guid),
+                    WireValue.Text(project.Name),
+                    WireValue.Integer(1_790_000_000),
+                ],
+            })
+            .ToArray(),
+    };
+
+    private static BundleColumn Column(string name, string type) => new()
+    {
+        Name = name,
+        DeclaredType = type,
+    };
+
+    private static CatalogBundle EmptyBundle(SyncOperation operation) => new()
+    {
+        BundleId = Guid.NewGuid(),
+        CreatedAtUtc = DateTimeOffset.UtcNow,
+        Operation = operation,
+        Source = new CatalogIdentity
+        {
+            Id = "psf-guard",
+            Product = "PSF Guard",
+            ProductVersion = "1.0.0",
+            SchemaVersion = 23,
+        },
+        Tables = new SortedDictionary<string, BundleTable>(),
+    };
+
+    private static long CountRows(SQLiteConnection connection, string table, string where)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"SELECT COUNT(*) FROM \"{table}\" WHERE {where}";
+        return Convert.ToInt64(command.ExecuteScalar());
+    }
+
+    private static long CountWhere(
+        SQLiteConnection connection,
+        string table,
+        string column,
+        string value)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $"SELECT COUNT(*) FROM \"{table}\" WHERE lower(trim(\"{column}\")) = lower(@value)";
+        command.Parameters.AddWithValue("@value", value);
+        return Convert.ToInt64(command.ExecuteScalar());
+    }
+
+    private static long CountGuidRows(
+        SQLiteConnection connection,
+        string table,
+        string projectGuid,
+        string targetGuid)
+    {
+        var column = table == "psf_guard_director_project" ? "project_guid" : "target_guid";
+        var value = column == "project_guid" ? projectGuid : targetGuid;
+        var count = CountWhere(connection, table, column, value);
+        if (table == "psf_guard_director_target")
+        {
+            count += CountWhere(connection, table, "project_guid", projectGuid);
+        }
+
+        return count;
+    }
+
+    private static SyncOrchestrator Orchestrator(
+        string databasePath,
+        Func<HttpRequestMessage, HttpResponseMessage> send) => new(
+        "catalog-a",
+        autoApplyPushes: true,
+        includeThumbnails: false,
+        () => new PsfGuardSyncClient(
+            new HttpClient(new StubHandler(request => Task.FromResult(send(request)))),
+            new Uri("https://psf.example/"),
+            "token"),
+        new TargetSchedulerCatalogReader(databasePath, "5.9.6.0"),
+        new TargetSchedulerCatalogWriter(databasePath));
+
+    private static HttpResponseMessage Capabilities(IReadOnlyList<string> capabilities) =>
+        Json(
+            $$"""
+            {
+              "protocol_version":1,
+              "product":"PSF Guard",
+              "product_version":"1.0.0",
+              "capabilities":{{JsonSerializer.Serialize(capabilities)}},
+              "catalogs":[{"id":"catalog-a","name":"Catalog A","readable":true,"writable":true}]
+            }
+            """);
+
+    private static HttpResponseMessage Json(
+        string body,
+        HttpStatusCode statusCode = HttpStatusCode.OK) => new(statusCode)
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json"),
+        };
+
+    private sealed class StubHandler(
+        Func<HttpRequestMessage, Task<HttpResponseMessage>> send)
+        : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken) => send(request);
+    }
+
+    private sealed class RecordingProgress<T>(Action<T> record) : IProgress<T>
+    {
+        public void Report(T value) => record(value);
+    }
+}

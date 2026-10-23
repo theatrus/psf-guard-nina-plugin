@@ -257,6 +257,50 @@ public sealed class DeferredUploadQueueTests
     }
 
     [Fact]
+    public async Task UploadRefusedBecauseItsProjectWasDeletedIsSkippedNotRetried()
+    {
+        using var directory = new TestDirectory();
+        var queuePath = directory.Child("queue");
+        var imagePath = directory.Write("capture.fit", "test image");
+        var destination = Destination();
+        var requests = 0;
+        var statuses = new ConcurrentQueue<string>();
+        await using var queue = new DurableImageUploadQueue(
+            queuePath,
+            actualDestination => Client(
+                actualDestination,
+                (_, _) =>
+                {
+                    Interlocked.Increment(ref requests);
+                    return Task.FromResult(Json(
+                        """{"success":false,"data":null,"error":"Project M 31 was deleted."}""",
+                        HttpStatusCode.Gone));
+                }),
+            statuses.Enqueue);
+        var jobId = await queue.EnqueueAsync(destination, imagePath, CancellationToken.None);
+        queue.Start();
+
+        await WaitUntilAsync(
+            () => !File.Exists(Path.Combine(queuePath, $"{jobId:N}.json")),
+            TimeSpan.FromSeconds(3));
+        await Task.Delay(250);
+
+        Assert.Equal(1, Volatile.Read(ref requests));
+        Assert.Contains(
+            statuses,
+            status => status.StartsWith(
+                    "Skipped capture.fit: the project was deleted in PSF Guard.",
+                    StringComparison.Ordinal)
+                && status.Contains("Project M 31 was deleted.", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            statuses,
+            status => status.Contains("blocked", StringComparison.OrdinalIgnoreCase)
+                || status.Contains("failed", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(0, await queue.RetryBlockedAsync(destination, CancellationToken.None));
+        Assert.Empty(Directory.EnumerateFiles(queuePath, "*.json"));
+    }
+
+    [Fact]
     public async Task ReleaseIsDestinationExactAndPreservesFailureState()
     {
         using var directory = new TestDirectory();

@@ -31,6 +31,13 @@ internal sealed record QueuedBundleJob
     public bool Blocked { get; set; }
 
     public bool Completed { get; set; }
+
+    /// <summary>
+    /// Why the image upload was skipped after the scheduler phase, such as a
+    /// project deleted in PSF Guard. Null when the upload completed or the
+    /// job had no upload.
+    /// </summary>
+    public string? SkippedReason { get; set; }
 }
 
 internal sealed record QueuedCaptureSource

@@ -472,13 +472,23 @@ public sealed class DurablePushQueue : IAsyncDisposable
                 job.PrerequisiteAttempts = 0;
                 uploadingImage = true;
                 ReportStatus($"Uploading {Path.GetFileName(uploadPath)} after scheduler sync...");
+                string? skippedUpload = null;
                 using (var client = clientFactory(job.Destination))
                 {
-                    await client.UploadImageAsync(
-                            job.Destination.CatalogId,
-                            uploadPath,
-                            cancellationToken)
-                        .ConfigureAwait(false);
+                    try
+                    {
+                        await client.UploadImageAsync(
+                                job.Destination.CatalogId,
+                                uploadPath,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    catch (PsfGuardProjectDeletedException exception)
+                    {
+                        // Final: the project was deleted in PSF Guard, so
+                        // the image is recorded as skipped and not retried.
+                        skippedUpload = exception.Message;
+                    }
                 }
 
                 uploadingImage = false;
@@ -487,7 +497,8 @@ public sealed class DurablePushQueue : IAsyncDisposable
                         file,
                         receipt,
                         cancellationToken,
-                        Path.GetFileName(uploadPath))
+                        skippedUpload is null ? Path.GetFileName(uploadPath) : null,
+                        skippedUpload)
                     .ConfigureAwait(false);
             }
             catch (PreviewUnavailableException exception)
@@ -675,16 +686,23 @@ public sealed class DurablePushQueue : IAsyncDisposable
         string file,
         PushReceipt receipt,
         CancellationToken cancellationToken,
-        string? uploadedImage = null)
+        string? uploadedImage = null,
+        string? skippedUpload = null)
     {
         job.Completed = true;
         job.LastError = null;
+        job.SkippedReason = skippedUpload;
         await PersistAndDeleteWorkerJobAsync(job, file, cancellationToken)
             .ConfigureAwait(false);
         var status = FormatPushStatus(receipt);
         if (!string.IsNullOrWhiteSpace(uploadedImage))
         {
             status = status.TrimEnd('.') + $" and uploaded {uploadedImage}.";
+        }
+
+        if (!string.IsNullOrWhiteSpace(skippedUpload))
+        {
+            status = $"{status} {skippedUpload}";
         }
 
         ReportStatus(status);

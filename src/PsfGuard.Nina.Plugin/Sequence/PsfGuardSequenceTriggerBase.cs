@@ -126,17 +126,27 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
     private protected async Task UploadImageAsync(
         PluginSettingsSnapshot captureSettings,
         string imagePath,
+        IProgress<ApplicationStatus>? progress,
         CancellationToken cancellationToken)
     {
         var destination = captureSettings.RequireQueueDestination();
         using var client = CreateClient(
             new Uri(destination.ServerUrl, UriKind.Absolute),
             captureSettings.RequireApiToken());
-        await client.UploadImageAsync(
-                destination.CatalogId,
-                imagePath,
-                cancellationToken)
-            .ConfigureAwait(false);
+        try
+        {
+            await client.UploadImageAsync(
+                    destination.CatalogId,
+                    imagePath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (PsfGuardProjectDeletedException exception)
+        {
+            // The project was deleted in PSF Guard; the image is skipped,
+            // and the sequence continues.
+            Report(progress, exception.Message);
+        }
     }
 
     protected static IDisposable BeginStatus(

@@ -21,4 +21,10 @@ internal sealed record QueuedImageUploadJob
     public bool Blocked { get; set; }
 
     public bool Completed { get; set; }
+
+    /// <summary>
+    /// Why the upload finished without sending the image, such as a project
+    /// deleted in PSF Guard. Null for an upload that completed normally.
+    /// </summary>
+    public string? SkippedReason { get; set; }
 }

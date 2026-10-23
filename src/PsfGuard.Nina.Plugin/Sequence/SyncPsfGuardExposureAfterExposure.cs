@@ -141,6 +141,7 @@ public sealed class SyncPsfGuardExposureAfterExposure : PsfGuardSequenceTriggerB
                 await UploadImageAsync(
                         captureSettings,
                         capture.ImagePath,
+                        progress,
                         token)
                     .ConfigureAwait(false);
             }

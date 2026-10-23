@@ -9,6 +9,11 @@ internal static class QueueFailurePolicy
 
     public static bool ShouldRetry(Exception exception, bool resolvingCapture = false)
     {
+        if (IsProjectDeleted(exception))
+        {
+            return false;
+        }
+
         if (exception is Client.PsfGuardRemoteJobException remoteJobException)
         {
             return remoteJobException.IsTransient;
@@ -33,6 +38,13 @@ internal static class QueueFailurePolicy
             or TaskCanceledException
             or IOException and not FileNotFoundException and not DirectoryNotFoundException;
     }
+
+    /// <summary>
+    /// The upload was refused because its project was deleted in PSF Guard.
+    /// The outcome is final: record the upload as skipped, not as a failure.
+    /// </summary>
+    public static bool IsProjectDeleted(Exception exception) =>
+        exception is Client.PsfGuardProjectDeletedException;
 
     public static TimeSpan RetryDelay(int attempts)
     {

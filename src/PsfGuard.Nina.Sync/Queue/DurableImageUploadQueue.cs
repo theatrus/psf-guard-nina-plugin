@@ -302,6 +302,12 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
             {
                 throw;
             }
+            catch (PsfGuardProjectDeletedException exception)
+            {
+                await RecordSkippedAsync(job, file, exception, cancellationToken)
+                    .ConfigureAwait(false);
+                continue;
+            }
             catch (Exception exception)
             {
                 var delay = exception is FileNotFoundException or DirectoryNotFoundException
@@ -326,6 +332,22 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
         return soonest < TimeSpan.FromMilliseconds(100)
             ? TimeSpan.FromMilliseconds(100)
             : soonest;
+    }
+
+    private async Task RecordSkippedAsync(
+        QueuedImageUploadJob job,
+        string file,
+        PsfGuardProjectDeletedException exception,
+        CancellationToken cancellationToken)
+    {
+        // A final outcome, not a failure: the job is finished, is not retried,
+        // and does not appear among blocked jobs.
+        job.Completed = true;
+        job.SkippedReason = exception.Message;
+        job.LastError = null;
+        await PersistAndDeleteWorkerJobAsync(job, file, cancellationToken)
+            .ConfigureAwait(false);
+        ReportStatus(exception.Message);
     }
 
     private async Task<TimeSpan?> RecordFailureAsync(
