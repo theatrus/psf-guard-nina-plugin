@@ -86,6 +86,12 @@ public sealed class PairingRecoveryTests
         plugin.RefreshPairingState();
         Assert.Equal("Paired", plugin.PairingStatus);
         Assert.True(plugin.TestConnectionCommand.CanExecute(null));
+
+        // Nothing is held, so the refused-upload commands stay disabled.
+        Assert.Equal(0, plugin.RefusedUploadCount);
+        Assert.Equal("No uploads are held after a refusal by PSF Guard.", plugin.RefusedUploadsStatus);
+        Assert.False(plugin.RetryRefusedUploadsCommand.CanExecute(null));
+        Assert.False(plugin.ForgetRefusedUploadsCommand.CanExecute(null));
     }
 
     internal static void VerifyResetAndPairButtons(DataTemplate template)

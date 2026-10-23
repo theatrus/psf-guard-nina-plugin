@@ -265,6 +265,7 @@ public sealed class DeferredUploadQueueTests
         var destination = Destination();
         var requests = 0;
         var refuse = 1;
+        var changes = 0;
         var statuses = new ConcurrentQueue<string>();
         await using var queue = new DurableImageUploadQueue(
             queuePath,
@@ -281,22 +282,27 @@ public sealed class DeferredUploadQueueTests
                             : Json("""{"success":true,"data":{}}"""));
                 }),
             statuses.Enqueue);
+        queue.RefusedUploadsChanged += (_, _) => Interlocked.Increment(ref changes);
         var jobId = await queue.EnqueueAsync(destination, imagePath, CancellationToken.None);
         var jobPath = Path.Combine(queuePath, $"{jobId:N}.json");
+        var heldPath = Path.Combine(queuePath, "refused", $"{jobId:N}.json");
         queue.Start();
 
-        await WaitUntilAsync(
-            () => statuses.Any(status => status.StartsWith(
-                "PSF Guard refused capture.fit: The server's explanation.",
-                StringComparison.Ordinal)),
-            TimeSpan.FromSeconds(3));
+        await WaitUntilAsync(() => File.Exists(heldPath), TimeSpan.FromSeconds(3));
         await Task.Delay(250);
 
         Assert.Equal(1, Volatile.Read(ref requests));
-        var held = await ReadJobAsync<QueuedImageUploadJob>(jobPath);
+        Assert.False(File.Exists(jobPath));
+        Assert.Equal(1, Volatile.Read(ref changes));
+        Assert.Contains(
+            statuses,
+            status => status.StartsWith(
+                "PSF Guard refused capture.fit: The server's explanation.",
+                StringComparison.Ordinal)
+                && status.Contains("Retry refused uploads", StringComparison.Ordinal));
+        var held = await ReadJobAsync<QueuedImageUploadJob>(heldPath);
         Assert.True(held.UploadRefused);
         Assert.False(held.Blocked);
-        Assert.False(held.Completed);
         Assert.Equal(
             "PSF Guard refused capture.fit: The server's explanation.",
             held.RefusalReason);
@@ -304,19 +310,105 @@ public sealed class DeferredUploadQueueTests
             statuses,
             status => status.Contains("blocked:", StringComparison.OrdinalIgnoreCase)
                 || status.Contains("failed", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(1, await queue.CountRefusedUploadsAsync(destination, CancellationToken.None));
         Assert.Equal(0, await queue.RetryBlockedAsync(destination, CancellationToken.None));
-        Assert.Equal(
-            0,
-            await queue.RetryRefusedUploadsAsync(
-                destination with { CatalogId = "other-cat" },
-                CancellationToken.None));
+        Assert.True(File.Exists(heldPath));
+        var otherCatalog = destination with { CatalogId = "other-cat" };
+        Assert.Equal(0, await queue.CountRefusedUploadsAsync(otherCatalog, CancellationToken.None));
+        Assert.Equal(0, await queue.RetryRefusedUploadsAsync(otherCatalog, CancellationToken.None));
 
         Volatile.Write(ref refuse, 0);
         Assert.Equal(1, await queue.RetryRefusedUploadsAsync(destination, CancellationToken.None));
+        await WaitUntilAsync(
+            () => !File.Exists(jobPath) && !File.Exists(heldPath) && Volatile.Read(ref requests) == 2,
+            TimeSpan.FromSeconds(3));
+
+        Assert.Equal(0, await queue.CountRefusedUploadsAsync(destination, CancellationToken.None));
+        Assert.Equal(2, Volatile.Read(ref changes));
+        Assert.Contains(statuses, status => status.StartsWith("Uploaded capture.fit", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ForgettingRefusedUploadsKeepsTheImageAndTheWorkerNeverReadsThem()
+    {
+        using var directory = new TestDirectory();
+        var queuePath = directory.Child("queue");
+        var imagePath = directory.Write("capture.fit", "test image");
+        var destination = Destination();
+        var requests = 0;
+        await using var queue = new DurableImageUploadQueue(
+            queuePath,
+            actualDestination => Client(
+                actualDestination,
+                (_, _) =>
+                {
+                    Interlocked.Increment(ref requests);
+                    return Task.FromResult(Json(
+                        """{"success":false,"data":null,"error":"Removed as a reject."}""",
+                        HttpStatusCode.Gone));
+                }));
+        var jobId = await queue.EnqueueAsync(destination, imagePath, CancellationToken.None);
+        var heldPath = Path.Combine(queuePath, "refused", $"{jobId:N}.json");
+        queue.Start();
+        await WaitUntilAsync(() => File.Exists(heldPath), TimeSpan.FromSeconds(3));
+        var heldText = await File.ReadAllTextAsync(heldPath);
+
+        // Later queue passes leave the held job alone: an unreadable top-level
+        // job would be quarantined, but this one is never opened.
+        await File.WriteAllTextAsync(heldPath, "not json");
+        await queue.EnqueueAsync(
+            destination,
+            directory.Child("missing.fit"),
+            deferImageUpload: true,
+            CancellationToken.None);
+        await Task.Delay(300);
+        Assert.Equal("not json", await File.ReadAllTextAsync(heldPath));
+        Assert.False(Directory.Exists(Path.Combine(queuePath, "blocked")));
+        await File.WriteAllTextAsync(heldPath, heldText);
+
+        Assert.Equal(1, await queue.ForgetRefusedUploadsAsync(destination, CancellationToken.None));
+
+        Assert.False(File.Exists(heldPath));
+        Assert.True(File.Exists(imagePath));
+        Assert.Equal(0, await queue.CountRefusedUploadsAsync(destination, CancellationToken.None));
+        Assert.Equal(0, await queue.RetryRefusedUploadsAsync(destination, CancellationToken.None));
+        Assert.Equal(1, Volatile.Read(ref requests));
+    }
+
+    [Fact]
+    public async Task RefusedJobLeftInTheTopFolderIsMovedToTheRefusedFolder()
+    {
+        using var directory = new TestDirectory();
+        var queuePath = directory.Child("queue");
+        Directory.CreateDirectory(queuePath);
+        var jobId = Guid.NewGuid();
+        var jobPath = Path.Combine(queuePath, $"{jobId:N}.json");
+        await WriteJobAsync(jobPath, new QueuedImageUploadJob
+        {
+            JobId = jobId,
+            Destination = Destination(),
+            ImagePath = directory.Write("capture.fit", "test image"),
+            NextAttemptUtc = DateTimeOffset.UtcNow,
+            UploadRefused = true,
+            RefusalReason = "PSF Guard refused capture.fit: earlier.",
+        });
+        var requests = 0;
+        await using var queue = new DurableImageUploadQueue(
+            queuePath,
+            actualDestination => Client(
+                actualDestination,
+                (_, _) =>
+                {
+                    Interlocked.Increment(ref requests);
+                    return Task.FromResult(Json("""{"success":true,"data":{}}"""));
+                }));
+        queue.Start();
+
         await WaitUntilAsync(() => !File.Exists(jobPath), TimeSpan.FromSeconds(3));
 
-        Assert.Equal(2, Volatile.Read(ref requests));
-        Assert.Contains(statuses, status => status.StartsWith("Uploaded capture.fit", StringComparison.Ordinal));
+        Assert.True(File.Exists(Path.Combine(queuePath, "refused", $"{jobId:N}.json")));
+        Assert.Equal(0, Volatile.Read(ref requests));
+        Assert.Equal(1, await queue.CountRefusedUploadsAsync(Destination(), CancellationToken.None));
     }
 
     [Fact]

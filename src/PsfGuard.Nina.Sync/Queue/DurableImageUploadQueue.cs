@@ -12,6 +12,7 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
     private readonly SemaphoreSlim mutationGate = new(1, 1);
     private readonly SemaphoreSlim signal = new(0, 1);
     private readonly CancellationTokenSource stopping = new();
+    private readonly RefusedUploadFolder<QueuedImageUploadJob> refused;
     private Task? worker;
     private int disposed;
 
@@ -23,7 +24,26 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
         this.queueDirectory = Path.GetFullPath(queueDirectory);
         this.clientFactory = clientFactory;
         this.statusSink = statusSink;
+        refused = new RefusedUploadFolder<QueuedImageUploadJob>(
+            this.queueDirectory,
+            TryReadJobAsync,
+            (job, path, cancellationToken) => WriteJobAsync(job, path, cancellationToken),
+            job => job.Destination,
+            static job =>
+            {
+                job.UploadRefused = false;
+                job.RefusalReason = null;
+                job.Attempts = 0;
+                job.PrerequisiteAttempts = 0;
+                job.NextAttemptUtc = DateTimeOffset.UtcNow;
+            });
     }
+
+    /// <summary>
+    /// Raised after an upload is refused, re-queued or forgotten, so a view
+    /// can refresh its refused-upload count.
+    /// </summary>
+    public event EventHandler? RefusedUploadsChanged;
 
     public void Start()
     {
@@ -173,6 +193,15 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
     }
 
     /// <summary>
+    /// The number of uploads for <paramref name="destination"/> that PSF
+    /// Guard refused with 410 Gone and that the queue holds.
+    /// </summary>
+    public Task<int> CountRefusedUploadsAsync(
+        RemoteQueueDestination destination,
+        CancellationToken cancellationToken) =>
+        WithRefusedAsync(destination, refused.CountAsync, changes: false, cancellationToken);
+
+    /// <summary>
     /// Re-queue uploads for <paramref name="destination"/> that PSF Guard
     /// refused with 410 Gone, for example after the project was allowed back
     /// or the reject was restored in PSF Guard. Returns how many were
@@ -182,47 +211,65 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
         RemoteQueueDestination destination,
         CancellationToken cancellationToken)
     {
-        ThrowIfDisposed();
-        ArgumentNullException.ThrowIfNull(destination);
-        destination.Validate();
-        if (!Directory.Exists(queueDirectory))
-        {
-            return 0;
-        }
-
-        var retried = 0;
-        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            foreach (var file in QueueFiles())
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var job = await TryReadJobAsync(file, cancellationToken).ConfigureAwait(false);
-                if (job is null || !job.UploadRefused || !destination.Matches(job.Destination))
-                {
-                    continue;
-                }
-
-                job.UploadRefused = false;
-                job.RefusalReason = null;
-                job.Attempts = 0;
-                job.PrerequisiteAttempts = 0;
-                job.NextAttemptUtc = DateTimeOffset.UtcNow;
-                await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
-                retried++;
-            }
-        }
-        finally
-        {
-            mutationGate.Release();
-        }
-
+        var retried = await WithRefusedAsync(
+                destination, refused.RetryAsync, changes: true, cancellationToken)
+            .ConfigureAwait(false);
         if (retried > 0)
         {
             Wake();
         }
 
         return retried;
+    }
+
+    /// <summary>
+    /// Delete the queue records of uploads for <paramref name="destination"/>
+    /// that PSF Guard refused. The image files stay on disk. Returns how many
+    /// records were deleted.
+    /// </summary>
+    public Task<int> ForgetRefusedUploadsAsync(
+        RemoteQueueDestination destination,
+        CancellationToken cancellationToken) =>
+        WithRefusedAsync(destination, refused.ForgetAsync, changes: true, cancellationToken);
+
+    private async Task<int> WithRefusedAsync(
+        RemoteQueueDestination destination,
+        Func<RemoteQueueDestination, CancellationToken, Task<int>> action,
+        bool changes,
+        CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(destination);
+        destination.Validate();
+        int count;
+        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            count = await action(destination, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            mutationGate.Release();
+        }
+
+        if (changes && count > 0)
+        {
+            RaiseRefusedUploadsChanged();
+        }
+
+        return count;
+    }
+
+    private void RaiseRefusedUploadsChanged()
+    {
+        try
+        {
+            RefusedUploadsChanged?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception exception)
+        {
+            ReportStatus($"A refused-upload listener failed: {exception.Message}");
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -309,7 +356,15 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
                 mutationGate.Release();
             }
 
-            if (job.ImageUploadDeferred || job.Blocked || job.UploadRefused)
+            if (job.UploadRefused)
+            {
+                // Held before the refused folder existed, or left by an
+                // interrupted move: hold it there now.
+                await HoldRefusedJobAsync(job, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            if (job.ImageUploadDeferred || job.Blocked)
             {
                 continue;
             }
@@ -392,13 +447,32 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
         PsfGuardUploadRefusedException exception,
         CancellationToken cancellationToken)
     {
-        // Not a failure and not retried: the job stays in the queue so the
-        // operator can re-queue it after undoing the deletion in PSF Guard.
+        // Not a failure and not retried: the job is held in the refused
+        // folder so the operator can re-queue it after undoing the deletion
+        // in PSF Guard, or forget it.
         job.UploadRefused = true;
         job.RefusalReason = exception.Message;
         job.LastError = null;
-        await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
+        await HoldRefusedJobAsync(job, cancellationToken).ConfigureAwait(false);
         ReportStatus(exception.Message + " " + QueueFailurePolicy.RefusedUploadAdvice);
+    }
+
+    private async Task HoldRefusedJobAsync(
+        QueuedImageUploadJob job,
+        CancellationToken cancellationToken)
+    {
+        await mutationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await WriteJobAsync(job, cancellationToken).ConfigureAwait(false);
+            refused.Hold(JobPath(job.JobId));
+        }
+        finally
+        {
+            mutationGate.Release();
+        }
+
+        RaiseRefusedUploadsChanged();
     }
 
     private async Task<TimeSpan?> RecordFailureAsync(
@@ -531,11 +605,16 @@ public sealed class DurableImageUploadQueue : IAsyncDisposable
         }
     }
 
+    private Task WriteJobAsync(
+        QueuedImageUploadJob job,
+        CancellationToken cancellationToken) =>
+        WriteJobAsync(job, JobPath(job.JobId), cancellationToken);
+
     private async Task WriteJobAsync(
         QueuedImageUploadJob job,
+        string path,
         CancellationToken cancellationToken)
     {
-        var path = JobPath(job.JobId);
         var temporary = $"{path}.{Guid.NewGuid():N}.tmp";
         try
         {

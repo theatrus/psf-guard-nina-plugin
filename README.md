@@ -440,9 +440,11 @@ that was allowed back in PSF Guard is not deleted.
 
 PSF Guard refuses an upload of a file whose project was deleted, or of a file
 it removed as a reject. The status line and N.I.N.A. log show PSF Guard's
-explanation, and the upload stays in the queue without retrying. After you
-allow the project back or restore the reject in PSF Guard, select **Retry
-blocked** to upload the file again.
+explanation, and the upload is held without retrying. The queue section of
+the plugin settings shows how many uploads are held. After you allow the
+project back or restore the reject in PSF Guard, select **Retry refused
+uploads** to upload them again. Select **Forget refused uploads** to remove
+the held uploads from the queue; the image files stay on disk.
 Grade pulls match only unambiguous image GUIDs and change only the grade and
 reject reason on acquired-image rows. After the pull, the plugin recomputes the
 accepted count for each affected exposure plan from those acquired-image

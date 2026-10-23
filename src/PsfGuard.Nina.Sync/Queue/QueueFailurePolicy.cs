@@ -8,7 +8,8 @@ internal static class QueueFailurePolicy
     public const int MaximumAttempts = 12;
 
     public const string RefusedUploadAdvice =
-        "The upload is held. After you undo this in PSF Guard, use Retry blocked to upload it again.";
+        "The upload is held. After you undo this in PSF Guard, select Retry refused uploads to upload it again, "
+        + "or Forget refused uploads to remove it from the queue.";
 
     public static bool ShouldRetry(Exception exception, bool resolvingCapture = false)
     {

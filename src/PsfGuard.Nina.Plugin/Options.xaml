@@ -159,7 +159,7 @@
       <GroupBox Header="Queue recovery" Style="{StaticResource SectionStyle}">
         <StackPanel>
           <TextBlock Margin="0,0,0,8" TextWrapping="Wrap"
-            Text="Queued transfers can resume when N.I.N.A. starts, even with automation off. They keep their original server, catalog, and profile. Close N.I.N.A. to stop local transfers; revoke the pairing on the server to prevent future access. Retry blocked also re-queues uploads that PSF Guard refused because their project was deleted or the frame was removed as a reject; undo that in PSF Guard first." />
+            Text="Queued transfers can resume when N.I.N.A. starts, even with automation off. They keep their original server, catalog, and profile. Close N.I.N.A. to stop local transfers; revoke the pairing on the server to prevent future access." />
           <WrapPanel>
             <Button
               Command="{Binding StartQueuedUploadsCommand}"
@@ -170,6 +170,21 @@
               Command="{Binding RetryBlockedCommand}"
               Style="{StaticResource ActionStyle}">
               <TextBlock Text="Retry blocked" Style="{StaticResource ActionLabelStyle}" />
+            </Button>
+          </WrapPanel>
+          <TextBlock Margin="0,12,0,8" TextWrapping="Wrap"
+            Text="PSF Guard refuses an upload when the frame's project was deleted or the frame was removed as a reject. The queue holds such uploads without retrying them. After you allow the project back or restore the reject in PSF Guard, select Retry refused uploads. Forget refused uploads removes the held uploads from the queue; the image files stay on disk." />
+          <TextBlock Margin="0,0,0,8" TextWrapping="Wrap" Text="{Binding RefusedUploadsStatus}" />
+          <WrapPanel>
+            <Button
+              Command="{Binding RetryRefusedUploadsCommand}"
+              Style="{StaticResource ActionStyle}">
+              <TextBlock Text="Retry refused uploads" Style="{StaticResource ActionLabelStyle}" />
+            </Button>
+            <Button
+              Command="{Binding ForgetRefusedUploadsCommand}"
+              Style="{StaticResource ActionStyle}">
+              <TextBlock Text="Forget refused uploads" Style="{StaticResource ActionLabelStyle}" />
             </Button>
           </WrapPanel>
         </StackPanel>

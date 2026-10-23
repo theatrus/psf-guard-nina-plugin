@@ -273,12 +273,18 @@ The plugin treats `410` from the upload endpoint as a refusal, not a failure:
 - It does not retry the upload and does not mark the job blocked.
 - It reports `PSF Guard refused <file>: <server message>` in the status line
   and the N.I.N.A. log.
-- It keeps the job in the queue, marked as refused. **Retry blocked**
-  re-queues refused uploads for the current destination together with blocked
-  jobs, and its result shows how many refused uploads it re-queued. Undo the
-  deletion in PSF Guard first; otherwise the server refuses the file again.
+- It moves the job into the queue's `refused` folder. The background worker
+  reads only the queue's top folder, so held jobs cost nothing on later queue
+  passes.
+- The plugin settings show how many uploads are held for the current
+  destination. **Retry refused uploads** moves them back into the queue.
+  Undo the deletion in PSF Guard first; otherwise the server refuses the file
+  again. **Forget refused uploads** deletes the held queue records; the image
+  files stay on disk. **Retry blocked** does not touch refused uploads.
 - A combined capture job whose scheduler phase already applied keeps its
-  applied receipt. Re-queueing it repeats only the upload.
+  applied receipt. Re-queueing it repeats only the upload, and the queue
+  reports the applied scheduler phase once. Forgetting it leaves the applied
+  Target Scheduler row in PSF Guard.
 - A sequence upload trigger without deferral reports the refusal and lets the
   sequence continue.
 
