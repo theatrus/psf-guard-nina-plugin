@@ -44,6 +44,12 @@ internal sealed record QueuedBundleJob
     /// <see cref="UploadRefused"/> is set.
     /// </summary>
     public string? RefusalReason { get; set; }
+
+    /// <summary>
+    /// The queue has raised <c>Pushed</c> for this job's applied scheduler
+    /// phase, so a re-queued upload does not raise it again.
+    /// </summary>
+    public bool PushPublished { get; set; }
 }
 
 internal sealed record QueuedCaptureSource

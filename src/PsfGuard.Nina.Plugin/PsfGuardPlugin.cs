@@ -52,6 +52,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
     private long displayedStatusSequence;
     private readonly AsyncRelayCommand applyPreviewCommand;
     private readonly AsyncRelayCommand forgetPreviewCommand;
+    private int refusedUploadCount;
 
     [ImportingConstructor]
     public PsfGuardPlugin(
@@ -89,6 +90,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
                 "image-upload-queue"),
             CreateQueuedClient,
             SetBackgroundStatus);
+        queue.RefusedUploadsChanged += QueueRefusedUploadsChanged;
+        imageUploadQueue.RefusedUploadsChanged += QueueRefusedUploadsChanged;
 
         TestConnectionCommand = CreateManualCommand(
             () => RunCommandAsync(TestConnectionAsync, "Testing the PSF Guard connection..."),
@@ -255,6 +258,16 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         RetryBlockedCommand = CreateManualCommand(
             () => RunCommandAsync(RetryBlockedAsync, "Retrying blocked PSF Guard jobs..."),
             CanUseRemote);
+        RetryRefusedUploadsCommand = CreateManualCommand(
+            () => RunCommandAsync(
+                RetryRefusedUploadsAsync,
+                "Re-queueing uploads that PSF Guard refused..."),
+            () => CanUseRemote() && RefusedUploadCount > 0);
+        ForgetRefusedUploadsCommand = CreateManualCommand(
+            () => RunCommandAsync(
+                ForgetRefusedUploadsAsync,
+                "Forgetting uploads that PSF Guard refused..."),
+            () => CanUseRemote() && RefusedUploadCount > 0);
         StartQueuedUploadsCommand = CreateManualCommand(
             () => RunCommandAsync(
                 async token => FormatReleasedUploads(
@@ -306,6 +319,31 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
 
     public ICommand RetryBlockedCommand { get; }
 
+    /// <summary>
+    /// Re-queue the uploads PSF Guard refused with 410 Gone for the current
+    /// destination, after the project was allowed back or the reject restored.
+    /// </summary>
+    public ICommand RetryRefusedUploadsCommand { get; }
+
+    /// <summary>
+    /// Delete the queue records of uploads PSF Guard refused for the current
+    /// destination. The image files stay on disk.
+    /// </summary>
+    public ICommand ForgetRefusedUploadsCommand { get; }
+
+    /// <summary>
+    /// Uploads for the current destination that PSF Guard refused and the
+    /// queues hold.
+    /// </summary>
+    public int RefusedUploadCount => Volatile.Read(ref refusedUploadCount);
+
+    public string RefusedUploadsStatus => RefusedUploadCount switch
+    {
+        0 => "No uploads are held after a refusal by PSF Guard.",
+        1 => "1 upload is held because PSF Guard refused it.",
+        var count => $"{count:N0} uploads are held because PSF Guard refused them.",
+    };
+
     public ICommand StartQueuedUploadsCommand { get; }
 
     public string ServerUrl
@@ -324,6 +362,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
             RaisePropertyChanged(nameof(HasStoredCredential));
             RaisePropertyChanged(nameof(PairingStatus));
             RaiseCommandStates();
+            _ = RefreshRefusedUploadCountAsync();
         }
     }
 
@@ -483,6 +522,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         imageSaveMediator.ImageSaved += ImageSaved;
         queue.Start();
         imageUploadQueue.Start();
+        _ = RefreshRefusedUploadCountAsync();
         captureWorker = Task.Run(ProcessCaptureWorkAsync);
         SetBackgroundStatus(
             Enabled ? "Profile automation is active." : "Profile automation is disabled.");
@@ -493,6 +533,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
     {
         profileService.ProfileChanged -= ProfileServiceProfileChanged;
         imageSaveMediator.ImageSaved -= ImageSaved;
+        queue.RefusedUploadsChanged -= QueueRefusedUploadsChanged;
+        imageUploadQueue.RefusedUploadsChanged -= QueueRefusedUploadsChanged;
         lifetime.Cancel();
         captureWork.Writer.TryComplete();
 
@@ -676,6 +718,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
             .ConfigureAwait(false);
 
         await CommitPairingAsync(pairingTarget, paired).ConfigureAwait(false);
+        _ = RefreshRefusedUploadCountAsync();
         return $"Paired with {paired.Product} {paired.ProductVersion}; "
             + $"catalog {paired.CatalogName} ({paired.CatalogId}). "
             + "The credential is stored; the code is now used up. "
@@ -765,16 +808,86 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         var syncJobs = await queue
             .RetryBlockedAsync(destination, cancellationToken)
             .ConfigureAwait(false);
-        var refusedUploads = await imageUploadQueue
+        return $"Retried {imageJobs} image and {syncJobs} scheduler jobs.";
+    }
+
+    private async Task<string> RetryRefusedUploadsAsync(CancellationToken cancellationToken)
+    {
+        var destination = CurrentQueueDestination();
+        var count = await imageUploadQueue
                 .RetryRefusedUploadsAsync(destination, cancellationToken)
                 .ConfigureAwait(false)
             + await queue
                 .RetryRefusedUploadsAsync(destination, cancellationToken)
                 .ConfigureAwait(false);
-        return $"Retried {imageJobs} image and {syncJobs} scheduler jobs, "
-            + $"and re-queued {refusedUploads} "
-            + (refusedUploads == 1 ? "upload" : "uploads")
-            + " that PSF Guard refused.";
+        await RefreshRefusedUploadCountAsync().ConfigureAwait(false);
+        return count == 1
+            ? "Re-queued 1 upload that PSF Guard refused."
+            : $"Re-queued {count:N0} uploads that PSF Guard refused.";
+    }
+
+    private async Task<string> ForgetRefusedUploadsAsync(CancellationToken cancellationToken)
+    {
+        var destination = CurrentQueueDestination();
+        var count = await imageUploadQueue
+                .ForgetRefusedUploadsAsync(destination, cancellationToken)
+                .ConfigureAwait(false)
+            + await queue
+                .ForgetRefusedUploadsAsync(destination, cancellationToken)
+                .ConfigureAwait(false);
+        await RefreshRefusedUploadCountAsync().ConfigureAwait(false);
+        return (count == 1
+                ? "Removed 1 refused upload from the queue."
+                : $"Removed {count:N0} refused uploads from the queue.")
+            + " The image files are still on disk.";
+    }
+
+    private void QueueRefusedUploadsChanged(object? sender, EventArgs args) =>
+        _ = RefreshRefusedUploadCountAsync();
+
+    /// <summary>
+    /// Count the uploads both queues hold for the current destination after a
+    /// refusal. Without a paired destination the count is zero.
+    /// </summary>
+    private async Task RefreshRefusedUploadCountAsync()
+    {
+        var count = 0;
+        try
+        {
+            if (CanUseRemote())
+            {
+                var destination = CurrentQueueDestination();
+                count = await imageUploadQueue
+                        .CountRefusedUploadsAsync(destination, lifetime.Token)
+                        .ConfigureAwait(false)
+                    + await queue
+                        .CountRefusedUploadsAsync(destination, lifetime.Token)
+                        .ConfigureAwait(false);
+            }
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            Logger.Debug($"PSF Guard Sync could not count refused uploads: {exception.Message}");
+            return;
+        }
+
+        Interlocked.Exchange(ref refusedUploadCount, count);
+        var dispatcher = Application.Current?.Dispatcher;
+        void Raise()
+        {
+            RaisePropertyChanged(nameof(RefusedUploadCount));
+            RaisePropertyChanged(nameof(RefusedUploadsStatus));
+            RaiseCommandStates();
+        }
+
+        if (dispatcher is not null && !dispatcher.CheckAccess())
+        {
+            _ = dispatcher.BeginInvoke(Raise);
+        }
+        else
+        {
+            Raise();
+        }
     }
 
     public async Task QueueDeferredImageUploadAsync(
@@ -1026,6 +1139,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         }
 
         RaiseCommandStates();
+        _ = RefreshRefusedUploadCountAsync();
     }
 
     private bool CanUseRemote() =>

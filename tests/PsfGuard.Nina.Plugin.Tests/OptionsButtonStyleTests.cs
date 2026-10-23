@@ -73,7 +73,7 @@ public sealed class OptionsButtonStyleTests
                 "PairCommand", "ResetPairingCommand", "TestConnectionCommand", "StartQueuedUploadsCommand", "RetryBlockedCommand",
                 "ReconcileCommand", "PushAllCommand", "PullMergedCatalogCommand", "PushPlanningCommand",
                 "PullPlanningCommand", "PushGradesCommand", "PullGradesCommand", "ApplyPreviewCommand",
-                "ForgetPreviewCommand",
+                "ForgetPreviewCommand", "RetryRefusedUploadsCommand", "ForgetRefusedUploadsCommand",
             ];
             var command = new TestCommand();
             IDictionary<string, object?> viewModel = new ExpandoObject();
@@ -83,6 +83,7 @@ public sealed class OptionsButtonStyleTests
             }
             viewModel["Enabled"] = true;
             viewModel["IsSettingsEditable"] = true;
+            viewModel["RefusedUploadsStatus"] = "2 uploads are held because PSF Guard refused them.";
             var template = (DataTemplate)application.Resources["PSF Guard Sync_Options"];
             PairingRecoveryTests.VerifyResetAndPairButtons(template);
             PairingRecoveryTests.VerifyResetThenPairExchange(template);
@@ -106,6 +107,8 @@ public sealed class OptionsButtonStyleTests
             Assert.Contains(textBlocks, block => block.Text.Contains("Pair only with a server you trust", StringComparison.Ordinal));
             Assert.Contains(textBlocks, block => block.Text.Contains("not queued transfers", StringComparison.Ordinal));
             Assert.Contains(textBlocks, block => block.Text.Contains("explicit flat coverage invalidations", StringComparison.Ordinal));
+            Assert.Contains(textBlocks, block => block.Text.Contains("the image files stay on disk", StringComparison.Ordinal));
+            Assert.Contains(textBlocks, block => block.Text == "2 uploads are held because PSF Guard refused them.");
             viewModel["Enabled"] = false;
             DrainBindings();
             Assert.True(privacy.IsEnabled);
