@@ -430,7 +430,10 @@ When a project is deleted in PSF Guard, a planning pull or full-catalog
 pull-back from a PSF Guard version that supports deleted projects also deletes
 it from Target Scheduler, with its targets, exposure plans and their order,
 cadence and flat-history rows. PSF Guard Sync deletes a project only when
-Target Scheduler has no captured images for it. A project with captured images
+Target Scheduler has no captured images for it. Targets moved into another
+project keep their local IDs, flat history, exposure order and filter cadence.
+An ambiguous move keeps the former project and reports the conflict instead
+of deleting the target. A project with captured images
 stays, and the pull result shows its name and why it was kept; delete it in
 Target Scheduler if you no longer need it. Exposure templates stay. A project
 that was allowed back in PSF Guard is not deleted.

@@ -23,6 +23,10 @@
   also removes its targets' `flathistory` rows; nothing else in a bundle
   deletes rows. Request the table only from servers that advertise
   `project_tombstones_v1`.
+- Apply surviving target moves before project deletions so their IDs, flat
+  history, exposure order and cadence stay intact. Keep the former project
+  when an ambiguous target could not move safely. Batch image-ownership
+  checks instead of scanning the capture history once per deleted project.
 - A protocol change requires matching updates to `docs/PROTOCOL.md` and tests.
 - Never open a PR against upstream `isbeorn/nina.plugin.manifests`. Yann
   handles upstream submissions; provide suggested submission text in chat.

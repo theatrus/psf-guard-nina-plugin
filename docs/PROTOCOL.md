@@ -222,19 +222,24 @@ a valid non-empty GUID is skipped; the apply result counts it and reports that
 it was skipped. The other rows still apply. A bundle without the table
 applies exactly as before.
 
-Inside the planning or merge apply transaction, before the planning upsert,
-the plugin handles each standing deletion:
+Inside the planning or merge apply transaction, the plugin first applies the
+planning rows and, for a merge, the captured images. Targets moving into live
+projects keep their existing local IDs, flat history, exposure order and
+filter cadence. It then handles each standing deletion:
 
 1. It matches the GUID against `project.guid` case-insensitively, ignoring
    surrounding spaces. A GUID that matches no project changes nothing.
 2. When the bundle's own `project` table contains the GUID, the project is
-   live in PSF Guard. The plugin keeps it, reports it as kept because it is
-   live in PSF Guard, and the upsert applies the bundle's row as usual.
+   live in PSF Guard. The plugin keeps it and reports it as kept because it is
+   live in PSF Guard.
 3. When more than one project has the GUID, it keeps them all.
-4. When Target Scheduler has acquired images for the project, either rows with
+4. When a target still under the project appears in the incoming bundle, a
+   move could not be applied safely. The plugin keeps the former project and
+   its remaining targets and reports the conflict.
+5. When Target Scheduler has acquired images for the project, either rows with
    its `projectId` or rows on any of its targets, it keeps the project. The
    apply result lists the project and the number of images.
-5. Otherwise it deletes the project's rows, child first, probing optional
+6. Otherwise it deletes the project's rows, child first, probing optional
    tables and columns: for each target `overrideexposureorderitem`,
    `filtercadenceitem`, `flathistory` and `exposureplan`; then `target`; then
    `ruleweight`; then any PSF Guard records in the file keyed by the targets'
@@ -244,11 +249,11 @@ the plugin handles each standing deletion:
    `psf_guard_director_project`); then `project`. Exposure templates belong
    to the profile and stay.
 
-The upsert that follows skips any bundle `project` row whose GUID this apply
-deleted, so one apply never deletes and re-inserts the same project. Because
-rule 2 keeps live projects, this guard only matters for a malformed bundle.
-Running deletions first means the upsert matches GUIDs against the projects
-that remain.
+Image-ownership checks use one grouped scan for all candidate projects, not a
+separate capture-history scan per deletion. A frame counts toward both
+projects when its direct project and target ownership differ, but only once
+when both links name the same project. All upserts and deletions commit
+together; a deletion failure rolls back target moves and other updates too.
 
 The apply result reports `ProjectsDeleted`, `ProjectsKept`,
 `ProjectRowsSkipped` and one message per project or skipped-row group, next to

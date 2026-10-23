@@ -10,7 +10,7 @@ namespace PsfGuard.Nina.Sync.Tests;
 
 // Projects deleted in PSF Guard: the export opt-in, the optional
 // psf_guard_removed_project table, and the Target Scheduler deletions it causes.
-public sealed class ProjectTombstoneTests
+public sealed class ProjectTombstoneTests(Xunit.Abstractions.ITestOutputHelper output)
 {
     private const string EmptyProjectGuid = "6f1c2f6e-3a0b-4c55-9f43-0e5a52a1d001";
     private const string EmptyTargetGuid = "6f1c2f6e-3a0b-4c55-9f43-0e5a52a1d002";
@@ -19,6 +19,216 @@ public sealed class ProjectTombstoneTests
     private const string OtherProjectGuid = "6f1c2f6e-3a0b-4c55-9f43-0e5a52a1d021";
     private const string OtherTargetGuid = "6f1c2f6e-3a0b-4c55-9f43-0e5a52a1d022";
     private const string UnknownProjectGuid = "6f1c2f6e-3a0b-4c55-9f43-0e5a52a1d031";
+
+    [Fact]
+    public async Task ManyTombstonesCheckCaptureHistoryWithOneQuery()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        using (var connection = destination.Open())
+        {
+            connection.Execute("""
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<200)
+                INSERT INTO project(Id,profileId,name,state,guid)
+                    SELECT x,'profile','Project '||x,1,
+                        printf('%08x-0000-4000-8000-000000000001',x) FROM n;
+                WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<500000)
+                INSERT INTO acquiredimage(Id,projectId,targetId,filtername,gradingStatus,metadata)
+                    SELECT x,1+(x%200),0,'L',1,'{}' FROM n;
+                """);
+        }
+
+        var bundle = await BuildBundleAsync(source, merge: false);
+        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] = RemovedProjects(
+            Enumerable.Range(1, 200)
+                .Select(i => ($"{i:x8}-0000-4000-8000-000000000001", $"Project {i}"))
+                .ToArray());
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var captureQueries = 0;
+        void TrackConnection(object sender, ConnectionEventArgs args)
+        {
+            if (args.EventType == SQLiteConnectionEventType.Opened
+                && sender is SQLiteConnection connection
+                && new SQLiteConnectionStringBuilder(connection.ConnectionString).DataSource == destination.Path)
+            {
+                connection.Trace += (_, trace) =>
+                {
+                    if (trace.Statement.Contains("FROM acquiredimage", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Interlocked.Increment(ref captureQueries);
+                    }
+                };
+            }
+        }
+
+        SQLiteConnection.Changed += TrackConnection;
+        ApplyResult result;
+        try
+        {
+            result = await new TargetSchedulerCatalogWriter(destination.Path)
+                .ApplyPlanningAsync(bundle, CancellationToken.None);
+        }
+        finally
+        {
+            SQLiteConnection.Changed -= TrackConnection;
+        }
+
+        output.WriteLine($"Elapsed: {watch.Elapsed}; projects kept: {result.ProjectsKept}");
+        Assert.Equal(200, result.ProjectsKept);
+        Assert.Equal(1, captureQueries);
+        Assert.All(result.ProjectMessages, message =>
+            Assert.Contains($"{2_500:N0} captured images", message, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task BatchedCaptureCountsIncludeBothOwnersWithoutDoubleCounting()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        SeedProject(destination, 200, EmptyProjectGuid, EmptyTargetGuid, "Direct owner", withImage: false);
+        SeedProject(destination, 300, CapturedProjectGuid, CapturedTargetGuid, "Target owner", withImage: true);
+        using (var connection = destination.Open())
+        {
+            connection.Execute("""
+                INSERT INTO acquiredimage
+                    (Id, projectId, targetId, filtername, gradingStatus, metadata)
+                    VALUES (900, 201, 302, 'L', 0, '{}');
+                """);
+        }
+
+        var bundle = await BuildBundleAsync(source, merge: false);
+        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] = RemovedProjects(
+            (EmptyProjectGuid, "Direct owner"),
+            (CapturedProjectGuid, "Target owner"));
+        var result = await new TargetSchedulerCatalogWriter(destination.Path)
+            .ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(0, result.ProjectsDeleted);
+        Assert.Equal(2, result.ProjectsKept);
+        Assert.Contains("Kept project Direct owner because Target Scheduler has 1 captured image for it.",
+            result.ProjectMessages);
+        Assert.Contains("Kept project Target owner because Target Scheduler has 2 captured images for it.",
+            result.ProjectMessages);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MovedTargetKeepsItsLocalChildrenWhenOldProjectIsRemoved(bool merge)
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        AddOptionalTables(destination);
+        SeedProject(source, 200, EmptyProjectGuid, EmptyTargetGuid, "Old project", withImage: false);
+        SeedProject(source, 400, OtherProjectGuid, OtherTargetGuid, "Surviving project", withImage: false);
+        SeedProject(destination, 200, EmptyProjectGuid, EmptyTargetGuid, "Old project", withImage: false);
+        SeedProject(destination, 400, OtherProjectGuid, OtherTargetGuid, "Surviving project", withImage: false);
+        SeedChildren(destination, 200, EmptyProjectGuid, EmptyTargetGuid);
+        using (var connection = destination.Open())
+        {
+            connection.Execute("UPDATE exposureplan SET acquired = 4, accepted = 3 WHERE Id = 204");
+        }
+
+        using (var connection = source.Open())
+        {
+            connection.Execute("""
+                UPDATE target SET projectId = 401 WHERE Id = 202;
+                DELETE FROM ruleweight WHERE projectId = 201;
+                DELETE FROM project WHERE Id = 201;
+                """);
+        }
+
+        var bundle = await BuildBundleAsync(source, merge);
+        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] =
+            RemovedProjects((EmptyProjectGuid, "Old project"));
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+        var result = merge
+            ? await writer.ApplyMergeAsync(bundle, CancellationToken.None)
+            : await writer.ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        using var check = destination.Open();
+        Assert.Equal(1, result.ProjectsDeleted);
+        Assert.Equal(0, CountRows(check, "project", "Id = 201"));
+        Assert.Equal(1, CountWhere(check, "target", "guid", EmptyTargetGuid));
+        Assert.Equal(1, CountRows(check, "target", "Id = 202 AND projectId = 401"));
+        Assert.Equal(1, CountRows(check, "exposureplan", "Id = 204 AND targetId = 202"));
+        Assert.Equal(1, CountRows(check, "exposureplan", merge
+            ? "Id = 204 AND acquired = 0 AND accepted = 0"
+            : "Id = 204 AND acquired = 4 AND accepted = 3"));
+        Assert.Equal(1, CountRows(check, "flathistory", "targetId = 202"));
+        Assert.Equal(1, CountRows(check, "overrideexposureorderitem", "targetid = 202"));
+        Assert.Equal(1, CountRows(check, "filtercadenceitem", "targetid = 202"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AmbiguousMovedTargetKeepsItsFormerProjectAndLocalChildren(bool merge)
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        AddOptionalTables(destination);
+        SeedProject(source, 400, OtherProjectGuid, EmptyTargetGuid, "Surviving project", withImage: false);
+        SeedProject(destination, 200, EmptyProjectGuid, EmptyTargetGuid, "Old project", withImage: false);
+        SeedProject(destination, 400, OtherProjectGuid, EmptyTargetGuid, "Surviving project", withImage: false);
+        SeedChildren(destination, 200, EmptyProjectGuid, EmptyTargetGuid);
+
+        var bundle = await BuildBundleAsync(source, merge);
+        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] =
+            RemovedProjects((EmptyProjectGuid, "Old project"));
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+        var result = merge
+            ? await writer.ApplyMergeAsync(bundle, CancellationToken.None)
+            : await writer.ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(0, result.ProjectsDeleted);
+        Assert.Equal(1, result.ProjectsKept);
+        Assert.Contains("could not be moved safely", Assert.Single(result.ProjectMessages), StringComparison.Ordinal);
+        using var check = destination.Open();
+        Assert.Equal(1, CountRows(check, "project", "Id = 201"));
+        Assert.Equal(1, CountRows(check, "target", "Id = 202 AND projectId = 201"));
+        Assert.Equal(1, CountRows(check, "flathistory", "targetId = 202"));
+        Assert.Equal(1, CountRows(check, "overrideexposureorderitem", "targetid = 202"));
+        Assert.Equal(1, CountRows(check, "filtercadenceitem", "targetid = 202"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DeletionFailureRollsBackPlanningAndTargetMoves(bool merge)
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        AddOptionalTables(destination);
+        SeedProject(source, 400, OtherProjectGuid, EmptyTargetGuid, "Changed name", withImage: false);
+        SeedProject(destination, 200, EmptyProjectGuid, EmptyTargetGuid, "Old project", withImage: false);
+        SeedProject(destination, 400, OtherProjectGuid, OtherTargetGuid, "Original name", withImage: false);
+        SeedChildren(destination, 200, EmptyProjectGuid, EmptyTargetGuid);
+        using (var connection = destination.Open())
+        {
+            connection.Execute("""
+                CREATE TRIGGER prevent_project_delete BEFORE DELETE ON project
+                BEGIN SELECT RAISE(ABORT, 'injected deletion failure'); END;
+                """);
+        }
+
+        var bundle = await BuildBundleAsync(source, merge);
+        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] =
+            RemovedProjects((EmptyProjectGuid, "Old project"));
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+        var error = await Assert.ThrowsAsync<SQLiteException>(() => merge
+            ? writer.ApplyMergeAsync(bundle, CancellationToken.None)
+            : writer.ApplyPlanningAsync(bundle, CancellationToken.None));
+        Assert.Contains("injected deletion failure", error.Message, StringComparison.Ordinal);
+
+        using var check = destination.Open();
+        Assert.Equal(1, CountRows(check, "project", "Id = 201"));
+        Assert.Equal(1, CountRows(check, "project", "Id = 401 AND name = 'Original name'"));
+        Assert.Equal(1, CountRows(check, "target", "Id = 202 AND projectId = 201"));
+        Assert.Equal(1, CountRows(check, "flathistory", "targetId = 202"));
+        Assert.Equal(1, CountRows(check, "overrideexposureorderitem", "targetid = 202"));
+        Assert.Equal(1, CountRows(check, "filtercadenceitem", "targetid = 202"));
+    }
 
     [Theory]
     [InlineData(false)]
@@ -149,7 +359,7 @@ public sealed class ProjectTombstoneTests
         Assert.Equal(0, result.ProjectsDeleted);
         Assert.Equal(1, result.ProjectsKept);
         Assert.Equal(
-            "Kept project Old name because it is live in PSF Guard.",
+            "Kept project Live name because it is live in PSF Guard.",
             Assert.Single(result.ProjectMessages));
         using var connection = destination.Open();
         using (var command = connection.CreateCommand())
