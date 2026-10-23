@@ -33,11 +33,17 @@ internal sealed record QueuedBundleJob
     public bool Completed { get; set; }
 
     /// <summary>
-    /// Why the image upload was skipped after the scheduler phase, such as a
-    /// project deleted in PSF Guard. Null when the upload completed or the
-    /// job had no upload.
+    /// PSF Guard refused the image upload that follows the applied scheduler
+    /// phase with 410 Gone. The job stays in the queue without retrying until
+    /// the operator re-queues it; only the upload runs again.
     /// </summary>
-    public string? SkippedReason { get; set; }
+    public bool UploadRefused { get; set; }
+
+    /// <summary>
+    /// The refusal as PSF Guard explained it. Null unless
+    /// <see cref="UploadRefused"/> is set.
+    /// </summary>
+    public string? RefusalReason { get; set; }
 }
 
 internal sealed record QueuedCaptureSource

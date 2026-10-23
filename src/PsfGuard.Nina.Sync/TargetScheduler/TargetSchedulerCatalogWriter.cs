@@ -270,17 +270,18 @@ public sealed class TargetSchedulerCatalogWriter
         var connection = session.Connection;
         using var transaction = connection.BeginTransaction();
         var result = new MutableApplyResult();
-        DeleteRemovedProjects(
+        var deletedProjects = DeleteRemovedProjects(
             connection,
             transaction,
             removedProjects,
+            LiveProjectGuids(bundle),
             result,
             cancellationToken);
         _ = ApplyPlanningTables(
             connection,
             transaction,
             bundle,
-            removedProjects,
+            deletedProjects,
             result,
             preservePlanProgress: true,
             cancellationToken);
@@ -316,17 +317,18 @@ public sealed class TargetSchedulerCatalogWriter
         try
         {
             var result = new MutableApplyResult();
-            DeleteRemovedProjects(
+            var deletedProjects = DeleteRemovedProjects(
                 connection,
                 transaction,
                 removedProjects,
+                LiveProjectGuids(bundle),
                 result,
                 cancellationToken);
             var maps = ApplyPlanningTables(
                 connection,
                 transaction,
                 bundle,
-                removedProjects,
+                deletedProjects,
                 result,
                 preservePlanProgress: false,
                 cancellationToken);
@@ -373,7 +375,7 @@ public sealed class TargetSchedulerCatalogWriter
         SQLiteConnection connection,
         SQLiteTransaction transaction,
         CatalogBundle bundle,
-        IReadOnlyList<RemovedProject> removedProjects,
+        IReadOnlySet<Guid> deletedProjects,
         MutableApplyResult result,
         bool preservePlanProgress,
         CancellationToken cancellationToken)
@@ -387,15 +389,14 @@ public sealed class TargetSchedulerCatalogWriter
             [],
             result,
             cancellationToken);
-        // A project the bundle lists as deleted is never inserted or updated,
-        // even when its row is also in the project table. Its targets, plans,
-        // rule weights and captures are then skipped because their project
-        // has no destination.
+        // A project this apply deleted is never inserted again by it. A listed
+        // project that is live in the bundle is not deleted, so this only
+        // guards against a bundle that lists one GUID in both places.
         var projectMap = UpsertGuidTable(
             connection,
             transaction,
             "project",
-            WithoutRemovedProjects(bundle.Tables["project"], removedProjects, result),
+            WithoutDeletedProjects(bundle.Tables["project"], deletedProjects, result),
             [],
             [],
             result,
@@ -825,62 +826,71 @@ public sealed class TargetSchedulerCatalogWriter
     }
 
     /// <summary>
-    /// The projects the bundle's optional <c>psf_guard_removed_project</c>
-    /// table lists, one per GUID. Empty when the table is absent, as it is
-    /// from servers without <c>project_tombstones_v1</c>.
+    /// The standing deletions in the bundle's optional
+    /// <c>psf_guard_removed_project</c> table, one per GUID. Empty when the
+    /// table is absent, as it is from servers without
+    /// <c>project_tombstones_v1</c>. A row with an <c>allowed_back_at</c> value
+    /// was allowed back in PSF Guard and is for PSF Guard peers, so it is
+    /// ignored. A row whose GUID is not usable is counted and skipped.
     /// </summary>
-    private static IReadOnlyList<RemovedProject> ReadRemovedProjects(CatalogBundle bundle)
+    private static RemovedProjects ReadRemovedProjects(CatalogBundle bundle)
     {
         if (!bundle.Tables.TryGetValue(RemovedProjectTable, out var table))
         {
-            return [];
+            return new RemovedProjects([], 0);
         }
 
         EnsureRequiredColumns(table, "project_guid", "name");
         var projects = new List<RemovedProject>();
         var seen = new HashSet<Guid>();
+        var invalidRows = 0;
         foreach (var row in RowsByColumn(table))
         {
-            var guidValue = DatabaseValue(row, "project_guid");
-            if (guidValue is not null and not string)
+            if (DatabaseValue(row, "allowed_back_at") is not null)
             {
-                throw new InvalidDataException("A deleted project's GUID is not text.");
-            }
-
-            var guidText = ((string?)guidValue)?.Trim();
-            if (string.IsNullOrEmpty(guidText))
-            {
-                // A deletion without a GUID identifies no project here.
                 continue;
             }
 
-            if (!Guid.TryParse(guidText, out var guid) || guid == Guid.Empty)
+            if (!TryParseGuid(DatabaseValue(row, "project_guid"), out var guid))
             {
-                throw new InvalidDataException("A deleted project's GUID is not a valid GUID.");
-            }
-
-            var nameValue = DatabaseValue(row, "name");
-            if (nameValue is not null and not string)
-            {
-                throw new InvalidDataException("A deleted project's name is not text.");
+                invalidRows++;
+                continue;
             }
 
             if (seen.Add(guid))
             {
-                var name = ((string?)nameValue)?.Trim();
+                var name = (DatabaseValue(row, "name") as string)?.Trim();
                 projects.Add(new RemovedProject(guid, string.IsNullOrEmpty(name) ? null : name));
             }
         }
 
-        return projects;
+        return new RemovedProjects(projects, invalidRows);
     }
 
-    private static BundleTable WithoutRemovedProjects(
+    /// <summary>
+    /// GUIDs of the projects in the bundle's own <c>project</c> table: live in
+    /// PSF Guard, so never deleted here even if a deletion also lists them.
+    /// </summary>
+    private static HashSet<Guid> LiveProjectGuids(CatalogBundle bundle)
+    {
+        var live = new HashSet<Guid>();
+        foreach (var row in RowsByColumn(bundle.Tables["project"]))
+        {
+            if (TryParseGuid(DatabaseValue(row, "guid"), out var guid))
+            {
+                live.Add(guid);
+            }
+        }
+
+        return live;
+    }
+
+    private static BundleTable WithoutDeletedProjects(
         BundleTable table,
-        IReadOnlyList<RemovedProject> removedProjects,
+        IReadOnlySet<Guid> deletedProjects,
         MutableApplyResult result)
     {
-        if (removedProjects.Count == 0)
+        if (deletedProjects.Count == 0)
         {
             return table;
         }
@@ -896,13 +906,12 @@ public sealed class TargetSchedulerCatalogWriter
             return table;
         }
 
-        var removed = removedProjects.Select(project => project.Guid).ToHashSet();
         var kept = new List<BundleRow>(table.Rows.Count);
         foreach (var row in table.Rows)
         {
             if (guidIndex < row.Values.Count
                 && TryParseGuid(row.Values[guidIndex].ToDatabaseValue(), out var guid)
-                && removed.Contains(guid))
+                && deletedProjects.Contains(guid))
             {
                 result.Skipped++;
                 continue;
@@ -915,27 +924,39 @@ public sealed class TargetSchedulerCatalogWriter
     }
 
     /// <summary>
-    /// Delete each listed project that Target Scheduler has and holds no
-    /// captured images for, with its targets, their exposure plans and the
-    /// rows that refer to them. A project with captured images stays. Runs in
-    /// the apply's transaction, before the planning upsert, so the upsert
-    /// works on the remaining projects. Exposure templates belong to the
-    /// profile and stay.
+    /// Delete each listed project that Target Scheduler has, that the bundle
+    /// does not hold as live, and that has no captured images here, with its
+    /// targets, their exposure plans and the rows that refer to them. Other
+    /// listed projects stay and are reported. Runs in the apply's transaction,
+    /// before the planning upsert, so the upsert works on the remaining
+    /// projects. Exposure templates belong to the profile and stay. Returns
+    /// the GUIDs it deleted.
     /// </summary>
-    private static void DeleteRemovedProjects(
+    private static HashSet<Guid> DeleteRemovedProjects(
         SQLiteConnection connection,
         SQLiteTransaction transaction,
-        IReadOnlyList<RemovedProject> removedProjects,
+        RemovedProjects removedProjects,
+        IReadOnlySet<Guid> liveProjects,
         MutableApplyResult result,
         CancellationToken cancellationToken)
     {
-        if (removedProjects.Count == 0)
+        var deleted = new HashSet<Guid>();
+        if (removedProjects.InvalidRows > 0)
         {
-            return;
+            result.ProjectRowsSkipped += removedProjects.InvalidRows;
+            result.ProjectMessages.Add(
+                $"Skipped {removedProjects.InvalidRows:N0} deleted-project "
+                + (removedProjects.InvalidRows == 1 ? "entry" : "entries")
+                + " from PSF Guard without a valid project GUID.");
+        }
+
+        if (removedProjects.Projects.Count == 0)
+        {
+            return deleted;
         }
 
         var localProjects = ReadLocalProjects(connection, transaction);
-        foreach (var removed in removedProjects)
+        foreach (var removed in removedProjects.Projects)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!localProjects.TryGetValue(removed.Guid, out var matches))
@@ -944,6 +965,14 @@ public sealed class TargetSchedulerCatalogWriter
             }
 
             var name = matches[0].Name ?? removed.Name ?? removed.Guid.ToString("D");
+            if (liveProjects.Contains(removed.Guid))
+            {
+                result.ProjectsKept++;
+                result.ProjectMessages.Add(
+                    $"Kept project {name} because it is live in PSF Guard.");
+                continue;
+            }
+
             if (matches.Count > 1)
             {
                 result.ProjectsKept++;
@@ -964,11 +993,14 @@ public sealed class TargetSchedulerCatalogWriter
             }
 
             var targets = DeleteProject(connection, transaction, project, cancellationToken);
+            deleted.Add(removed.Guid);
             result.ProjectsDeleted++;
             result.ProjectMessages.Add(
                 $"Deleted project {name} with {targets:N0} "
                 + (targets == 1 ? "target." : "targets."));
         }
+
+        return deleted;
     }
 
     private static Dictionary<Guid, List<LocalProject>> ReadLocalProjects(
@@ -1905,6 +1937,10 @@ public sealed class TargetSchedulerCatalogWriter
 
     private sealed record RemovedProject(Guid Guid, string? Name);
 
+    private sealed record RemovedProjects(
+        IReadOnlyList<RemovedProject> Projects,
+        int InvalidRows);
+
     private sealed record LocalProject(long Id, string Guid, string? Name);
 
     private readonly record struct ExposurePlanCounts(long Acquired, long Accepted);
@@ -1923,6 +1959,8 @@ public sealed class TargetSchedulerCatalogWriter
 
         public int ProjectsKept { get; set; }
 
+        public int ProjectRowsSkipped { get; set; }
+
         public List<string> ProjectMessages { get; } = [];
 
         public ApplyResult ToImmutable() => new()
@@ -1933,6 +1971,7 @@ public sealed class TargetSchedulerCatalogWriter
             Skipped = Skipped,
             ProjectsDeleted = ProjectsDeleted,
             ProjectsKept = ProjectsKept,
+            ProjectRowsSkipped = ProjectRowsSkipped,
             ProjectMessages = ProjectMessages.ToArray(),
         };
     }

@@ -129,16 +129,17 @@ public sealed class ProjectTombstoneTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task ADeletedGuidInTheBundlesProjectTableIsNotInserted(bool merge)
+    public async Task ListedProjectThatIsLiveInTheBundleIsKeptAndApplied(bool merge)
     {
         using var source = new TestDatabase();
         using var destination = new TestDatabase();
-        SeedProject(source, 200, EmptyProjectGuid, EmptyTargetGuid, "Deleted empty", withImage: true);
+        SeedProject(source, 200, EmptyProjectGuid, EmptyTargetGuid, "Live name", withImage: true);
         SeedProject(source, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: true);
+        SeedProject(destination, 200, EmptyProjectGuid, EmptyTargetGuid, "Old name", withImage: false);
 
         var bundle = await BuildBundleAsync(source, merge);
         bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] =
-            RemovedProjects((EmptyProjectGuid, "Deleted empty"));
+            RemovedProjects((EmptyProjectGuid, "Old name"));
         var writer = new TargetSchedulerCatalogWriter(destination.Path);
 
         var result = merge
@@ -146,15 +147,65 @@ public sealed class ProjectTombstoneTests
             : await writer.ApplyPlanningAsync(bundle, CancellationToken.None);
 
         Assert.Equal(0, result.ProjectsDeleted);
-        Assert.True(result.Skipped > 0);
+        Assert.Equal(1, result.ProjectsKept);
+        Assert.Equal(
+            "Kept project Old name because it is live in PSF Guard.",
+            Assert.Single(result.ProjectMessages));
         using var connection = destination.Open();
-        Assert.Equal(0, CountWhere(connection, "project", "guid", EmptyProjectGuid));
-        Assert.Equal(0, CountWhere(connection, "target", "guid", EmptyTargetGuid));
-        Assert.Equal(0, CountRows(connection, "exposureplan", "guid = 'plan-201'"));
-        Assert.Equal(0, CountRows(connection, "acquiredimage", "guid = 'image-201'"));
-        Assert.Equal(1, CountWhere(connection, "project", "guid", OtherProjectGuid));
-        Assert.Equal(1, CountWhere(connection, "target", "guid", OtherTargetGuid));
-        Assert.Equal(merge ? 1 : 0, CountRows(connection, "acquiredimage", "guid = 'image-401'"));
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT name FROM project WHERE Id = 201";
+            Assert.Equal("Live name", command.ExecuteScalar());
+        }
+
+        Assert.Equal(1, CountWhere(connection, "target", "guid", EmptyTargetGuid));
+        Assert.Equal(1, CountRows(connection, "exposureplan", "guid = 'plan-201'"));
+        Assert.Equal(merge ? 1 : 0, CountRows(connection, "acquiredimage", "guid = 'image-201'"));
+    }
+
+    [Fact]
+    public async Task AllowedBackRowsAreIgnoredAndStandingRowsApply()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        SeedProject(source, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: false);
+        SeedProject(destination, 200, EmptyProjectGuid, EmptyTargetGuid, "Allowed back", withImage: false);
+        SeedProject(destination, 300, CapturedProjectGuid, CapturedTargetGuid, "Still deleted", withImage: false);
+        var bundle = await BuildBundleAsync(source, merge: false);
+        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] = RemovedProjectTable(
+            withAllowedBackColumn: true,
+            (EmptyProjectGuid, "Allowed back", 1_790_000_500),
+            (CapturedProjectGuid, "Still deleted", null));
+
+        var result = await new TargetSchedulerCatalogWriter(destination.Path)
+            .ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(1, result.ProjectsDeleted);
+        Assert.Equal(0, result.ProjectsKept);
+        Assert.Contains("Still deleted", Assert.Single(result.ProjectMessages), StringComparison.Ordinal);
+        using var connection = destination.Open();
+        Assert.Equal(1, CountRows(connection, "project", "Id = 201"));
+        Assert.Equal(0, CountRows(connection, "project", "Id = 301"));
+    }
+
+    [Fact]
+    public async Task TableWithoutAllowedBackColumnAppliesEveryRow()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        SeedProject(source, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: false);
+        SeedProject(destination, 200, EmptyProjectGuid, EmptyTargetGuid, "Deleted empty", withImage: false);
+        var bundle = await BuildBundleAsync(source, merge: false);
+        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] = RemovedProjectTable(
+            withAllowedBackColumn: false,
+            (EmptyProjectGuid, "Deleted empty", null));
+
+        var result = await new TargetSchedulerCatalogWriter(destination.Path)
+            .ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(1, result.ProjectsDeleted);
+        using var connection = destination.Open();
+        Assert.Equal(0, CountRows(connection, "project", "Id = 201"));
     }
 
     [Theory]
@@ -193,24 +244,56 @@ public sealed class ProjectTombstoneTests
     [Theory]
     [InlineData("not-a-guid")]
     [InlineData("00000000-0000-0000-0000-000000000000")]
-    public async Task MalformedDeletedProjectGuidFailsBeforeAnyWrite(string guid)
+    [InlineData("")]
+    [InlineData(null)]
+    public async Task MalformedDeletedProjectGuidIsSkippedAndReported(string? guid)
     {
         using var source = new TestDatabase();
         using var destination = new TestDatabase();
         SeedProject(source, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: false);
         SeedProject(destination, 200, EmptyProjectGuid, EmptyTargetGuid, "Deleted empty", withImage: false);
         var bundle = await BuildBundleAsync(source, merge: false);
-        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] = RemovedProjects(
-            (EmptyProjectGuid, "Deleted empty"),
-            (guid, "Broken"));
+        var table = RemovedProjects((EmptyProjectGuid, "Deleted empty"), ("placeholder", "Broken"));
+        var broken = table.Rows[1].Values.ToArray();
+        broken[0] = guid is null ? WireValue.Null() : WireValue.Text(guid);
+        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] = table with
+        {
+            Rows = [table.Rows[0], new BundleRow { Values = broken }],
+        };
 
-        await Assert.ThrowsAsync<InvalidDataException>(
-            () => new TargetSchedulerCatalogWriter(destination.Path)
-                .ApplyPlanningAsync(bundle, CancellationToken.None));
+        var result = await new TargetSchedulerCatalogWriter(destination.Path)
+            .ApplyPlanningAsync(bundle, CancellationToken.None);
 
+        Assert.Equal(1, result.ProjectsDeleted);
+        Assert.Equal(1, result.ProjectRowsSkipped);
+        Assert.Contains(
+            result.ProjectMessages,
+            message => message.Contains("without a valid project GUID", StringComparison.Ordinal));
         using var connection = destination.Open();
-        Assert.Equal(1, CountRows(connection, "project", "Id = 201"));
-        Assert.Equal(0, CountWhere(connection, "project", "guid", OtherProjectGuid));
+        Assert.Equal(0, CountRows(connection, "project", "Id = 201"));
+        Assert.Equal(1, CountWhere(connection, "project", "guid", OtherProjectGuid));
+    }
+
+    [Fact]
+    public async Task NonTextDeletedProjectGuidIsSkipped()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        SeedProject(source, 400, OtherProjectGuid, OtherTargetGuid, "NGC 7000", withImage: false);
+        var bundle = await BuildBundleAsync(source, merge: false);
+        bundle.Tables[TargetSchedulerCatalogWriter.RemovedProjectTable] = new BundleTable
+        {
+            Columns = [Column("project_guid", "TEXT"), Column("name", "TEXT")],
+            Rows = [new BundleRow { Values = [WireValue.Integer(42), WireValue.Integer(7)] }],
+        };
+
+        var result = await new TargetSchedulerCatalogWriter(destination.Path)
+            .ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(1, result.ProjectRowsSkipped);
+        Assert.NotNull(result.DeletedProjectsSummary);
+        using var connection = destination.Open();
+        Assert.Equal(1, CountWhere(connection, "project", "guid", OtherProjectGuid));
     }
 
     [Fact]
@@ -451,8 +534,12 @@ public sealed class ProjectTombstoneTests
         Assert.Null(result.DeletedProjectsSummary);
     }
 
-    [Fact]
-    public async Task UploadRefusedWithGoneReportsTheDeletedProject()
+    [Theory]
+    [InlineData(
+        """{"success":false,"data":null,"error":"The server's own explanation."}""",
+        "PSF Guard refused capture.fit: The server's own explanation.")]
+    [InlineData("", "PSF Guard refused capture.fit (410 Gone).")]
+    public async Task UploadRefusedWithGoneCarriesTheServersExplanation(string body, string expected)
     {
         var directory = Directory.CreateTempSubdirectory("psf-guard-gone-test-");
         try
@@ -460,25 +547,20 @@ public sealed class ProjectTombstoneTests
             var path = Path.Combine(directory.FullName, "capture.fit");
             await File.WriteAllTextAsync(path, "SIMPLE");
             var handler = new StubHandler(
-                _ => Task.FromResult(Json(
-                    """{"success":false,"data":null,"error":"Project M 31 was deleted from this catalog."}""",
-                    HttpStatusCode.Gone)));
+                _ => Task.FromResult(Json(body, HttpStatusCode.Gone)));
             using var client = new PsfGuardSyncClient(
                 new HttpClient(handler),
                 new Uri("https://psf.example/"),
                 "remote-key");
 
-            var exception = await Assert.ThrowsAsync<PsfGuardProjectDeletedException>(
+            var exception = await Assert.ThrowsAsync<PsfGuardUploadRefusedException>(
                 () => client.UploadImageAsync("catalog-a", path, CancellationToken.None));
 
             Assert.Equal(HttpStatusCode.Gone, exception.StatusCode);
             Assert.Equal("capture.fit", exception.FileName);
-            Assert.Equal("Project M 31 was deleted from this catalog.", exception.ServerMessage);
-            Assert.StartsWith(
-                "Skipped capture.fit: the project was deleted in PSF Guard.",
-                exception.Message,
-                StringComparison.Ordinal);
+            Assert.Equal(expected, exception.Message);
             Assert.False(Queue.QueueFailurePolicy.ShouldRetry(exception));
+            Assert.True(Queue.QueueFailurePolicy.IsUploadRefused(exception));
         }
         finally
         {
@@ -622,26 +704,51 @@ public sealed class ProjectTombstoneTests
             });
     }
 
-    private static BundleTable RemovedProjects(params (string Guid, string Name)[] projects) => new()
-    {
-        Columns =
-        [
-            Column("project_guid", "TEXT"),
-            Column("name", "TEXT"),
-            Column("removed_at", "INTEGER"),
-        ],
-        Rows = projects
-            .Select(project => new BundleRow
-            {
-                Values =
+    private static BundleTable RemovedProjects(params (string Guid, string Name)[] projects) =>
+        RemovedProjectTable(
+            withAllowedBackColumn: true,
+            projects.Select(project => (project.Guid, project.Name, (long?)null)).ToArray());
+
+    private static BundleTable RemovedProjectTable(
+        bool withAllowedBackColumn,
+        params (string Guid, string Name, long? AllowedBackAt)[] projects) => new()
+        {
+            Columns = withAllowedBackColumn
+                ?
                 [
-                    WireValue.Text(project.Guid),
-                    WireValue.Text(project.Name),
-                    WireValue.Integer(1_790_000_000),
+                    Column("project_guid", "TEXT"),
+                    Column("name", "TEXT"),
+                    Column("removed_at", "INTEGER"),
+                    Column("allowed_back_at", "INTEGER"),
+                ]
+                :
+                [
+                    Column("project_guid", "TEXT"),
+                    Column("name", "TEXT"),
+                    Column("removed_at", "INTEGER"),
                 ],
-            })
-            .ToArray(),
-    };
+            Rows = projects
+                .Select(project => new BundleRow
+                {
+                    Values = withAllowedBackColumn
+                        ?
+                        [
+                            WireValue.Text(project.Guid),
+                            WireValue.Text(project.Name),
+                            WireValue.Integer(1_790_000_000),
+                            project.AllowedBackAt is { } allowedBack
+                                ? WireValue.Integer(allowedBack)
+                                : WireValue.Null(),
+                        ]
+                        :
+                        [
+                            WireValue.Text(project.Guid),
+                            WireValue.Text(project.Name),
+                            WireValue.Integer(1_790_000_000),
+                        ],
+                })
+                .ToArray(),
+        };
 
     private static BundleColumn Column(string name, string type) => new()
     {

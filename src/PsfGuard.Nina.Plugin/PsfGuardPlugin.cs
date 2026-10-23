@@ -765,7 +765,16 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         var syncJobs = await queue
             .RetryBlockedAsync(destination, cancellationToken)
             .ConfigureAwait(false);
-        return $"Retried {imageJobs} image and {syncJobs} scheduler jobs.";
+        var refusedUploads = await imageUploadQueue
+                .RetryRefusedUploadsAsync(destination, cancellationToken)
+                .ConfigureAwait(false)
+            + await queue
+                .RetryRefusedUploadsAsync(destination, cancellationToken)
+                .ConfigureAwait(false);
+        return $"Retried {imageJobs} image and {syncJobs} scheduler jobs, "
+            + $"and re-queued {refusedUploads} "
+            + (refusedUploads == 1 ? "upload" : "uploads")
+            + " that PSF Guard refused.";
     }
 
     public async Task QueueDeferredImageUploadAsync(

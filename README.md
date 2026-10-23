@@ -432,9 +432,14 @@ it from Target Scheduler, with its targets, exposure plans and their order,
 cadence and flat-history rows. PSF Guard Sync deletes a project only when
 Target Scheduler has no captured images for it. A project with captured images
 stays, and the pull result shows its name and why it was kept; delete it in
-Target Scheduler if you no longer need it. Exposure templates stay. Images
-later captured for a deleted project are skipped by the upload queue rather
-than retried; the status line and N.I.N.A. log show which file was skipped.
+Target Scheduler if you no longer need it. Exposure templates stay. A project
+that was allowed back in PSF Guard is not deleted.
+
+PSF Guard refuses an upload of a file whose project was deleted, or of a file
+it removed as a reject. The status line and N.I.N.A. log show PSF Guard's
+explanation, and the upload stays in the queue without retrying. After you
+allow the project back or restore the reject in PSF Guard, select **Retry
+blocked** to upload the file again.
 Grade pulls match only unambiguous image GUIDs and change only the grade and
 reject reason on acquired-image rows. After the pull, the plugin recomputes the
 accepted count for each affected exposure plan from those acquired-image

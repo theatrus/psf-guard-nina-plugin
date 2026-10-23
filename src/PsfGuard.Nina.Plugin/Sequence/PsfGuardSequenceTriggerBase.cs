@@ -141,10 +141,11 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
                     cancellationToken)
                 .ConfigureAwait(false);
         }
-        catch (PsfGuardProjectDeletedException exception)
+        catch (PsfGuardUploadRefusedException exception)
         {
-            // The project was deleted in PSF Guard; the image is skipped,
-            // and the sequence continues.
+            // PSF Guard refused the file (410 Gone) because its project was
+            // deleted or it was removed as a reject. Report it and let the
+            // sequence continue.
             Report(progress, exception.Message);
         }
     }

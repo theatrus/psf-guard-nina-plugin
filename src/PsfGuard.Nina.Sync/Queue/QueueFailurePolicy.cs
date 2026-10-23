@@ -7,9 +7,12 @@ internal static class QueueFailurePolicy
 {
     public const int MaximumAttempts = 12;
 
+    public const string RefusedUploadAdvice =
+        "The upload is held. After you undo this in PSF Guard, use Retry blocked to upload it again.";
+
     public static bool ShouldRetry(Exception exception, bool resolvingCapture = false)
     {
-        if (IsProjectDeleted(exception))
+        if (IsUploadRefused(exception))
         {
             return false;
         }
@@ -40,11 +43,12 @@ internal static class QueueFailurePolicy
     }
 
     /// <summary>
-    /// The upload was refused because its project was deleted in PSF Guard.
-    /// The outcome is final: record the upload as skipped, not as a failure.
+    /// PSF Guard refused the upload with 410 Gone. Retrying cannot succeed
+    /// until the operator undoes the deletion in PSF Guard, so the queue holds
+    /// the job as refused instead of counting it as a failure.
     /// </summary>
-    public static bool IsProjectDeleted(Exception exception) =>
-        exception is Client.PsfGuardProjectDeletedException;
+    public static bool IsUploadRefused(Exception exception) =>
+        exception is Client.PsfGuardUploadRefusedException;
 
     public static TimeSpan RetryDelay(int attempts)
     {

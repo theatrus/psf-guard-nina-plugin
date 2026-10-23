@@ -195,35 +195,46 @@ guarded protocol below, not the GUID-keyed bundle merge.
 ## Deleted Projects
 
 PSF Guard can delete a project from a catalog. It keeps a tombstone so later
-syncs and imports do not bring the project back. Servers that implement this
-advertise `project_tombstones_v1`.
+syncs and imports do not bring the project back, and a user can later allow
+the project back. Servers that implement this advertise `project_tombstones_v1`.
 
 When the export request sets `include_project_tombstones: true`, `push_planning`
 and `merge` bundles carry an optional table `psf_guard_removed_project` with
-one row per deleted project whose GUID should not exist on the rig. The table
-has at least these columns; the plugin ignores any others:
+one row per project deleted in that catalog:
 
 | Column | Type | Meaning |
 |---|---|---|
-| `project_guid` | TEXT | Target Scheduler GUID of the deleted project |
-| `name` | TEXT | Project name, used in messages |
+| `project_guid` | TEXT | Target Scheduler GUID of the deleted project; required |
+| `name` | TEXT | Project name, used in messages; required column, may be NULL |
+| `removed_at` | INTEGER | Unix seconds when the project was deleted; optional |
+| `allowed_back_at` | INTEGER | Unix seconds when it was allowed back, or NULL; optional |
+
+The plugin applies a row as a deletion only when `allowed_back_at` is absent
+or NULL. A row with a value describes a project that was allowed back; it is
+for PSF Guard peers, and the plugin ignores it. A server without the
+`allowed_back_at` column sends only standing deletions. The plugin ignores any
+other columns.
 
 The plugin validates the table before it opens the Target Scheduler database.
-It refuses the whole bundle, and writes nothing, when a required column is
-missing or a `project_guid` value is not text or not a valid non-empty GUID. It
-ignores rows with a null or blank GUID. A bundle without the table applies
-exactly as before.
+It refuses the whole bundle, and writes nothing, when the `project_guid` or
+`name` column is missing. A row whose `project_guid` is null, not text, or not
+a valid non-empty GUID is skipped; the apply result counts it and reports that
+it was skipped. The other rows still apply. A bundle without the table
+applies exactly as before.
 
 Inside the planning or merge apply transaction, before the planning upsert,
-the plugin handles each listed GUID:
+the plugin handles each standing deletion:
 
 1. It matches the GUID against `project.guid` case-insensitively, ignoring
    surrounding spaces. A GUID that matches no project changes nothing.
-2. When more than one project has the GUID, it keeps them all.
-3. When Target Scheduler has acquired images for the project, either rows with
+2. When the bundle's own `project` table contains the GUID, the project is
+   live in PSF Guard. The plugin keeps it, reports it as kept because it is
+   live in PSF Guard, and the upsert applies the bundle's row as usual.
+3. When more than one project has the GUID, it keeps them all.
+4. When Target Scheduler has acquired images for the project, either rows with
    its `projectId` or rows on any of its targets, it keeps the project. The
    apply result lists the project and the number of images.
-4. Otherwise it deletes the project's rows, child first, probing optional
+5. Otherwise it deletes the project's rows, child first, probing optional
    tables and columns: for each target `overrideexposureorderitem`,
    `filtercadenceitem`, `flathistory` and `exposureplan`; then `target`; then
    `ruleweight`; then any PSF Guard records in the file keyed by the targets'
@@ -233,31 +244,40 @@ the plugin handles each listed GUID:
    `psf_guard_director_project`); then `project`. Exposure templates belong
    to the profile and stay.
 
-The upsert that follows skips any row in the bundle's `project` table whose
-GUID is listed, so the same apply never inserts or updates a deleted project.
-Targets, plans, rule weights and captures of that project are then skipped
-because their project has no destination. Running deletions first means the
-upsert matches GUIDs against the projects that remain.
+The upsert that follows skips any bundle `project` row whose GUID this apply
+deleted, so one apply never deletes and re-inserts the same project. Because
+rule 2 keeps live projects, this guard only matters for a malformed bundle.
+Running deletions first means the upsert matches GUIDs against the projects
+that remain.
 
-The plugin reports `ProjectsDeleted`, `ProjectsKept` and one message per
-project with the apply's inserted, updated, unchanged and skipped counts.
+The apply result reports `ProjectsDeleted`, `ProjectsKept`,
+`ProjectRowsSkipped` and one message per project or skipped-row group, next to
+the inserted, updated, unchanged and skipped counts.
 
-## Deleted-Project Uploads
+## Refused Uploads
 
-A server with `project_tombstones_v1` refuses an image upload whose file
-belongs to a project deleted from that catalog. It answers `410 Gone` with its
-standard error envelope:
+A server with `project_tombstones_v1` refuses some image uploads with
+`410 Gone` and its standard error envelope, `{"success":false,"error":"..."}`.
+It does this for a file whose project was deleted from that catalog, and for a
+file it removed as a reject. The error message explains the reason and how to
+undo it in PSF Guard, for example by allowing the project back or restoring
+the reject.
 
-```json
-{"success":false,"data":null,"error":"Project M 31 was deleted from this catalog."}
-```
+The plugin treats `410` from the upload endpoint as a refusal, not a failure:
 
-The plugin treats `410` from the upload endpoint as final. It does not retry
-the upload, does not block the queue, and records the job as skipped: the
-project was deleted in PSF Guard, followed by the server's message. A
-combined capture job whose scheduler phase already applied completes with the
-same note. A sequence upload trigger reports the note and lets the sequence
-continue. Older servers never answer `410` for an upload.
+- It does not retry the upload and does not mark the job blocked.
+- It reports `PSF Guard refused <file>: <server message>` in the status line
+  and the N.I.N.A. log.
+- It keeps the job in the queue, marked as refused. **Retry blocked**
+  re-queues refused uploads for the current destination together with blocked
+  jobs, and its result shows how many refused uploads it re-queued. Undo the
+  deletion in PSF Guard first; otherwise the server refuses the file again.
+- A combined capture job whose scheduler phase already applied keeps its
+  applied receipt. Re-queueing it repeats only the upload.
+- A sequence upload trigger without deferral reports the refusal and lets the
+  sequence continue.
+
+Older servers never answer `410` for an upload.
 
 ## Flat Coverage
 
@@ -384,7 +404,8 @@ basename and digest is idempotent.
 - Grade apply changes only `gradingStatus` and `rejectreason` on acquired-image
   rows, then reconciles `exposureplan.accepted` for each affected plan.
 - Catalog bundles delete destination rows only for a project their optional
-  `psf_guard_removed_project` table lists, and only when Target Scheduler has
-  no acquired images for it; see [Deleted projects](#deleted-projects). The
+  `psf_guard_removed_project` table lists as a standing deletion, only when the
+  bundle does not also hold it as live, and only when Target Scheduler has no
+  acquired images for it; see [Deleted projects](#deleted-projects). The
   separate `flat_history_v1` exchange only removes explicitly invalidated,
   unchanged Target Scheduler coverage rows.

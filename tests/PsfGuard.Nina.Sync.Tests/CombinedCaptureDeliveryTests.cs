@@ -53,17 +53,18 @@ public sealed class CombinedCaptureDeliveryTests
     }
 
     [Fact]
-    public async Task CombinedCaptureRecordsAnUploadOfADeletedProjectAsSkipped()
+    public async Task RefusedUploadAfterSchedulerApplyIsHeldAndReQueuesOnlyTheUpload()
     {
         using var directory = new TestDirectory();
         using var database = new TestDatabase();
         var imagePath = SeedCapture(database, directory, createImage: true);
         var requests = new ConcurrentQueue<string>();
         var statuses = new ConcurrentQueue<string>();
-        var completed = new TaskCompletionSource<PushReceipt>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
+        var refuse = 1;
+        var receipts = new ConcurrentQueue<PushReceipt>();
+        var queuePath = directory.Child("queue");
         await using var queue = new DurablePushQueue(
-            directory.Child("queue"),
+            queuePath,
             destination => Client(
                 destination,
                 (request, _) =>
@@ -71,14 +72,14 @@ public sealed class CombinedCaptureDeliveryTests
                     var path = request.RequestUri!.AbsolutePath;
                     requests.Enqueue(path);
                     return Task.FromResult(
-                        path == UploadPath
+                        path == UploadPath && Volatile.Read(ref refuse) == 1
                             ? Json(
-                                """{"success":false,"data":null,"error":"Project M 31 was deleted."}""",
+                                """{"success":false,"data":null,"error":"The server's explanation."}""",
                                 HttpStatusCode.Gone)
                             : ResponseFor(path));
                 }),
             statuses.Enqueue);
-        queue.Pushed += (_, receipt) => completed.TrySetResult(receipt);
+        queue.Pushed += (_, receipt) => receipts.Enqueue(receipt);
 
         await queue.EnqueueCaptureAsync(
             Destination(),
@@ -92,20 +93,27 @@ public sealed class CombinedCaptureDeliveryTests
             CancellationToken.None);
         queue.Start();
 
-        var receipt = await completed.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        await WaitUntilAsync(
+            () => statuses.Any(status => status.Contains(
+                "PSF Guard refused capture.fit: The server's explanation.",
+                StringComparison.Ordinal)),
+            TimeSpan.FromSeconds(3));
         await Task.Delay(250);
 
-        Assert.True(receipt.Applied);
         Assert.Equal([PreviewPath, ApplyPath, UploadPath], requests.ToArray());
-        Assert.Contains(
-            statuses,
-            status => status.Contains(
-                "Skipped capture.fit: the project was deleted in PSF Guard.",
-                StringComparison.Ordinal));
-        Assert.DoesNotContain(
-            statuses,
-            status => status.Contains("blocked", StringComparison.OrdinalIgnoreCase));
-        Assert.Empty(Directory.EnumerateFiles(directory.Child("queue"), "*.json"));
+        Assert.True(Assert.Single(receipts).Applied);
+        var jobPath = Assert.Single(Directory.EnumerateFiles(queuePath, "*.json"));
+        var held = await ReadJobAsync<QueuedBundleJob>(jobPath);
+        Assert.True(held.UploadRefused);
+        Assert.True(held.SchedulerApplied);
+        Assert.False(held.Blocked);
+        Assert.Equal(0, await queue.RetryBlockedAsync(Destination(), CancellationToken.None));
+
+        Volatile.Write(ref refuse, 0);
+        Assert.Equal(1, await queue.RetryRefusedUploadsAsync(Destination(), CancellationToken.None));
+        await WaitUntilAsync(() => !File.Exists(jobPath), TimeSpan.FromSeconds(3));
+
+        Assert.Equal([PreviewPath, ApplyPath, UploadPath, UploadPath], requests.ToArray());
     }
 
     [Fact]

@@ -138,11 +138,12 @@ public sealed class PsfGuardSyncClient : IDisposable
             .ConfigureAwait(false);
         if (response.StatusCode == HttpStatusCode.Gone)
         {
-            // PSF Guard answers 410 when the image belongs to a project that
-            // was deleted from this catalog. Older servers never send it.
+            // PSF Guard answers 410 for a file whose project was deleted from
+            // this catalog or that it removed as a reject. Its message says
+            // which. Older servers never send 410 for an upload.
             var body = await response.Content.ReadAsStringAsync(cancellationToken)
                 .ConfigureAwait(false);
-            throw new PsfGuardProjectDeletedException(
+            throw new PsfGuardUploadRefusedException(
                 Path.GetFileName(fullPath),
                 ServerErrorMessage(body));
         }
