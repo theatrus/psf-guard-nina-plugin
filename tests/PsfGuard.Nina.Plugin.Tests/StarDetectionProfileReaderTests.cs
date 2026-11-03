@@ -42,21 +42,19 @@ public sealed class StarDetectionProfileReaderTests
         Assert.Equal(new DateTimeOffset(2026, 11, 2, 21, 0, 0, TimeSpan.Zero), report.CapturedAt);
         Assert.Equal("3.2.0.9001", report.NinaVersion);
         Assert.Equal("2.4.0.0", report.HocusFocusVersion);
-        var nina = report.Settings.Nina;
-        Assert.Equal("High", nina.StarSensitivity);
-        Assert.Equal("None", nina.NoiseReduction);
-        Assert.Equal(0.2, nina.AutoStretchFactor);
-        Assert.Equal(-2.8, nina.BlackClipping);
-        Assert.Equal(1, nina.AutoFocusInnerCropRatio);
-        Assert.Equal(1, nina.AutoFocusOuterCropRatio);
-        Assert.Equal(30, nina.AutoFocusUseBrightestStars);
+        var settings = report.Settings;
+        Assert.Equal("high", settings.StarSensitivity);
+        Assert.Equal("none", settings.NoiseReduction);
+        Assert.Equal(0.2, settings.AutoStretchFactor);
+        Assert.Equal(-2.8, settings.BlackClipping);
+        Assert.Equal(1, settings.AutofocusInnerCropRatio);
+        Assert.Equal(1, settings.AutofocusOuterCropRatio);
+        Assert.Equal(30, settings.AutofocusBrightestStars);
+        Assert.Equal("hocus_focus", settings.StarDetector);
+        Assert.Equal(2350, settings.FocalLengthMm);
+        Assert.Equal(3.76, settings.PixelSizeUm);
         Assert.Equal(
-            "NINA.Joko.Plugins.HocusFocus.StarDetection.HocusFocusStarDetection",
-            nina.StarDetector);
-        Assert.Equal(2350, nina.FocalLength);
-        Assert.Equal(3.76, nina.PixelSize);
-        Assert.Equal(
-            new Dictionary<string, object?>
+            new Dictionary<string, object>
             {
                 ["BrightnessSensitivity"] = 1.2000000000000002,
                 ["NoiseReductionRadius"] = 4L,
@@ -84,9 +82,9 @@ public sealed class StarDetectionProfileReaderTests
             null,
             DateTimeOffset.UtcNow);
 
-        Assert.Null(report.Settings.Nina.StarDetector);
-        Assert.Null(report.Settings.Nina.FocalLength);
-        Assert.Null(report.Settings.Nina.PixelSize);
+        Assert.Equal("nina", report.Settings.StarDetector);
+        Assert.Null(report.Settings.FocalLengthMm);
+        Assert.Null(report.Settings.PixelSizeUm);
         Assert.Null(report.HocusFocusVersion);
         Assert.Empty(report.Settings.HocusFocus);
     }

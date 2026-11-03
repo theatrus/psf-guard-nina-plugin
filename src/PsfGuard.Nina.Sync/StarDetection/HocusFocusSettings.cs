@@ -54,25 +54,33 @@ public static class HocusFocusSettings
         "ContaminationSensitivity",
         "RejectContaminatedStars",
         "DetectionBinning",
+        "DefocusAwareDonutDetection",
+        "UsePerFilterSettings",
     ];
+
+    /// <summary>The longest string value kept; PSF Guard refuses longer ones.</summary>
+    public const int MaxValueChars = 16 * 1024;
 
     public delegate bool TryReadValue(string key, out object? value);
 
     /// <summary>
     /// Reads each allowlisted key that the block stores. A boolean stays a
     /// boolean, an integer becomes a 64-bit integer, a floating-point value a
-    /// double, and anything else its invariant string. A value that is not a
-    /// finite number becomes null.
+    /// double, and anything else its invariant string. A null, a number that
+    /// is not finite, or a string over <see cref="MaxValueChars"/> is left
+    /// out, so the server applies Hocus Focus's default.
     /// </summary>
-    public static SortedDictionary<string, object?> Select(TryReadValue tryRead)
+    public static SortedDictionary<string, object> Select(TryReadValue tryRead)
     {
         ArgumentNullException.ThrowIfNull(tryRead);
-        var selected = new SortedDictionary<string, object?>(StringComparer.Ordinal);
+        var selected = new SortedDictionary<string, object>(StringComparer.Ordinal);
         foreach (var key in Keys)
         {
-            if (tryRead(key, out var value))
+            if (tryRead(key, out var value)
+                && Normalize(value) is { } normalized
+                && normalized is not string { Length: > MaxValueChars })
             {
-                selected[key] = Normalize(value);
+                selected[key] = normalized;
             }
         }
 

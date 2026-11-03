@@ -92,6 +92,32 @@ public sealed class StarDetectionSettingsTests
     }
 
     [Fact]
+    public void HocusFocusSelectionLeavesOutValuesTheServerWouldRefuse()
+    {
+        var block = new Dictionary<string, object?>
+        {
+            ["MinHFR"] = double.NaN,
+            ["UseAdvanced"] = null,
+            ["OptimizedSettingsJson"] = new string('x', HocusFocusSettings.MaxValueChars + 1),
+            ["StructureLayers"] = 4,
+        };
+
+        var selected = HocusFocusSettings.Select(block.TryGetValue);
+
+        Assert.Equal(["StructureLayers"], selected.Keys);
+    }
+
+    [Theory]
+    [InlineData(null, "nina")]
+    [InlineData("", "nina")]
+    [InlineData(StarDetectionSettings.HocusFocusStarDetection, "hocus_focus")]
+    [InlineData("Other.Plugin.StarDetection", "Other.Plugin.StarDetection")]
+    public void DetectorNameMatchesTheServersSelection(string? selectedType, string expected)
+    {
+        Assert.Equal(expected, StarDetectionSettings.DetectorName(selectedType));
+    }
+
+    [Fact]
     public void ReportSerializesInSnakeCaseAndKeepsHocusFocusKeyNames()
     {
         var json = ProtocolJson.Serialize(Report());
@@ -106,16 +132,28 @@ public sealed class StarDetectionSettingsTests
         Assert.Equal("2026-11-02T21:00:00+00:00", root.GetProperty("captured_at").GetString());
         Assert.Equal("3.2.0.9001", root.GetProperty("nina_version").GetString());
         Assert.Equal(JsonValueKind.Null, root.GetProperty("hocus_focus_version").ValueKind);
-        var nina = root.GetProperty("settings").GetProperty("nina");
-        Assert.Equal("High", nina.GetProperty("star_sensitivity").GetString());
-        Assert.Equal("None", nina.GetProperty("noise_reduction").GetString());
-        Assert.Equal(30, nina.GetProperty("auto_focus_use_brightest_stars").GetInt32());
-        Assert.Equal(2350, nina.GetProperty("focal_length").GetDouble());
-        Assert.Equal(JsonValueKind.Null, nina.GetProperty("pixel_size").ValueKind);
+        var settings = root.GetProperty("settings");
         Assert.Equal(
-            "NINA.Joko.Plugins.HocusFocus.StarDetection.HocusFocusStarDetection",
-            nina.GetProperty("star_detector").GetString());
-        var hocusFocus = root.GetProperty("settings").GetProperty("hocus_focus");
+            new[]
+            {
+                "star_detector",
+                "star_sensitivity",
+                "noise_reduction",
+                "auto_stretch_factor",
+                "black_clipping",
+                "autofocus_inner_crop_ratio",
+                "autofocus_outer_crop_ratio",
+                "autofocus_brightest_stars",
+                "focal_length_mm",
+                "hocus_focus",
+            },
+            settings.EnumerateObject().Select(property => property.Name));
+        Assert.Equal("hocus_focus", settings.GetProperty("star_detector").GetString());
+        Assert.Equal("high", settings.GetProperty("star_sensitivity").GetString());
+        Assert.Equal("none", settings.GetProperty("noise_reduction").GetString());
+        Assert.Equal(30, settings.GetProperty("autofocus_brightest_stars").GetInt32());
+        Assert.Equal(2350, settings.GetProperty("focal_length_mm").GetDouble());
+        var hocusFocus = settings.GetProperty("hocus_focus");
         Assert.Equal(4, hocusFocus.GetProperty("NoiseReductionRadius").GetInt64());
         Assert.True(hocusFocus.GetProperty("UseAdvanced").GetBoolean());
     }
@@ -168,7 +206,7 @@ public sealed class StarDetectionSettingsTests
                 {
                     Settings = report.Settings with
                     {
-                        Nina = report.Settings.Nina with { StarSensitivity = "Highest" },
+                        StarSensitivity = "highest",
                     },
                 }));
     }
@@ -237,7 +275,7 @@ public sealed class StarDetectionSettingsTests
             {
                 Settings = report.Settings with
                 {
-                    HocusFocus = new SortedDictionary<string, object?>(StringComparer.Ordinal)
+                    HocusFocus = new SortedDictionary<string, object>(StringComparer.Ordinal)
                     {
                         ["NoiseReductionRadius"] = 3L,
                     },
@@ -391,7 +429,7 @@ public sealed class StarDetectionSettingsTests
         new($"{destination.ServerUrl}\n{destination.CatalogId}", report, destination);
 
     private static StarDetectionSettingsReport Report(
-        IReadOnlyDictionary<string, object?>? hocusFocus = null) => new()
+        IReadOnlyDictionary<string, object>? hocusFocus = null) => new()
         {
             ProfileId = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
             ProfileName = "C925",
@@ -400,19 +438,16 @@ public sealed class StarDetectionSettingsTests
             HocusFocusVersion = null,
             Settings = new StarDetectionSettings
             {
-                Nina = new NinaStarDetectionSettings
-                {
-                    StarSensitivity = "High",
-                    NoiseReduction = "None",
-                    AutoStretchFactor = 0.2,
-                    BlackClipping = -2.8,
-                    AutoFocusInnerCropRatio = 1,
-                    AutoFocusOuterCropRatio = 1,
-                    AutoFocusUseBrightestStars = 30,
-                    StarDetector = "NINA.Joko.Plugins.HocusFocus.StarDetection.HocusFocusStarDetection",
-                    FocalLength = 2350,
-                    PixelSize = null,
-                },
+                StarDetector = "hocus_focus",
+                StarSensitivity = "high",
+                NoiseReduction = "none",
+                AutoStretchFactor = 0.2,
+                BlackClipping = -2.8,
+                AutofocusInnerCropRatio = 1,
+                AutofocusOuterCropRatio = 1,
+                AutofocusBrightestStars = 30,
+                FocalLengthMm = 2350,
+                PixelSizeUm = null,
                 HocusFocus = hocusFocus ?? HocusFocusSettings.Select(HocusFocusBlock().TryGetValue),
             },
         };

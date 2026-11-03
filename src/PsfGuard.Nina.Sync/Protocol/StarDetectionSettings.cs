@@ -1,6 +1,8 @@
 // Keep identical to theatrus/psf-guard-director-nina-plugin src/PsfGuard.Director.Runtime/StarDetectionSettings.cs,
 // apart from the namespace and using lines.
 
+using System.Text.Json.Serialization;
+
 namespace PsfGuard.Nina.Sync.Protocol;
 
 /// <summary>
@@ -29,45 +31,63 @@ public sealed record StarDetectionSettingsReport
     public required StarDetectionSettings Settings { get; init; }
 }
 
+/// <summary>
+/// The settings themselves, in the shape of PSF Guard's
+/// <c>ProfileSettings</c>, which refuses unknown fields. A value left out
+/// takes N.I.N.A.'s default on the server.
+/// </summary>
 public sealed record StarDetectionSettings
 {
-    public required NinaStarDetectionSettings Nina { get; init; }
+    /// <summary>Hocus Focus's star detector, as N.I.N.A. records the selection.</summary>
+    public const string HocusFocusStarDetection =
+        "NINA.Joko.Plugins.HocusFocus.StarDetection.HocusFocusStarDetection";
+
+    /// <summary>
+    /// The <see cref="StarDetector"/> value for the type name N.I.N.A. records
+    /// as the selected <c>IStarDetection</c>; none means its built-in detector.
+    /// </summary>
+    public static string DetectorName(string? selectedType) =>
+        string.IsNullOrWhiteSpace(selectedType) ? "nina"
+        : string.Equals(selectedType, HocusFocusStarDetection, StringComparison.Ordinal) ? "hocus_focus"
+        : selectedType;
+
+    /// <summary>
+    /// <c>nina</c> for N.I.N.A.'s built-in detector, <c>hocus_focus</c> for
+    /// Hocus Focus, or another selected detector's full type name.
+    /// </summary>
+    public required string StarDetector { get; init; }
+
+    /// <summary>normal, high, or highest.</summary>
+    public required string StarSensitivity { get; init; }
+
+    /// <summary>none, median, normal, high, or highest.</summary>
+    public required string NoiseReduction { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? AutoStretchFactor { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? BlackClipping { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? AutofocusInnerCropRatio { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? AutofocusOuterCropRatio { get; init; }
+
+    /// <summary>Above 0, N.I.N.A. measures HFR on this many brightest stars.</summary>
+    public required int AutofocusBrightestStars { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? FocalLengthMm { get; init; }
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public double? PixelSizeUm { get; init; }
 
     /// <summary>
     /// The allowlisted keys stored in the profile's Hocus Focus plugin
     /// settings, with the stored boolean, number, or string value. Empty when
     /// Hocus Focus stores none of them.
     /// </summary>
-    public required IReadOnlyDictionary<string, object?> HocusFocus { get; init; }
-}
-
-public sealed record NinaStarDetectionSettings
-{
-    /// <summary>N.I.N.A.'s <c>StarSensitivityEnum</c> name, such as High.</summary>
-    public required string StarSensitivity { get; init; }
-
-    /// <summary>N.I.N.A.'s <c>NoiseReductionEnum</c> name, such as None.</summary>
-    public required string NoiseReduction { get; init; }
-
-    public required double? AutoStretchFactor { get; init; }
-
-    public required double? BlackClipping { get; init; }
-
-    public required double? AutoFocusInnerCropRatio { get; init; }
-
-    public required double? AutoFocusOuterCropRatio { get; init; }
-
-    public required int AutoFocusUseBrightestStars { get; init; }
-
-    /// <summary>
-    /// Full type name of the selected <c>IStarDetection</c> behavior; null when
-    /// the profile uses N.I.N.A.'s built-in detector.
-    /// </summary>
-    public required string? StarDetector { get; init; }
-
-    /// <summary>Millimetres; null when the profile has no focal length.</summary>
-    public required double? FocalLength { get; init; }
-
-    /// <summary>Micrometres; null when the profile has no pixel size.</summary>
-    public required double? PixelSize { get; init; }
+    public required IReadOnlyDictionary<string, object> HocusFocus { get; init; }
 }

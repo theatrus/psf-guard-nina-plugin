@@ -41,23 +41,18 @@ internal static class StarDetectionProfileReader
             HocusFocusVersion = hocusFocusVersion,
             Settings = new StarDetectionSettings
             {
-                Nina = new NinaStarDetectionSettings
-                {
-                    StarSensitivity = image.StarSensitivity.ToString(),
-                    NoiseReduction = image.NoiseReduction.ToString(),
-                    AutoStretchFactor = FiniteOrNull(image.AutoStretchFactor),
-                    BlackClipping = FiniteOrNull(image.BlackClipping),
-                    AutoFocusInnerCropRatio =
-                        FiniteOrNull(focuser.AutoFocusInnerCropRatio),
-                    AutoFocusOuterCropRatio =
-                        FiniteOrNull(focuser.AutoFocusOuterCropRatio),
-                    AutoFocusUseBrightestStars = focuser.AutoFocusUseBrightestStars,
-                    StarDetector = string.IsNullOrWhiteSpace(starDetector) ? null : starDetector,
-                    FocalLength = PositiveOrNull(profile.TelescopeSettings.FocalLength),
-                    PixelSize = PositiveOrNull(profile.CameraSettings.PixelSize),
-                },
+                StarDetector = StarDetectionSettings.DetectorName(starDetector),
+                StarSensitivity = image.StarSensitivity.ToString().ToLowerInvariant(),
+                NoiseReduction = image.NoiseReduction.ToString().ToLowerInvariant(),
+                AutoStretchFactor = FiniteOrNull(image.AutoStretchFactor),
+                BlackClipping = FiniteOrNull(image.BlackClipping),
+                AutofocusInnerCropRatio = RatioOrNull(focuser.AutoFocusInnerCropRatio),
+                AutofocusOuterCropRatio = RatioOrNull(focuser.AutoFocusOuterCropRatio),
+                AutofocusBrightestStars = Math.Max(0, focuser.AutoFocusUseBrightestStars),
+                FocalLengthMm = PositiveOrNull(profile.TelescopeSettings.FocalLength),
+                PixelSizeUm = PositiveOrNull(profile.CameraSettings.PixelSize),
                 HocusFocus = pluginSettings is null
-                    ? new SortedDictionary<string, object?>(StringComparer.Ordinal)
+                    ? new SortedDictionary<string, object>(StringComparer.Ordinal)
                     : HocusFocusSettings.Select(
                         (string key, out object? value) =>
                             TryReadPluginValue(pluginSettings, HocusFocusSettings.PluginId, key, out value)),
@@ -95,6 +90,10 @@ internal static class StarDetectionProfileReader
 
     private static double? FiniteOrNull(double value) =>
         double.IsFinite(value) ? value : null;
+
+    /// <summary>A crop ratio N.I.N.A. could hold: above 0 and at most 1.</summary>
+    private static double? RatioOrNull(double value) =>
+        double.IsFinite(value) && value > 0 && value <= 1 ? value : null;
 
     private static double? PositiveOrNull(double value) =>
         double.IsFinite(value) && value > 0 ? value : null;
