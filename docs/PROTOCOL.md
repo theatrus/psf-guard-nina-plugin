@@ -411,16 +411,20 @@ PSF Guard's quality scan reproduces N.I.N.A.'s recorded star count and HFR
 only when it knows the rig's star-detection settings. FITS headers do not
 record them, so the plugin sends them from the active profile.
 
+Servers advertise `star_detection_profile_v1` when they accept these
+settings. Before each send, the plugin reads `/api/sync/v1/capabilities` and
+sends nothing to a server that does not list it.
+
 ```http
-POST /api/db/{catalog_id}/nina/star-detection-settings
+POST /api/sync/v1/star-detection/profile
 Authorization: Bearer <per-database remote API key>
-X-PSF-Guard-Database-ID: <catalog_id>
 Content-Type: application/json
 ```
 
 ```json
 {
   "protocol_version": 1,
+  "catalog_id": "review",
   "profile_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
   "profile_name": "C925",
   "captured_at": "2026-11-02T21:00:00+00:00",
@@ -450,7 +454,9 @@ Content-Type: application/json
 }
 ```
 
-- `captured_at` is the UTC time the plugin read the settings.
+- `catalog_id` is the paired catalog. The server refuses a different one.
+- `captured_at` is the UTC time the plugin read the settings. The server
+  applies them to frames captured from then on.
 - `hocus_focus_version` is the loaded Hocus Focus assembly version, or null
   when Hocus Focus is not loaded.
 - `settings` has the shape of PSF Guard's `ProfileSettings`, which also holds
@@ -484,11 +490,20 @@ change. It reacts to N.I.N.A.'s change events and also checks once a minute.
 It sends only when the settings, apart from `captured_at`, differ from the
 last ones the same server and catalog accepted in this N.I.N.A. session.
 
-The server answers with any `2xx` status; the plugin ignores the body. A
-failure is retried after 30 seconds, doubling up to 30 minutes. `404` or `405`
-means the server does not accept the route; the plugin waits six hours before
-asking that catalog again, or until the option is turned off and on. The sender runs in the background and never blocks
-or fails an exposure.
+The server refuses bodies over 64 KiB and answers in its standard envelope:
+
+```json
+{"success": true, "data": {"profile_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "stored": true}}
+```
+
+`stored` is false when the profile already had these settings in effect. The
+plugin treats both answers as accepted.
+
+A failure is retried after 30 seconds, doubling up to 30 minutes. A server
+without `star_detection_profile_v1`, or one that answers `404` or `405`,
+does not accept these settings. The plugin then waits six hours before asking
+that catalog again, or until the option is turned off and on. The sender runs
+in the background and never blocks or fails an exposure.
 
 ## Merge Rules
 

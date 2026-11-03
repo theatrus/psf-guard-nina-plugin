@@ -100,3 +100,12 @@ public sealed record SyncExport
 
     public string? Error { get; init; }
 }
+
+/// <summary>PSF Guard's answer to a star-detection profile.</summary>
+public sealed record StarDetectionProfileResponse
+{
+    public required string ProfileId { get; init; }
+
+    /// <summary>False when the profile already had these settings in effect.</summary>
+    public bool Stored { get; init; }
+}

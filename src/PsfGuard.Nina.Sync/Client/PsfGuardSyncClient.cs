@@ -151,44 +151,51 @@ public sealed class PsfGuardSyncClient : IDisposable
         await ReadAsync<JsonElement>(response, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>The capability a server advertises when it accepts star-detection profiles.</summary>
+    public const string StarDetectionProfileCapability = "star_detection_profile_v1";
+
     /// <summary>
     /// Send the active profile's star-detection settings to the paired
-    /// catalog. A failure throws <see cref="HttpRequestException"/> with the
-    /// response status, when there is one.
+    /// catalog. It first checks that the server advertises
+    /// <see cref="StarDetectionProfileCapability"/>, and throws
+    /// <see cref="PsfGuardMissingCapabilityException"/> without sending when
+    /// it does not. A failed request throws <see cref="HttpRequestException"/>
+    /// with the response status, when there is one.
     /// </summary>
-    public async Task SendStarDetectionSettingsAsync(
+    public async Task<StarDetectionProfileResponse> SendStarDetectionProfileAsync(
         string catalogId,
         StarDetectionSettingsReport report,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(catalogId);
         ArgumentNullException.ThrowIfNull(report);
-        using var request = new HttpRequestMessage(
-            HttpMethod.Post,
-            $"api/db/{Uri.EscapeDataString(catalogId)}/nina/star-detection-settings")
+        var capabilities = await GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
+        if (!capabilities.Capabilities.Contains(StarDetectionProfileCapability, StringComparer.Ordinal))
         {
-            Content = JsonContent.Create(report, options: ProtocolJson.Options),
-        };
-        request.Headers.Add("X-PSF-Guard-Database-ID", catalogId);
-        using var response = await httpClient.SendAsync(
-                request,
-                HttpCompletionOption.ResponseHeadersRead,
-                cancellationToken)
-            .ConfigureAwait(false);
-        if (response.StatusCode == HttpStatusCode.NoContent)
-        {
-            return;
+            throw new PsfGuardMissingCapabilityException(StarDetectionProfileCapability);
         }
 
-        await ReadAsync<JsonElement>(response, cancellationToken).ConfigureAwait(false);
+        // The shared report carries no catalog; this route takes it in the body.
+        var body = JsonSerializer.SerializeToNode(report, ProtocolJson.Options)!.AsObject();
+        body["catalog_id"] = catalogId;
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            "api/sync/v1/star-detection/profile")
+        {
+            Content = JsonContent.Create(body, options: ProtocolJson.Options),
+        };
+        return await SendAsync<StarDetectionProfileResponse>(request, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>
-    /// True when a star-detection send failed because the server has no such
-    /// route: an older PSF Guard answers 404 or 405.
+    /// True when a star-detection send failed because the server cannot take
+    /// it: it lacks <see cref="StarDetectionProfileCapability"/>, or an older
+    /// PSF Guard answered 404 or 405.
     /// </summary>
     public static bool IsMissingStarDetectionRoute(Exception exception) =>
-        exception is HttpRequestException
+        exception is PsfGuardMissingCapabilityException
+        || exception is HttpRequestException
         {
             StatusCode: HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed,
         };

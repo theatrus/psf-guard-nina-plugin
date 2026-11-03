@@ -1209,7 +1209,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         var destination = (RemoteQueueDestination)capture.Destination!;
         using var client = CreateQueuedClient(destination);
         await client
-            .SendStarDetectionSettingsAsync(destination.CatalogId, capture.Report, cancellationToken)
+            .SendStarDetectionProfileAsync(destination.CatalogId, capture.Report, cancellationToken)
             .ConfigureAwait(false);
     }
 

@@ -212,46 +212,91 @@ public sealed class StarDetectionSettingsTests
     }
 
     [Fact]
-    public async Task ClientPostsTheReportToThePairedCatalog()
+    public async Task ClientPostsTheReportWithItsCatalogAfterCheckingTheCapability()
     {
-        HttpRequestMessage? captured = null;
-        string? body = null;
+        var requests = new List<(HttpMethod Method, string Uri, string? Body)>();
         using var client = new PsfGuardSyncClient(
             new HttpClient(new StubHandler(async request =>
             {
-                captured = request;
-                body = await request.Content!.ReadAsStringAsync();
-                return new HttpResponseMessage(HttpStatusCode.NoContent);
+                requests.Add((
+                    request.Method,
+                    request.RequestUri!.AbsoluteUri,
+                    request.Content is null ? null : await request.Content.ReadAsStringAsync()));
+                Assert.Equal("secret", request.Headers.Authorization!.Parameter);
+                return request.Method == HttpMethod.Get
+                    ? Json(Capabilities(advertisesProfile: true), HttpStatusCode.OK)
+                    : Json(
+                        """{"success":true,"data":{"profile_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","stored":false}}""",
+                        HttpStatusCode.OK);
             })),
             new Uri("https://psf.example/base/"),
             "secret");
 
-        await client.SendStarDetectionSettingsAsync("review", Report(), CancellationToken.None);
+        var response = await client.SendStarDetectionProfileAsync("review", Report(), CancellationToken.None);
 
-        Assert.NotNull(captured);
-        Assert.Equal(HttpMethod.Post, captured.Method);
+        Assert.False(response.Stored);
+        Assert.Equal("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", response.ProfileId);
         Assert.Equal(
-            "https://psf.example/base/api/db/review/nina/star-detection-settings",
-            captured.RequestUri!.AbsoluteUri);
-        Assert.Equal("secret", captured.Headers.Authorization!.Parameter);
-        Assert.Equal("review", captured.Headers.GetValues("X-PSF-Guard-Database-ID").Single());
-        Assert.Contains("\"profile_id\":\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\"", body);
-        Assert.DoesNotContain("secret", body, StringComparison.Ordinal);
+            new[]
+            {
+                "https://psf.example/base/api/sync/v1/capabilities",
+                "https://psf.example/base/api/sync/v1/star-detection/profile",
+            },
+            requests.Select(request => request.Uri));
+        Assert.Equal(HttpMethod.Post, requests[1].Method);
+        using var body = JsonDocument.Parse(requests[1].Body!);
+        Assert.Equal("review", body.RootElement.GetProperty("catalog_id").GetString());
+        Assert.Equal(1, body.RootElement.GetProperty("protocol_version").GetInt32());
+        Assert.Equal(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            body.RootElement.GetProperty("profile_id").GetString());
+        Assert.Equal("high", body.RootElement.GetProperty("settings").GetProperty("star_sensitivity").GetString());
+        Assert.DoesNotContain("secret", requests[1].Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ClientSendsNothingToAServerWithoutTheCapability()
+    {
+        var posts = 0;
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(new StubHandler(request =>
+            {
+                if (request.Method == HttpMethod.Post)
+                {
+                    posts++;
+                }
+
+                return Task.FromResult(Json(Capabilities(advertisesProfile: false), HttpStatusCode.OK));
+            })),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        var error = await Assert.ThrowsAsync<PsfGuardMissingCapabilityException>(
+            () => client.SendStarDetectionProfileAsync("review", Report(), CancellationToken.None));
+
+        Assert.Equal(0, posts);
+        Assert.Equal(PsfGuardSyncClient.StarDetectionProfileCapability, error.Capability);
+        Assert.True(PsfGuardSyncClient.IsMissingStarDetectionRoute(error));
     }
 
     [Fact]
     public async Task ClientReportsTheStatusOfARefusal()
     {
         using var client = new PsfGuardSyncClient(
-            new HttpClient(new StubHandler(_ => Task.FromResult(
-                Json("""{"success":false,"error":"no such route"}""", HttpStatusCode.NotFound)))),
+            new HttpClient(new StubHandler(request => Task.FromResult(
+                request.Method == HttpMethod.Get
+                    ? Json(Capabilities(advertisesProfile: true), HttpStatusCode.OK)
+                    : Json("""{"success":false,"error":"no such route"}""", HttpStatusCode.NotFound)))),
             new Uri("https://psf.example/"),
             "secret");
 
         var error = await Assert.ThrowsAsync<HttpRequestException>(
-            () => client.SendStarDetectionSettingsAsync("review", Report(), CancellationToken.None));
+            () => client.SendStarDetectionProfileAsync("review", Report(), CancellationToken.None));
 
         Assert.Equal(HttpStatusCode.NotFound, error.StatusCode);
+        Assert.True(PsfGuardSyncClient.IsMissingStarDetectionRoute(error));
+        Assert.False(PsfGuardSyncClient.IsMissingStarDetectionRoute(
+            new HttpRequestException("busy", null, HttpStatusCode.ServiceUnavailable)));
     }
 
     [Fact]
@@ -296,7 +341,7 @@ public sealed class StarDetectionSettingsTests
         fixture.Current = Capture(Destination with { CatalogId = "other" }, Report());
 
         Assert.Equal(StarDetectionSendResult.Sent, await fixture.Reporter.SendIfChangedAsync(default));
-        Assert.Equal("other", fixture.LastCatalogHeader);
+        Assert.Equal("other", fixture.LastCatalogId);
     }
 
     [Fact]
@@ -431,6 +476,18 @@ public sealed class StarDetectionSettingsTests
     }
 
     [Fact]
+    public async Task ReporterHoldsOffAServerWithoutTheCapability()
+    {
+        var fixture = new ReporterFixture { AdvertisesProfile = false };
+        fixture.Current = Capture(Destination, Report());
+
+        Assert.Equal(StarDetectionSendResult.Unsupported, await fixture.Reporter.SendIfChangedAsync(default));
+        Assert.Equal(StarDetectionSendResult.Unsupported, await fixture.Reporter.SendIfChangedAsync(default));
+        Assert.Equal(0, fixture.Requests);
+        Assert.Contains(fixture.Log, line => line.Contains("star_detection_profile_v1", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void RetryDelayDoublesUpToTheLimit()
     {
         var first = TimeSpan.FromSeconds(30);
@@ -534,6 +591,20 @@ public sealed class StarDetectionSettingsTests
             },
         };
 
+    private static string Capabilities(bool advertisesProfile) =>
+        $$"""
+        {
+          "success": true,
+          "data": {
+            "protocol_version": 1,
+            "product": "psf-guard",
+            "product_version": "0.12.0",
+            "capabilities": ["merge", "flat_history_v1"{{(advertisesProfile ? ", \"star_detection_profile_v1\"" : string.Empty)}}],
+            "catalogs": [{ "id": "review", "name": "Review", "readable": true, "writable": true }]
+          }
+        }
+        """;
+
     private static HttpResponseMessage Json(string body, HttpStatusCode statusCode) =>
         new(statusCode)
         {
@@ -560,21 +631,27 @@ public sealed class StarDetectionSettingsTests
                 {
                     var destination = (RemoteQueueDestination)capture.Destination!;
                     using var client = new PsfGuardSyncClient(
-                    new HttpClient(new StubHandler(request =>
+                    new HttpClient(new StubHandler(async request =>
                     {
+                        if (request.Method == HttpMethod.Get)
+                        {
+                            return Json(Capabilities(AdvertisesProfile), HttpStatusCode.OK);
+                        }
+
                         var count = Interlocked.Increment(ref requests);
-                        LastCatalogHeader = request.Headers.GetValues("X-PSF-Guard-Database-ID").Single();
+                        using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+                        LastCatalogId = body.RootElement.GetProperty("catalog_id").GetString();
                         var status = Status;
                         OnRequest?.Invoke(count);
-                        return Task.FromResult(Json(
+                        return Json(
                             status == HttpStatusCode.OK
-                                ? """{"success":true,"data":{}}"""
+                                ? """{"success":true,"data":{"profile_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","stored":true}}"""
                                 : """{"success":false,"error":"refused"}""",
-                            status));
+                            status);
                     })),
                     new Uri(destination.ServerUrl),
                     "secret");
-                    await client.SendStarDetectionSettingsAsync(
+                    await client.SendStarDetectionProfileAsync(
                         destination.CatalogId,
                         capture.Report,
                         cancellationToken);
@@ -608,7 +685,9 @@ public sealed class StarDetectionSettingsTests
 
         public Action<int>? OnRequest { get; set; }
 
-        public string? LastCatalogHeader { get; private set; }
+        public string? LastCatalogId { get; private set; }
+
+        public bool AdvertisesProfile { get; set; } = true;
 
         public List<string> Log { get; } = [];
 
