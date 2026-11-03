@@ -117,7 +117,7 @@
             IsChecked="{Binding SendStarDetectionSettings}"
             Style="{StaticResource OptionStyle}" />
           <TextBlock TextWrapping="Wrap"
-            Text="PSF Guard uses them to count stars and measure HFR as N.I.N.A. does. Sent while this profile is paired, even with automation off." />
+            Text="PSF Guard uses them to count stars and measure HFR as N.I.N.A. does." />
         </StackPanel>
       </GroupBox>
 
