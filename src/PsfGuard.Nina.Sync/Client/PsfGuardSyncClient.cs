@@ -201,6 +201,13 @@ public sealed class PsfGuardSyncClient : IDisposable
         };
 
     /// <summary>
+    /// True when PSF Guard refused a star-detection profile as invalid (400).
+    /// Sending the same settings again cannot succeed.
+    /// </summary>
+    public static bool IsRefusedStarDetectionProfile(Exception exception) =>
+        exception is HttpRequestException { StatusCode: HttpStatusCode.BadRequest };
+
+    /// <summary>
     /// The <c>error</c> text of PSF Guard's standard
     /// <c>{"success":false,"error":"..."}</c> envelope, or the start of a
     /// body that is not one.

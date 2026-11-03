@@ -499,9 +499,14 @@ The server refuses bodies over 64 KiB and answers in its standard envelope:
 `stored` is false when the profile already had these settings in effect. The
 plugin treats both answers as accepted.
 
-A failure is retried after 30 seconds, doubling up to 30 minutes. A server
-without `star_detection_profile_v1`, or one that answers `404` or `405`,
-does not accept these settings. The plugin then waits six hours before asking
+`400` means the server refused the settings as invalid. The plugin does not
+send the same settings again; it sends once they change. `403` means the token
+does not belong to `catalog_id`; the plugin retries it like other failures,
+and pairing again fixes it.
+
+Any other failure is retried after 30 seconds, doubling up to 30 minutes. A
+server without `star_detection_profile_v1`, or one that answers `404` or
+`405`, does not accept these settings. The plugin then waits six hours before asking
 that catalog again, or until the option is turned off and on. The sender runs
 in the background and never blocks or fails an exposure.
 

@@ -488,6 +488,34 @@ public sealed class StarDetectionSettingsTests
     }
 
     [Fact]
+    public async Task ReporterSendsRefusedSettingsAgainOnlyOnceTheyChange()
+    {
+        var fixture = new ReporterFixture { Status = HttpStatusCode.BadRequest };
+        var report = Report();
+        fixture.Current = Capture(Destination, report);
+
+        Assert.Equal(StarDetectionSendResult.Refused, await fixture.Reporter.SendIfChangedAsync(default));
+        Assert.Equal(StarDetectionSendResult.Refused, await fixture.Reporter.SendIfChangedAsync(default));
+        Assert.Equal(1, fixture.Requests);
+
+        fixture.Status = HttpStatusCode.OK;
+        fixture.Current = Capture(Destination, report with { ProfileName = "C925 fixed" });
+        Assert.Equal(StarDetectionSendResult.Sent, await fixture.Reporter.SendIfChangedAsync(default));
+        Assert.Equal(2, fixture.Requests);
+    }
+
+    [Fact]
+    public void OnlyABadRequestCountsAsARefusal()
+    {
+        Assert.True(PsfGuardSyncClient.IsRefusedStarDetectionProfile(
+            new HttpRequestException("bad", null, HttpStatusCode.BadRequest)));
+        Assert.False(PsfGuardSyncClient.IsRefusedStarDetectionProfile(
+            new HttpRequestException("forbidden", null, HttpStatusCode.Forbidden)));
+        Assert.False(PsfGuardSyncClient.IsRefusedStarDetectionProfile(
+            new PsfGuardMissingCapabilityException(PsfGuardSyncClient.StarDetectionProfileCapability)));
+    }
+
+    [Fact]
     public void RetryDelayDoublesUpToTheLimit()
     {
         var first = TimeSpan.FromSeconds(30);
@@ -657,6 +685,7 @@ public sealed class StarDetectionSettingsTests
                         cancellationToken);
                 },
                 PsfGuardSyncClient.IsMissingStarDetectionRoute,
+                PsfGuardSyncClient.IsRefusedStarDetectionProfile,
                 line =>
                 {
                     lock (Log)

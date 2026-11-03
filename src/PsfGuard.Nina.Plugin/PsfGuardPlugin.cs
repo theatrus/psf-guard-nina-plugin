@@ -99,6 +99,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
             CaptureStarDetectionSettings,
             SendStarDetectionSettingsAsync,
             PsfGuardSyncClient.IsMissingStarDetectionRoute,
+            PsfGuardSyncClient.IsRefusedStarDetectionProfile,
             message => Logger.Info($"PSF Guard Sync: {message}"));
 
         TestConnectionCommand = CreateManualCommand(
