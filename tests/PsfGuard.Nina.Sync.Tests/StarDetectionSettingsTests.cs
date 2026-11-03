@@ -505,6 +505,21 @@ public sealed class StarDetectionSettingsTests
     }
 
     [Fact]
+    public async Task TurningSendingBackOnResendsARefusedSnapshot()
+    {
+        var fixture = new ReporterFixture { Status = HttpStatusCode.BadRequest };
+        fixture.Current = Capture(Destination, Report());
+        Assert.Equal(StarDetectionSendResult.Refused, await fixture.Reporter.SendIfChangedAsync(default));
+
+        fixture.Reporter.Enabled = false;
+        fixture.Reporter.Enabled = true;
+        fixture.Status = HttpStatusCode.OK;
+
+        Assert.Equal(StarDetectionSendResult.Sent, await fixture.Reporter.SendIfChangedAsync(default));
+        Assert.Equal(2, fixture.Requests);
+    }
+
+    [Fact]
     public void OnlyABadRequestCountsAsARefusal()
     {
         Assert.True(PsfGuardSyncClient.IsRefusedStarDetectionProfile(
