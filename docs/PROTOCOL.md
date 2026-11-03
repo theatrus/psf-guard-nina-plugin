@@ -472,16 +472,22 @@ Content-Type: application/json
   default on the server. The plugin never reads other keys, such as save paths
   or autofocus history, or other plugins' blocks.
 
-The plugin sends once the active profile is paired, after N.I.N.A. starts,
-after pairing, after a profile switch, and when the settings change. It
-reacts to N.I.N.A.'s change events and also checks once a minute. It sends
-only when the settings, apart from `captured_at`, differ from the last ones
-the same server and catalog accepted in this N.I.N.A. session.
+**Send star-detection settings to PSF Guard**, in the plugin's Connection
+settings, controls this exchange. It is on by default and does not depend on
+profile automation. While it is off, the plugin neither reads nor sends the
+settings and makes no checks. Turning it back on sends the current settings
+once, even when the server already has them.
+
+While it is on and the active profile is paired, the plugin sends after
+N.I.N.A. starts, after pairing, after a profile switch, and when the settings
+change. It reacts to N.I.N.A.'s change events and also checks once a minute.
+It sends only when the settings, apart from `captured_at`, differ from the
+last ones the same server and catalog accepted in this N.I.N.A. session.
 
 The server answers with any `2xx` status; the plugin ignores the body. A
 failure is retried after 30 seconds, doubling up to 30 minutes. `404` or `405`
 means the server does not accept the route; the plugin waits six hours before
-asking that catalog again. The sender runs in the background and never blocks
+asking that catalog again, or until the option is turned off and on. The sender runs in the background and never blocks
 or fails an exposure.
 
 ## Merge Rules

@@ -21,6 +21,9 @@ public sealed record StarDetectionSettingsCapture(
 
 public enum StarDetectionSendResult
 {
+    /// <summary>Sending is turned off.</summary>
+    Disabled,
+
     /// <summary>The active profile is not paired with a server.</summary>
     NotPaired,
 
@@ -57,6 +60,7 @@ internal sealed record StarDetectionReporterTiming(
 /// request, and when a check once a minute finds them changed. It sends a
 /// snapshot only when it differs from the last one the same destination
 /// accepted, retries failures with backoff, and never throws to its caller.
+/// While <see cref="Enabled"/> is off it reads and sends nothing.
 /// </summary>
 public sealed class StarDetectionSettingsReporter : IAsyncDisposable
 {
@@ -77,6 +81,9 @@ public sealed class StarDetectionSettingsReporter : IAsyncDisposable
     private string? lastSent;
     private string? unsupportedDestination;
     private DateTimeOffset unsupportedUntil;
+    private volatile bool enabled = true;
+    private int generation;
+    private int sendGeneration;
 
     /// <param name="capture">
     /// Reads the settings and destination; returns null when the profile is
@@ -131,6 +138,34 @@ public sealed class StarDetectionSettingsReporter : IAsyncDisposable
     /// </summary>
     public void RequestSend() => requests.Writer.TryWrite(true);
 
+    /// <summary>
+    /// Whether to send; on by default. Off, the worker stops checking and
+    /// sends nothing. Turning it back on sends the current settings once,
+    /// even when the server already has them. Safe to set from any thread.
+    /// </summary>
+    public bool Enabled
+    {
+        get => enabled;
+        set
+        {
+            if (enabled == value)
+            {
+                return;
+            }
+
+            if (value)
+            {
+                Interlocked.Increment(ref generation);
+            }
+
+            enabled = value;
+            if (value)
+            {
+                RequestSend();
+            }
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
         lifetime.Cancel();
@@ -173,6 +208,21 @@ public sealed class StarDetectionSettingsReporter : IAsyncDisposable
     internal async Task<StarDetectionSendResult> SendIfChangedAsync(
         CancellationToken cancellationToken)
     {
+        if (!enabled)
+        {
+            return StarDetectionSendResult.Disabled;
+        }
+
+        // Turned back on since the last check: forget what was sent and any
+        // hold, so the current settings go out once.
+        var currentGeneration = Volatile.Read(ref generation);
+        if (currentGeneration != sendGeneration)
+        {
+            sendGeneration = currentGeneration;
+            lastSent = null;
+            unsupportedDestination = null;
+        }
+
         StarDetectionSettingsCapture? current;
         try
         {
@@ -242,6 +292,7 @@ public sealed class StarDetectionSettingsReporter : IAsyncDisposable
         var wait = timing.PollInterval;
         var failures = 0;
         var retryAt = DateTimeOffset.MinValue;
+        var loopGeneration = Volatile.Read(ref generation);
         while (!token.IsCancellationRequested)
         {
             try
@@ -255,6 +306,15 @@ public sealed class StarDetectionSettingsReporter : IAsyncDisposable
                 }
 
                 token.ThrowIfCancellationRequested();
+
+                // Turning sending back on is a request to send now.
+                var currentGeneration = Volatile.Read(ref generation);
+                if (currentGeneration != loopGeneration)
+                {
+                    loopGeneration = currentGeneration;
+                    failures = 0;
+                    retryAt = DateTimeOffset.MinValue;
+                }
 
                 // A change during backoff waits for the retry time, so a
                 // settings edit cannot turn the backoff into a tight loop.
@@ -272,6 +332,13 @@ public sealed class StarDetectionSettingsReporter : IAsyncDisposable
                     wait = RetryDelay(failures, timing.FirstRetryDelay, timing.MaxRetryDelay);
                     retryAt = time.GetUtcNow() + wait;
                     log($"Retrying star-detection settings in {FormatDelay(wait)}.");
+                }
+                else if (result == StarDetectionSendResult.Disabled)
+                {
+                    // Off: wait for Enabled to request a send, with no checks.
+                    failures = 0;
+                    retryAt = DateTimeOffset.MinValue;
+                    wait = Timeout.InfiniteTimeSpan;
                 }
                 else
                 {

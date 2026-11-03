@@ -459,6 +459,17 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         }
     }
 
+    public bool SendStarDetectionSettings
+    {
+        get => settings.SendStarDetectionSettings;
+        set
+        {
+            settings.SendStarDetectionSettings = value;
+            starDetectionReporter.Enabled = value;
+            RaisePropertyChanged();
+        }
+    }
+
     public bool AutoApplyPushes
     {
         get => settings.AutoApplyPushes;
@@ -532,6 +543,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         queue.Start();
         imageUploadQueue.Start();
         WatchStarDetectionSettings(profileService.ActiveProfile);
+        starDetectionReporter.Enabled = settings.SendStarDetectionSettings;
         starDetectionReporter.Start();
         _ = RefreshRefusedUploadCountAsync();
         captureWorker = Task.Run(ProcessCaptureWorkAsync);
@@ -1143,6 +1155,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
             nameof(UploadCapturedImages),
             nameof(UploadCalibrationImages),
             nameof(DeferImageUploads),
+            nameof(SendStarDetectionSettings),
             nameof(AutoApplyPushes),
             nameof(IncludeThumbnails),
             nameof(RoundTripReconcile),
@@ -1154,6 +1167,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         RaiseCommandStates();
         _ = RefreshRefusedUploadCountAsync();
         WatchStarDetectionSettings(profileService.ActiveProfile);
+        starDetectionReporter.Enabled = settings.SendStarDetectionSettings;
         starDetectionReporter.RequestSend();
     }
 

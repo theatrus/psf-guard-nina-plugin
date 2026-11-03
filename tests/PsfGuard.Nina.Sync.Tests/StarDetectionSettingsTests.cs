@@ -300,6 +300,88 @@ public sealed class StarDetectionSettingsTests
     }
 
     [Fact]
+    public async Task ReporterSendsWhileOn()
+    {
+        var fixture = new ReporterFixture();
+        fixture.Current = Capture(Destination, Report());
+
+        Assert.True(fixture.Reporter.Enabled);
+        Assert.Equal(StarDetectionSendResult.Sent, await fixture.Reporter.SendIfChangedAsync(default));
+        Assert.Equal(1, fixture.Requests);
+    }
+
+    [Fact]
+    public async Task ReporterReadsAndSendsNothingWhileOff()
+    {
+        var fixture = new ReporterFixture();
+        fixture.Current = Capture(Destination, Report());
+        fixture.Reporter.Enabled = false;
+
+        Assert.Equal(StarDetectionSendResult.Disabled, await fixture.Reporter.SendIfChangedAsync(default));
+        Assert.Equal(0, fixture.Captures);
+        Assert.Equal(0, fixture.Requests);
+    }
+
+    [Fact]
+    public async Task TurningSendingBackOnSendsTheSameSettingsOnce()
+    {
+        var fixture = new ReporterFixture();
+        fixture.Current = Capture(Destination, Report());
+        Assert.Equal(StarDetectionSendResult.Sent, await fixture.Reporter.SendIfChangedAsync(default));
+
+        fixture.Reporter.Enabled = false;
+        Assert.Equal(StarDetectionSendResult.Disabled, await fixture.Reporter.SendIfChangedAsync(default));
+        fixture.Reporter.Enabled = true;
+
+        Assert.Equal(StarDetectionSendResult.Sent, await fixture.Reporter.SendIfChangedAsync(default));
+        Assert.Equal(StarDetectionSendResult.Unchanged, await fixture.Reporter.SendIfChangedAsync(default));
+        Assert.Equal(2, fixture.Requests);
+    }
+
+    [Fact]
+    public async Task TurningSendingBackOnEndsTheMissingRouteHold()
+    {
+        var fixture = new ReporterFixture { Status = HttpStatusCode.NotFound };
+        fixture.Current = Capture(Destination, Report());
+        Assert.Equal(StarDetectionSendResult.Unsupported, await fixture.Reporter.SendIfChangedAsync(default));
+
+        fixture.Reporter.Enabled = false;
+        fixture.Reporter.Enabled = true;
+        fixture.Status = HttpStatusCode.OK;
+
+        Assert.Equal(StarDetectionSendResult.Sent, await fixture.Reporter.SendIfChangedAsync(default));
+        Assert.Equal(2, fixture.Requests);
+    }
+
+    [Fact]
+    public async Task BackgroundWorkerWaitsWhileOffAndSendsOnceTurnedOn()
+    {
+        var sent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fixture = new ReporterFixture(
+            StarDetectionReporterTiming.Default with
+            {
+                PollInterval = TimeSpan.FromMilliseconds(20),
+                SettleDelay = TimeSpan.FromMilliseconds(10),
+            },
+            TimeProvider.System);
+        fixture.Current = Capture(Destination, Report());
+        fixture.OnRequest = _ => sent.TrySetResult();
+        fixture.Reporter.Enabled = false;
+
+        fixture.Reporter.Start();
+        fixture.Reporter.RequestSend();
+        await Task.Delay(TimeSpan.FromMilliseconds(300));
+        Assert.Equal(0, fixture.Captures);
+        Assert.Equal(0, fixture.Requests);
+
+        fixture.Reporter.Enabled = true;
+        await sent.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await fixture.Reporter.DisposeAsync();
+
+        Assert.Equal(1, fixture.Requests);
+    }
+
+    [Fact]
     public async Task ReporterDoesNothingWithoutAPairing()
     {
         var fixture = new ReporterFixture();
@@ -467,7 +549,11 @@ public sealed class StarDetectionSettingsTests
 
         public ReporterFixture(StarDetectionReporterTiming timing, TimeProvider? time)
         {
-            Capture = () => Current;
+            Capture = () =>
+            {
+                Interlocked.Increment(ref captures);
+                return Current;
+            };
             Reporter = new StarDetectionSettingsReporter(
                 () => Capture(),
                 async (capture, cancellationToken) =>
@@ -506,6 +592,9 @@ public sealed class StarDetectionSettingsTests
         }
 
         private int requests;
+        private int captures;
+
+        public int Captures => Volatile.Read(ref captures);
 
         public StarDetectionSettingsReporter Reporter { get; }
 
