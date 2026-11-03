@@ -1,3 +1,6 @@
+// Keep identical to theatrus/psf-guard-director-nina-plugin src/PsfGuard.Director.Runtime/StarDetectionSettings.cs,
+// apart from the namespace and using lines.
+
 namespace PsfGuard.Nina.Sync.Protocol;
 
 /// <summary>

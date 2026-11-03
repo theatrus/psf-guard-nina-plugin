@@ -1,3 +1,6 @@
+// Keep identical to theatrus/psf-guard-director-nina-plugin src/PsfGuard.Director.Runtime/HocusFocusSettings.cs,
+// apart from the namespace and using lines.
+
 using System.Globalization;
 
 namespace PsfGuard.Nina.Sync.StarDetection;

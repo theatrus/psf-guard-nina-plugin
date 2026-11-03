@@ -184,6 +184,16 @@ public sealed class PsfGuardSyncClient : IDisposable
     }
 
     /// <summary>
+    /// True when a star-detection send failed because the server has no such
+    /// route: an older PSF Guard answers 404 or 405.
+    /// </summary>
+    public static bool IsMissingStarDetectionRoute(Exception exception) =>
+        exception is HttpRequestException
+        {
+            StatusCode: HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed,
+        };
+
+    /// <summary>
     /// The <c>error</c> text of PSF Guard's standard
     /// <c>{"success":false,"error":"..."}</c> envelope, or the start of a
     /// body that is not one.

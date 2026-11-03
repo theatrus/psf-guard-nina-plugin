@@ -1,3 +1,6 @@
+// Keep identical to theatrus/psf-guard-director-nina-plugin src/PsfGuard.Director.Plugin/StarDetectionProfileReader.cs,
+// apart from the namespace and using lines.
+
 using System.Reflection;
 using System.Runtime.InteropServices;
 using NINA.Core.Utility;

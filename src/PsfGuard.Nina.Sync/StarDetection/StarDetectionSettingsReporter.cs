@@ -1,17 +1,23 @@
-using System.Net;
+// Keep identical to theatrus/psf-guard-director-nina-plugin src/PsfGuard.Director.Runtime/StarDetectionSettingsReporter.cs,
+// apart from the namespace and using lines.
+
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Channels;
-using PsfGuard.Nina.Sync.Client;
 using PsfGuard.Nina.Sync.Protocol;
-using PsfGuard.Nina.Sync.Queue;
 
 namespace PsfGuard.Nina.Sync.StarDetection;
 
-/// <summary>The settings to send and the paired catalog that receives them.</summary>
+/// <summary>
+/// The settings to send, where they go, and a key that identifies that
+/// destination. A report the same destination already accepted is not sent
+/// again.
+/// </summary>
 public sealed record StarDetectionSettingsCapture(
-    RemoteQueueDestination Destination,
-    StarDetectionSettingsReport Report);
+    string DestinationKey,
+    StarDetectionSettingsReport Report,
+    object? Destination = null);
 
 public enum StarDetectionSendResult
 {
@@ -47,16 +53,16 @@ internal sealed record StarDetectionReporterTiming(
 }
 
 /// <summary>
-/// Sends the active profile's star-detection settings to the paired catalog
-/// at startup, on request, and when a check once a minute finds them
-/// changed. It sends a snapshot only when it differs from the last one the
-/// same catalog accepted, retries failures with backoff, and never throws to
-/// its caller.
+/// Sends the active profile's star-detection settings at startup, on
+/// request, and when a check once a minute finds them changed. It sends a
+/// snapshot only when it differs from the last one the same destination
+/// accepted, retries failures with backoff, and never throws to its caller.
 /// </summary>
 public sealed class StarDetectionSettingsReporter : IAsyncDisposable
 {
     private readonly Func<StarDetectionSettingsCapture?> capture;
-    private readonly Func<RemoteQueueDestination, PsfGuardSyncClient> createClient;
+    private readonly Func<StarDetectionSettingsCapture, CancellationToken, Task> send;
+    private readonly Func<Exception, bool> isUnsupported;
     private readonly Action<string> log;
     private readonly StarDetectionReporterTiming timing;
     private readonly TimeProvider time;
@@ -72,23 +78,36 @@ public sealed class StarDetectionSettingsReporter : IAsyncDisposable
     private string? unsupportedDestination;
     private DateTimeOffset unsupportedUntil;
 
+    /// <param name="capture">
+    /// Reads the settings and destination; returns null when the profile is
+    /// not paired.
+    /// </param>
+    /// <param name="send">Sends one capture; throws when the server refuses it.</param>
+    /// <param name="isUnsupported">
+    /// True for a failure that shows the server has no endpoint for these
+    /// settings, such as HTTP 404.
+    /// </param>
+    /// <param name="log">Writes one line to the N.I.N.A. log.</param>
     public StarDetectionSettingsReporter(
         Func<StarDetectionSettingsCapture?> capture,
-        Func<RemoteQueueDestination, PsfGuardSyncClient> createClient,
+        Func<StarDetectionSettingsCapture, CancellationToken, Task> send,
+        Func<Exception, bool> isUnsupported,
         Action<string> log)
-        : this(capture, createClient, log, StarDetectionReporterTiming.Default, TimeProvider.System)
+        : this(capture, send, isUnsupported, log, StarDetectionReporterTiming.Default, TimeProvider.System)
     {
     }
 
     internal StarDetectionSettingsReporter(
         Func<StarDetectionSettingsCapture?> capture,
-        Func<RemoteQueueDestination, PsfGuardSyncClient> createClient,
+        Func<StarDetectionSettingsCapture, CancellationToken, Task> send,
+        Func<Exception, bool> isUnsupported,
         Action<string> log,
         StarDetectionReporterTiming timing,
         TimeProvider time)
     {
         this.capture = capture;
-        this.createClient = createClient;
+        this.send = send;
+        this.isUnsupported = isUnsupported;
         this.log = log;
         this.timing = timing;
         this.time = time;
@@ -147,7 +166,7 @@ public sealed class StarDetectionSettingsReporter : IAsyncDisposable
     /// </summary>
     internal static string Fingerprint(StarDetectionSettingsReport report)
     {
-        var json = ProtocolJson.Serialize(report with { CapturedAt = default });
+        var json = JsonSerializer.Serialize(report with { CapturedAt = default }, StarDetectionJson.Options);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json)));
     }
 
@@ -170,7 +189,7 @@ public sealed class StarDetectionSettingsReporter : IAsyncDisposable
             return StarDetectionSendResult.NotPaired;
         }
 
-        var destination = $"{current.Destination.ServerUrl}\n{current.Destination.CatalogId}";
+        var destination = current.DestinationKey;
         var key = $"{destination}\n{Fingerprint(current.Report)}";
         if (string.Equals(key, lastSent, StringComparison.Ordinal))
         {
@@ -187,26 +206,19 @@ public sealed class StarDetectionSettingsReporter : IAsyncDisposable
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(timing.RequestTimeout);
-            using var client = createClient(current.Destination);
-            await client
-                .SendStarDetectionSettingsAsync(
-                    current.Destination.CatalogId,
-                    current.Report,
-                    timeout.Token)
-                .ConfigureAwait(false);
+            await send(current, timeout.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
-        catch (HttpRequestException exception)
-            when (exception.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed)
+        catch (Exception exception) when (isUnsupported(exception))
         {
             unsupportedDestination = destination;
             unsupportedUntil = time.GetUtcNow() + timing.UnsupportedHold;
             log(
                 "PSF Guard does not accept star-detection settings "
-                + $"({(int)exception.StatusCode!}). The plugin will try again in "
+                + $"({exception.Message}). The plugin will try again in "
                 + $"{timing.UnsupportedHold.TotalHours:0.#} hours.");
             return StarDetectionSendResult.Unsupported;
         }
@@ -236,7 +248,7 @@ public sealed class StarDetectionSettingsReporter : IAsyncDisposable
             {
                 if (await WaitForRequestAsync(wait, token).ConfigureAwait(false))
                 {
-                    await Task.Delay(timing.SettleDelay, token).ConfigureAwait(false);
+                    await Task.Delay(timing.SettleDelay, time, token).ConfigureAwait(false);
                     while (requests.Reader.TryRead(out _))
                     {
                     }

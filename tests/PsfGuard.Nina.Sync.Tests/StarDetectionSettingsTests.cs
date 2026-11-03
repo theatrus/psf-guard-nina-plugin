@@ -221,7 +221,7 @@ public sealed class StarDetectionSettingsTests
     {
         var fixture = new ReporterFixture();
         var report = Report();
-        fixture.Current = new StarDetectionSettingsCapture(Destination, report);
+        fixture.Current = Capture(Destination, report);
 
         Assert.Equal(StarDetectionSendResult.Sent, await fixture.Reporter.SendIfChangedAsync(default));
         fixture.Current = fixture.Current with
@@ -252,13 +252,10 @@ public sealed class StarDetectionSettingsTests
     public async Task ReporterSendsTheSameSettingsToANewCatalog()
     {
         var fixture = new ReporterFixture();
-        fixture.Current = new StarDetectionSettingsCapture(Destination, Report());
+        fixture.Current = Capture(Destination, Report());
         await fixture.Reporter.SendIfChangedAsync(default);
 
-        fixture.Current = fixture.Current with
-        {
-            Destination = Destination with { CatalogId = "other" },
-        };
+        fixture.Current = Capture(Destination with { CatalogId = "other" }, Report());
 
         Assert.Equal(StarDetectionSendResult.Sent, await fixture.Reporter.SendIfChangedAsync(default));
         Assert.Equal("other", fixture.LastCatalogHeader);
@@ -277,7 +274,7 @@ public sealed class StarDetectionSettingsTests
     public async Task ReporterRetriesAfterAFailedSend()
     {
         var fixture = new ReporterFixture { Status = HttpStatusCode.ServiceUnavailable };
-        fixture.Current = new StarDetectionSettingsCapture(Destination, Report());
+        fixture.Current = Capture(Destination, Report());
 
         Assert.Equal(StarDetectionSendResult.Failed, await fixture.Reporter.SendIfChangedAsync(default));
         fixture.Status = HttpStatusCode.OK;
@@ -301,7 +298,7 @@ public sealed class StarDetectionSettingsTests
     public async Task ReporterWaitsBeforeAskingAServerWithoutTheRouteAgain()
     {
         var fixture = new ReporterFixture { Status = HttpStatusCode.NotFound };
-        fixture.Current = new StarDetectionSettingsCapture(Destination, Report());
+        fixture.Current = Capture(Destination, Report());
 
         Assert.Equal(StarDetectionSendResult.Unsupported, await fixture.Reporter.SendIfChangedAsync(default));
         Assert.Equal(StarDetectionSendResult.Unsupported, await fixture.Reporter.SendIfChangedAsync(default));
@@ -342,7 +339,7 @@ public sealed class StarDetectionSettingsTests
         {
             Status = HttpStatusCode.ServiceUnavailable,
         };
-        fixture.Current = new StarDetectionSettingsCapture(Destination, Report());
+        fixture.Current = Capture(Destination, Report());
         fixture.OnRequest = count =>
         {
             if (count == 1)
@@ -371,7 +368,7 @@ public sealed class StarDetectionSettingsTests
             StarDetectionReporterTiming.Default with { SettleDelay = TimeSpan.FromMilliseconds(10) },
             TimeProvider.System);
         var report = Report();
-        fixture.Current = new StarDetectionSettingsCapture(Destination, report);
+        fixture.Current = Capture(Destination, report);
         var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         fixture.OnRequest = count => (count == 1 ? first : second).TrySetResult();
 
@@ -387,6 +384,11 @@ public sealed class StarDetectionSettingsTests
 
         Assert.Equal(2, fixture.Requests);
     }
+
+    private static StarDetectionSettingsCapture Capture(
+        RemoteQueueDestination destination,
+        StarDetectionSettingsReport report) =>
+        new($"{destination.ServerUrl}\n{destination.CatalogId}", report, destination);
 
     private static StarDetectionSettingsReport Report(
         IReadOnlyDictionary<string, object?>? hocusFocus = null) => new()
@@ -433,7 +435,10 @@ public sealed class StarDetectionSettingsTests
             Capture = () => Current;
             Reporter = new StarDetectionSettingsReporter(
                 () => Capture(),
-                destination => new PsfGuardSyncClient(
+                async (capture, cancellationToken) =>
+                {
+                    var destination = (RemoteQueueDestination)capture.Destination!;
+                    using var client = new PsfGuardSyncClient(
                     new HttpClient(new StubHandler(request =>
                     {
                         var count = Interlocked.Increment(ref requests);
@@ -447,7 +452,13 @@ public sealed class StarDetectionSettingsTests
                             status));
                     })),
                     new Uri(destination.ServerUrl),
-                    "secret"),
+                    "secret");
+                    await client.SendStarDetectionSettingsAsync(
+                        destination.CatalogId,
+                        capture.Report,
+                        cancellationToken);
+                },
+                PsfGuardSyncClient.IsMissingStarDetectionRoute,
                 line =>
                 {
                     lock (Log)

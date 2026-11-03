@@ -97,7 +97,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         imageUploadQueue.RefusedUploadsChanged += QueueRefusedUploadsChanged;
         starDetectionReporter = new StarDetectionSettingsReporter(
             CaptureStarDetectionSettings,
-            CreateQueuedClient,
+            SendStarDetectionSettingsAsync,
+            PsfGuardSyncClient.IsMissingStarDetectionRoute,
             message => Logger.Info($"PSF Guard Sync: {message}"));
 
         TestConnectionCommand = CreateManualCommand(
@@ -1181,7 +1182,21 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
                 "The active N.I.N.A. profile changed while PSF Guard read its star-detection settings.");
         }
 
-        return new StarDetectionSettingsCapture(destination, report);
+        return new StarDetectionSettingsCapture(
+            $"{destination.ServerUrl}\n{destination.CatalogId}",
+            report,
+            destination);
+    }
+
+    private async Task SendStarDetectionSettingsAsync(
+        StarDetectionSettingsCapture capture,
+        CancellationToken cancellationToken)
+    {
+        var destination = (RemoteQueueDestination)capture.Destination!;
+        using var client = CreateQueuedClient(destination);
+        await client
+            .SendStarDetectionSettingsAsync(destination.CatalogId, capture.Report, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>
