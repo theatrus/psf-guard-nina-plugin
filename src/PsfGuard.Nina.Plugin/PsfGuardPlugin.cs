@@ -17,6 +17,7 @@ using PsfGuard.Nina.Sync;
 using PsfGuard.Nina.Sync.Client;
 using PsfGuard.Nina.Sync.Protocol;
 using PsfGuard.Nina.Sync.Queue;
+using PsfGuard.Nina.Sync.StarDetection;
 using PsfGuard.Nina.Sync.TargetScheduler;
 
 namespace PsfGuard.Nina.Plugin;
@@ -34,6 +35,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
     private readonly CancellationTokenSource lifetime = new();
     private readonly DurablePushQueue queue;
     private readonly DurableImageUploadQueue imageUploadQueue;
+    private readonly StarDetectionSettingsReporter starDetectionReporter;
+    private readonly List<INotifyPropertyChanged> watchedStarDetectionSettings = [];
     private readonly Channel<CaptureWorkItem> captureWork =
         Channel.CreateUnbounded<CaptureWorkItem>(
             new UnboundedChannelOptions
@@ -92,6 +95,10 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
             SetBackgroundStatus);
         queue.RefusedUploadsChanged += QueueRefusedUploadsChanged;
         imageUploadQueue.RefusedUploadsChanged += QueueRefusedUploadsChanged;
+        starDetectionReporter = new StarDetectionSettingsReporter(
+            CaptureStarDetectionSettings,
+            CreateQueuedClient,
+            message => Logger.Info($"PSF Guard Sync: {message}"));
 
         TestConnectionCommand = CreateManualCommand(
             () => RunCommandAsync(TestConnectionAsync, "Testing the PSF Guard connection..."),
@@ -363,6 +370,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
             RaisePropertyChanged(nameof(PairingStatus));
             RaiseCommandStates();
             _ = RefreshRefusedUploadCountAsync();
+            starDetectionReporter.RequestSend();
         }
     }
 
@@ -522,6 +530,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         imageSaveMediator.ImageSaved += ImageSaved;
         queue.Start();
         imageUploadQueue.Start();
+        WatchStarDetectionSettings(profileService.ActiveProfile);
+        starDetectionReporter.Start();
         _ = RefreshRefusedUploadCountAsync();
         captureWorker = Task.Run(ProcessCaptureWorkAsync);
         SetBackgroundStatus(
@@ -533,6 +543,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
     {
         profileService.ProfileChanged -= ProfileServiceProfileChanged;
         imageSaveMediator.ImageSaved -= ImageSaved;
+        WatchStarDetectionSettings(null);
         queue.RefusedUploadsChanged -= QueueRefusedUploadsChanged;
         imageUploadQueue.RefusedUploadsChanged -= QueueRefusedUploadsChanged;
         lifetime.Cancel();
@@ -551,6 +562,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         }
         finally
         {
+            await DisposeQueueAsync(starDetectionReporter).ConfigureAwait(false);
             await DisposeQueueAsync(imageUploadQueue).ConfigureAwait(false);
             await DisposeQueueAsync(queue).ConfigureAwait(false);
             lifetime.Dispose();
@@ -1140,7 +1152,89 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
 
         RaiseCommandStates();
         _ = RefreshRefusedUploadCountAsync();
+        WatchStarDetectionSettings(profileService.ActiveProfile);
+        starDetectionReporter.RequestSend();
     }
+
+    /// <summary>
+    /// The active profile's star-detection settings and its paired catalog,
+    /// or null when the profile is not paired with the selected server.
+    /// </summary>
+    private StarDetectionSettingsCapture? CaptureStarDetectionSettings()
+    {
+        var snapshot = settings.CaptureSnapshot();
+        if (!settings.IsPairedForServer(snapshot.ServerUrl))
+        {
+            return null;
+        }
+
+        var destination = snapshot.RequireQueueDestination();
+        var profile = profileService.ActiveProfile;
+        var report = StarDetectionProfileReader.Read(
+            profile,
+            StarDetectionProfileReader.NinaVersion(),
+            StarDetectionProfileReader.HocusFocusVersion(),
+            DateTimeOffset.UtcNow);
+        if (profile.Id != snapshot.ProfileId || profileService.ActiveProfile.Id != profile.Id)
+        {
+            throw new InvalidOperationException(
+                "The active N.I.N.A. profile changed while PSF Guard read its star-detection settings.");
+        }
+
+        return new StarDetectionSettingsCapture(destination, report);
+    }
+
+    /// <summary>
+    /// Checks the star-detection settings again whenever one of the profile's
+    /// settings groups that holds them reports a change. The once-a-minute
+    /// check covers changes N.I.N.A. does not report.
+    /// </summary>
+    private void WatchStarDetectionSettings(IProfile? profile)
+    {
+        lock (watchedStarDetectionSettings)
+        {
+            foreach (var watched in watchedStarDetectionSettings)
+            {
+                watched.PropertyChanged -= StarDetectionSettingChanged;
+            }
+
+            watchedStarDetectionSettings.Clear();
+            if (profile is null)
+            {
+                return;
+            }
+
+            try
+            {
+                foreach (var group in new INotifyPropertyChanged?[]
+                {
+                    profile.ImageSettings,
+                    profile.FocuserSettings,
+                    profile.TelescopeSettings,
+                    profile.CameraSettings,
+                    profile.ApplicationSettings,
+                    profile.PluginSettings,
+                })
+                {
+                    if (group is null)
+                    {
+                        continue;
+                    }
+
+                    group.PropertyChanged += StarDetectionSettingChanged;
+                    watchedStarDetectionSettings.Add(group);
+                }
+            }
+            catch (Exception exception)
+            {
+                // The once-a-minute check still finds changes.
+                Logger.Error(exception);
+            }
+        }
+    }
+
+    private void StarDetectionSettingChanged(object? sender, PropertyChangedEventArgs args) =>
+        starDetectionReporter.RequestSend();
 
     private bool CanUseRemote() =>
         settings.IsPairedForServer(ServerUrl)
@@ -1166,6 +1260,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         {
             PairingCode = string.Empty;
             settings.StorePairing(target, paired.CatalogId, paired.Token);
+            starDetectionReporter.RequestSend();
             SetPendingPreview(null);
             RaisePropertyChanged(nameof(CatalogId));
             RaisePropertyChanged(nameof(HasStoredCredential));

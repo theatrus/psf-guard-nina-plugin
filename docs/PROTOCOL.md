@@ -405,6 +405,80 @@ exposure-plan catalog. Calibration frames enter PSF Guard's calibration tables
 and never enter Target Scheduler's `acquiredimage` table. Repeating the same
 basename and digest is idempotent.
 
+## Star-Detection Settings
+
+PSF Guard's quality scan reproduces N.I.N.A.'s recorded star count and HFR
+only when it knows the rig's star-detection settings. FITS headers do not
+record them, so the plugin sends them from the active profile.
+
+```http
+POST /api/db/{catalog_id}/nina/star-detection-settings
+Authorization: Bearer <per-database remote API key>
+X-PSF-Guard-Database-ID: <catalog_id>
+Content-Type: application/json
+```
+
+```json
+{
+  "protocol_version": 1,
+  "profile_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  "profile_name": "C925",
+  "captured_at": "2026-11-02T21:00:00+00:00",
+  "nina_version": "3.2.0.9001",
+  "hocus_focus_version": "2.4.0.0",
+  "settings": {
+    "nina": {
+      "star_sensitivity": "High",
+      "noise_reduction": "None",
+      "auto_stretch_factor": 0.2,
+      "black_clipping": -2.8,
+      "auto_focus_inner_crop_ratio": 1,
+      "auto_focus_outer_crop_ratio": 1,
+      "auto_focus_use_brightest_stars": 30,
+      "star_detector": "NINA.Joko.Plugins.HocusFocus.StarDetection.HocusFocusStarDetection",
+      "focal_length": 2350,
+      "pixel_size": 3.76
+    },
+    "hocus_focus": {
+      "BrightnessSensitivity": 1.2000000000000002,
+      "MinStarBoundingBoxSize": 6,
+      "NoiseReductionRadius": 4,
+      "Simple_FocusRange": "WideRange",
+      "Simple_PixelScale": "LongFocalLength",
+      "StructureLayers": 6,
+      "UseAdvanced": true
+    }
+  }
+}
+```
+
+- `captured_at` is the UTC time the plugin read the settings.
+- `hocus_focus_version` is the loaded Hocus Focus assembly version, or null
+  when Hocus Focus is not loaded.
+- `star_sensitivity` and `noise_reduction` are N.I.N.A.'s enum names.
+- `star_detector` is the full type name of the selected `IStarDetection`
+  behavior. Null means N.I.N.A.'s built-in detector.
+- `focal_length` (mm) and `pixel_size` (µm) are null when the profile has no
+  positive value. Any other number that is not finite is null.
+- `hocus_focus` lists the keys that Hocus Focus's block in the profile stores,
+  read from an allowlist of its detection and measurement settings. Values
+  keep their stored kind: boolean, number, or string. A key the block does not
+  store is absent, and the server applies Hocus Focus's default. The plugin
+  never reads other keys, such as save paths or autofocus history, or other
+  plugins' blocks.
+
+The plugin sends once the active profile is paired, after N.I.N.A. starts,
+after pairing, after a profile switch, and when the settings change. It
+reacts to N.I.N.A.'s change events and also checks once a minute. It sends
+only when the settings, apart from `captured_at`, differ from the last ones
+the same server and catalog accepted in this N.I.N.A. session.
+
+The server answers with any `2xx` status; the plugin ignores the body. A
+failure is retried after 30 seconds, doubling up to 30 minutes. `404` or `405`
+means the server does not accept the route; the plugin waits six hours before
+asking that catalog again. The sender runs in the background and never blocks
+or fails an exposure.
+
 ## Merge Rules
 
 - GUID-keyed rows match by stable Target Scheduler GUID.

@@ -152,6 +152,38 @@ public sealed class PsfGuardSyncClient : IDisposable
     }
 
     /// <summary>
+    /// Send the active profile's star-detection settings to the paired
+    /// catalog. A failure throws <see cref="HttpRequestException"/> with the
+    /// response status, when there is one.
+    /// </summary>
+    public async Task SendStarDetectionSettingsAsync(
+        string catalogId,
+        StarDetectionSettingsReport report,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(catalogId);
+        ArgumentNullException.ThrowIfNull(report);
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"api/db/{Uri.EscapeDataString(catalogId)}/nina/star-detection-settings")
+        {
+            Content = JsonContent.Create(report, options: ProtocolJson.Options),
+        };
+        request.Headers.Add("X-PSF-Guard-Database-ID", catalogId);
+        using var response = await httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.NoContent)
+        {
+            return;
+        }
+
+        await ReadAsync<JsonElement>(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// The <c>error</c> text of PSF Guard's standard
     /// <c>{"success":false,"error":"..."}</c> envelope, or the start of a
     /// body that is not one.

@@ -14,6 +14,7 @@ Guard server. Do not pair with a server unless you trust its operator.
 | Thumbnail transfer | Target Scheduler thumbnail and preview blobs, only when enabled. |
 | Flat coverage sync | Scheduler flat-history records, target identifiers, capture settings, dates, and a persistent local origin identifier. |
 | Image upload | The complete saved FITS or XISF file, without removing or anonymizing its headers. Headers may contain observer names, site coordinates, equipment information, and other private information. |
+| Star-detection settings | The active profile's ID and name, the N.I.N.A. and Hocus Focus versions, N.I.N.A.'s star-detection, autostretch, and autofocus-crop settings, the selected star detector, focal length, pixel size, and Hocus Focus's detection settings. Sent automatically while the profile is paired; see the [protocol](PROTOCOL.md#star-detection-settings) for the full list. |
 | Pull or connection check | Paired catalog identifier, requested operation, protocol information, and authentication credential. |
 
 A full catalog reconcile covers the selected scheduler database, which can
@@ -35,6 +36,11 @@ Opening the documentation link also makes a normal browser request to GitHub.
 New profiles start with capture automation, automatic light-record pushes,
 automatic image uploads, calibration uploads, and thumbnail transfer off.
 Pairing does not enable any of those options.
+
+Pairing does start one automatic transfer: the active profile's
+star-detection settings. PSF Guard uses them to measure stars the way this
+rig's N.I.N.A. does. The plugin sends them whether or not profile automation
+is on, and again whenever they change. Reset pairing to stop it.
 
 Manual commands are explicit requests even when capture automation is off.
 Sequencer instructions and triggers run only when you add and execute them in

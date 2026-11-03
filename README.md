@@ -50,6 +50,9 @@ expose arbitrary SQL.
 - Pairing credentials stored in Windows Credential Manager and never shown in
   the plugin UI.
 - Optional Target Scheduler thumbnail transfer.
+- Sends the active profile's N.I.N.A. and Hocus Focus star-detection settings
+  to the paired catalog, so PSF Guard measures stars the way this rig's
+  N.I.N.A. does.
 - Background preview jobs for catalogs whose merge planning outlives an HTTP
   proxy timeout.
 
