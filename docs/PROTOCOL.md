@@ -499,8 +499,9 @@ The server refuses bodies over 64 KiB and answers in its standard envelope:
 `stored` is false when the profile already had these settings in effect. The
 plugin treats both answers as accepted.
 
-`400` means the server refused the settings as invalid. The plugin does not
-send the same settings again; it sends once they change. `403` means the token
+`400` or `422` means the server refused the settings as invalid: `400` from
+its checks, `422` when the body does not match the request type. The plugin
+does not send the same settings again; it sends once they change. `403` means the token
 does not belong to `catalog_id`; the plugin retries it like other failures,
 and pairing again fixes it.
 

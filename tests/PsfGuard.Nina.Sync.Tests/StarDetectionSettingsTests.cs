@@ -520,10 +520,14 @@ public sealed class StarDetectionSettingsTests
     }
 
     [Fact]
-    public void OnlyABadRequestCountsAsARefusal()
+    public void OnlyAnInvalidBodyCountsAsARefusal()
     {
         Assert.True(PsfGuardSyncClient.IsRefusedStarDetectionProfile(
             new HttpRequestException("bad", null, HttpStatusCode.BadRequest)));
+        Assert.True(PsfGuardSyncClient.IsRefusedStarDetectionProfile(
+            new HttpRequestException("unknown field", null, HttpStatusCode.UnprocessableEntity)));
+        Assert.False(PsfGuardSyncClient.IsRefusedStarDetectionProfile(
+            new HttpRequestException("timeout", null, HttpStatusCode.RequestTimeout)));
         Assert.False(PsfGuardSyncClient.IsRefusedStarDetectionProfile(
             new HttpRequestException("forbidden", null, HttpStatusCode.Forbidden)));
         Assert.False(PsfGuardSyncClient.IsRefusedStarDetectionProfile(
