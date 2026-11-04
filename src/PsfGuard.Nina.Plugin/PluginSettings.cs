@@ -106,6 +106,16 @@ internal sealed class PluginSettings
         set => options.SetValueBoolean(nameof(RoundTripReconcile), value);
     }
 
+    /// <summary>
+    /// Send this profile's star-detection settings to the paired catalog.
+    /// On by default and independent of <see cref="Enabled"/>.
+    /// </summary>
+    public bool SendStarDetectionSettings
+    {
+        get => options.GetValueBoolean(nameof(SendStarDetectionSettings), true);
+        set => options.SetValueBoolean(nameof(SendStarDetectionSettings), value);
+    }
+
     public bool HasPairingCredential =>
         GetPairingAvailability(ServerUrl) == PairingAvailability.Ready;
 

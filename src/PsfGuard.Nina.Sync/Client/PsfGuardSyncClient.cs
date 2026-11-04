@@ -151,6 +151,73 @@ public sealed class PsfGuardSyncClient : IDisposable
         await ReadAsync<JsonElement>(response, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>The capability a server advertises when it accepts star-detection profiles.</summary>
+    public const string StarDetectionProfileCapability = "star_detection_profile_v1";
+
+    /// <summary>
+    /// Send the active profile's star-detection settings to the paired
+    /// catalog. It first checks that the server advertises
+    /// <see cref="StarDetectionProfileCapability"/>, and throws
+    /// <see cref="PsfGuardMissingCapabilityException"/> without sending when
+    /// it does not. A failed request throws <see cref="HttpRequestException"/>
+    /// with the response status, when there is one.
+    /// </summary>
+    public async Task<StarDetectionProfileResponse> SendStarDetectionProfileAsync(
+        string catalogId,
+        StarDetectionSettingsReport report,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(catalogId);
+        ArgumentNullException.ThrowIfNull(report);
+        var capabilities = await GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
+        if (!capabilities.Capabilities.Contains(StarDetectionProfileCapability, StringComparer.Ordinal))
+        {
+            throw new PsfGuardMissingCapabilityException(StarDetectionProfileCapability);
+        }
+
+        // The shared report carries no catalog; this route takes it in the body.
+        var body = JsonSerializer.SerializeToNode(report, ProtocolJson.Options)!.AsObject();
+        body["catalog_id"] = catalogId;
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            "api/sync/v1/star-detection/profile")
+        {
+            Content = JsonContent.Create(body, options: ProtocolJson.Options),
+        };
+        var response = await SendAsync<StarDetectionProfileResponse>(request, cancellationToken)
+            .ConfigureAwait(false);
+        if (!Guid.TryParse(response.ProfileId, out var acknowledgedProfile) || acknowledgedProfile != report.ProfileId)
+        {
+            throw new InvalidDataException("PSF Guard acknowledged a different star-detection profile.");
+        }
+
+        return response;
+    }
+
+    /// <summary>
+    /// True when a star-detection send failed because the server cannot take
+    /// it: it lacks <see cref="StarDetectionProfileCapability"/>, or an older
+    /// PSF Guard answered 404 or 405.
+    /// </summary>
+    public static bool IsMissingStarDetectionRoute(Exception exception) =>
+        exception is PsfGuardMissingCapabilityException
+        || exception is HttpRequestException
+        {
+            StatusCode: HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed,
+        };
+
+    /// <summary>
+    /// True when PSF Guard refused a star-detection profile as invalid: 400
+    /// from its validation, or 422 when the body does not match the request
+    /// type, such as an unknown field. Sending the same settings again cannot
+    /// succeed.
+    /// </summary>
+    public static bool IsRefusedStarDetectionProfile(Exception exception) =>
+        exception is HttpRequestException
+        {
+            StatusCode: HttpStatusCode.BadRequest or HttpStatusCode.UnprocessableEntity,
+        };
+
     /// <summary>
     /// The <c>error</c> text of PSF Guard's standard
     /// <c>{"success":false,"error":"..."}</c> envelope, or the start of a

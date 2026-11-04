@@ -405,6 +405,116 @@ exposure-plan catalog. Calibration frames enter PSF Guard's calibration tables
 and never enter Target Scheduler's `acquiredimage` table. Repeating the same
 basename and digest is idempotent.
 
+## Star-Detection Settings
+
+PSF Guard's quality scan reproduces N.I.N.A.'s recorded star count and HFR
+only when it knows the rig's star-detection settings. FITS headers do not
+record them, so the plugin sends them from the active profile.
+
+Servers advertise `star_detection_profile_v1` when they accept these
+settings. Before each send, the plugin reads `/api/sync/v1/capabilities` and
+sends nothing to a server that does not list it.
+
+```http
+POST /api/sync/v1/star-detection/profile
+Authorization: Bearer <per-database remote API key>
+Content-Type: application/json
+```
+
+```json
+{
+  "protocol_version": 1,
+  "catalog_id": "review",
+  "profile_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+  "profile_name": "C925",
+  "captured_at": "2026-11-02T21:00:00+00:00",
+  "nina_version": "3.2.0.9001",
+  "hocus_focus_version": "2.4.0.0",
+  "settings": {
+    "star_detector": "hocus_focus",
+    "star_sensitivity": "high",
+    "noise_reduction": "none",
+    "auto_stretch_factor": 0.2,
+    "black_clipping": -2.8,
+    "autofocus_inner_crop_ratio": 1,
+    "autofocus_outer_crop_ratio": 1,
+    "autofocus_brightest_stars": 30,
+    "focal_length_mm": 2350,
+    "pixel_size_um": 3.76,
+    "hocus_focus": {
+      "BrightnessSensitivity": 1.2000000000000002,
+      "MinStarBoundingBoxSize": 6,
+      "NoiseReductionRadius": 4,
+      "Simple_FocusRange": "WideRange",
+      "Simple_PixelScale": "LongFocalLength",
+      "StructureLayers": 6,
+      "UseAdvanced": true
+    }
+  }
+}
+```
+
+- `catalog_id` is the paired catalog. The server refuses a different one.
+- `captured_at` is the UTC time the plugin read the settings. The server
+  applies them to frames captured from then on.
+- `hocus_focus_version` is the loaded Hocus Focus assembly version, or null
+  when Hocus Focus is not loaded.
+- `settings` has the shape of PSF Guard's `ProfileSettings`, which also holds
+  settings read from an imported `.profile` file. The server refuses unknown
+  fields.
+- `star_detector` is `nina` for N.I.N.A.'s built-in detector, `hocus_focus`
+  for Hocus Focus, or the full type name of another selected `IStarDetection`.
+- `star_sensitivity` and `noise_reduction` are N.I.N.A.'s enum names in lower
+  case.
+- The plugin leaves out a number the server would refuse, and the server uses
+  N.I.N.A.'s default instead. It leaves out `focal_length_mm` and
+  `pixel_size_um` unless they are positive, a crop ratio outside (0, 1], and
+  any value that is not finite.
+- `hocus_focus` lists the keys that Hocus Focus's block in the profile stores,
+  read from an allowlist of its detection and measurement settings that
+  matches the server's. Values keep their stored kind: boolean, number, or
+  string. The plugin leaves out a key whose value is null, not finite, or a
+  string longer than 16,384 characters. A key left out takes Hocus Focus's
+  default on the server. The plugin never reads other keys, such as save paths
+  or autofocus history, or other plugins' blocks.
+
+**Send star-detection settings to PSF Guard**, in the plugin's Connection
+settings, controls this exchange. It is on by default and does not depend on
+profile automation. While it is off, the plugin neither reads nor sends the
+settings and makes no checks. Turning it back on sends the current settings
+once, even when the server already has them.
+
+While it is on and the active profile is paired, the plugin sends after
+N.I.N.A. starts, after pairing, after a profile switch, and when the settings
+change. It reacts to N.I.N.A.'s change events and also checks once a minute.
+It sends only when the settings, apart from `captured_at`, differ from the
+last ones the same server and catalog accepted in this N.I.N.A. session.
+
+The server refuses bodies over 64 KiB and answers in its standard envelope:
+
+```json
+{"success": true, "data": {"profile_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "stored": true}}
+```
+
+The acknowledgement must name the same `profile_id` as the request and include
+an explicit boolean `stored`. A missing or mismatched acknowledgement is a
+failed send and retries with backoff.
+
+`stored` is false when the profile already had these settings in effect. The
+plugin treats both answers as accepted.
+
+`400` or `422` means the server refused the settings as invalid: `400` from
+its checks, `422` when the body does not match the request type. The plugin
+does not send the same settings again; it sends once they change. `403` means the token
+does not belong to `catalog_id`; the plugin retries it like other failures,
+and pairing again fixes it.
+
+Any other failure is retried after 30 seconds, doubling up to 30 minutes. A
+server without `star_detection_profile_v1`, or one that answers `404` or
+`405`, does not accept these settings. The plugin then waits six hours before asking
+that catalog again, or until the option is turned off and on. The sender runs
+in the background and never blocks or fails an exposure.
+
 ## Merge Rules
 
 - GUID-keyed rows match by stable Target Scheduler GUID.

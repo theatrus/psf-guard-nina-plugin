@@ -110,6 +110,14 @@
               <TextBlock Text="Reset pairing" Style="{StaticResource ActionLabelStyle}" />
             </Button>
           </WrapPanel>
+
+          <CheckBox
+            Margin="0,12,0,4"
+            Content="Send star-detection settings to PSF Guard"
+            IsChecked="{Binding SendStarDetectionSettings}"
+            Style="{StaticResource OptionStyle}" />
+          <TextBlock TextWrapping="Wrap"
+            Text="PSF Guard uses them to count stars and measure HFR as N.I.N.A. does." />
         </StackPanel>
       </GroupBox>
 

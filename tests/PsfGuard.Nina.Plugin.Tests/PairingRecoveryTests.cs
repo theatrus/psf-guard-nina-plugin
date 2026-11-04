@@ -28,6 +28,11 @@ public sealed class PairingRecoveryTests
         fixture.Pair("catalog-a", "test-token");
         AssertAutomationOff();
         Assert.True(fixture.Settings.HasPairingCredential);
+        // Star-detection settings have their own switch, on by default.
+        Assert.True(fixture.Settings.SendStarDetectionSettings);
+        fixture.Settings.SendStarDetectionSettings = false;
+        Assert.False(fixture.Settings.SendStarDetectionSettings);
+        Assert.False(fixture.Settings.Enabled);
 
         void AssertAutomationOff()
         {
