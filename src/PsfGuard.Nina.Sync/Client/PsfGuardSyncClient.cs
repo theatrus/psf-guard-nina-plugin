@@ -184,8 +184,14 @@ public sealed class PsfGuardSyncClient : IDisposable
         {
             Content = JsonContent.Create(body, options: ProtocolJson.Options),
         };
-        return await SendAsync<StarDetectionProfileResponse>(request, cancellationToken)
+        var response = await SendAsync<StarDetectionProfileResponse>(request, cancellationToken)
             .ConfigureAwait(false);
+        if (!Guid.TryParse(response.ProfileId, out var acknowledgedProfile) || acknowledgedProfile != report.ProfileId)
+        {
+            throw new InvalidDataException("PSF Guard acknowledged a different star-detection profile.");
+        }
+
+        return response;
     }
 
     /// <summary>

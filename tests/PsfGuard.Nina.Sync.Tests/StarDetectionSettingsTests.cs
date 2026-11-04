@@ -254,6 +254,35 @@ public sealed class StarDetectionSettingsTests
         Assert.DoesNotContain("secret", requests[1].Body, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")]
+    [InlineData("not-a-profile")]
+    public async Task ClientRejectsAcknowledgementForAnotherProfile(string profileId)
+    {
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(new StubHandler(request => Task.FromResult(request.Method == HttpMethod.Get
+                ? Json(Capabilities(advertisesProfile: true), HttpStatusCode.OK)
+                : Json($$"""{"profile_id":"{{profileId}}","stored":true}""", HttpStatusCode.OK)))),
+            new Uri("https://psf.example/"), "secret");
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            client.SendStarDetectionProfileAsync("review", Report(), CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData("""{"profile_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"}""")]
+    [InlineData("""{"profile_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","stored":null}""")]
+    [InlineData("""{"profile_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","stored":"true"}""")]
+    public async Task ClientRequiresAnExplicitBooleanStorageAcknowledgement(string json)
+    {
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(new StubHandler(request => Task.FromResult(request.Method == HttpMethod.Get
+                ? Json(Capabilities(advertisesProfile: true), HttpStatusCode.OK)
+                : Json(json, HttpStatusCode.OK)))),
+            new Uri("https://psf.example/"), "secret");
+        await Assert.ThrowsAsync<JsonException>(() =>
+            client.SendStarDetectionProfileAsync("review", Report(), CancellationToken.None));
+    }
+
     [Fact]
     public async Task ClientSendsNothingToAServerWithoutTheCapability()
     {

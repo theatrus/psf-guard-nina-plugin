@@ -496,6 +496,10 @@ The server refuses bodies over 64 KiB and answers in its standard envelope:
 {"success": true, "data": {"profile_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "stored": true}}
 ```
 
+The acknowledgement must name the same `profile_id` as the request and include
+an explicit boolean `stored`. A missing or mismatched acknowledgement is a
+failed send and retries with backoff.
+
 `stored` is false when the profile already had these settings in effect. The
 plugin treats both answers as accepted.
 

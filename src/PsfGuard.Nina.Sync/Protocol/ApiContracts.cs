@@ -107,5 +107,5 @@ public sealed record StarDetectionProfileResponse
     public required string ProfileId { get; init; }
 
     /// <summary>False when the profile already had these settings in effect.</summary>
-    public bool Stored { get; init; }
+    public required bool Stored { get; init; }
 }
