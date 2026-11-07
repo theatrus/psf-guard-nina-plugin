@@ -665,6 +665,175 @@ public sealed class TargetSchedulerCatalogTests
         Assert.Equal("M 31", command.ExecuteScalar());
     }
 
+    private const string ReducerProfile = "99999999-9999-4999-8999-999999999999";
+
+    private static readonly Guid Reducer = Guid.Parse(ReducerProfile);
+
+    /// <summary>A plan PSF Guard activated with no N.I.N.A. profile.</summary>
+    private static async Task<CatalogBundle> WaitingPlanAsync(TestDatabase source)
+    {
+        source.Seed(0);
+        using (var connection = source.Open())
+        {
+            foreach (var table in new[] { "project", "exposuretemplate", "exposureplan" })
+            {
+                connection.Execute(
+                    $"UPDATE {table} SET profileId = "
+                    + $"'{TargetSchedulerCatalogWriter.PlacedByPluginProfile}'");
+            }
+        }
+
+        return await new TargetSchedulerCatalogReader(source.Path, "5.9.6.0")
+            .BuildPlanningBundleAsync(CancellationToken.None);
+    }
+
+    private static string? Scalar(TestDatabase database, string sql)
+    {
+        using var connection = database.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return command.ExecuteScalar()?.ToString();
+    }
+
+    private static void Empty(TestDatabase database)
+    {
+        using var connection = database.Open();
+        connection.Execute(
+            """
+            DELETE FROM exposureplan; DELETE FROM target; DELETE FROM ruleweight;
+            DELETE FROM project; DELETE FROM exposuretemplate;
+            """);
+    }
+
+    [Fact]
+    public async Task PlanningPullWritesWaitingRowsIntoTheRunningProfile()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        var bundle = await WaitingPlanAsync(source);
+        destination.Seed(100);
+        Empty(destination);
+
+        var writer = new TargetSchedulerCatalogWriter(destination.Path, Reducer);
+        await writer.ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        foreach (var table in new[] { "project", "exposuretemplate", "exposureplan" })
+        {
+            Assert.Equal(
+                ReducerProfile,
+                Scalar(destination, $"SELECT DISTINCT profileId FROM {table}"));
+        }
+    }
+
+    [Fact]
+    public async Task PlanningPullUsesATemplateTheRunningProfileAlreadyHas()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        var bundle = await WaitingPlanAsync(source);
+        destination.Seed(100);
+        Empty(destination);
+        var filter = Scalar(source, "SELECT filtername FROM exposuretemplate");
+        var gain = Scalar(source, "SELECT gain FROM exposuretemplate");
+        using (var connection = destination.Open())
+        {
+            connection.Execute(
+                $"""
+                INSERT INTO exposuretemplate (Id, profileId, name, filtername, gain, guid)
+                VALUES (500, '{ReducerProfile}', 'Mine', '{filter}', {gain}, 'mine-guid');
+                """);
+        }
+
+        var writer = new TargetSchedulerCatalogWriter(destination.Path, Reducer);
+        await writer.ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.Equal("1", Scalar(destination, "SELECT COUNT(*) FROM exposuretemplate"));
+        Assert.Equal("500", Scalar(destination, "SELECT exposureTemplateId FROM exposureplan"));
+    }
+
+    [Fact]
+    public async Task PlanningPullKeepsTheProfileARowWasPlacedIn()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        var bundle = await WaitingPlanAsync(source);
+        destination.Seed(100);
+        Empty(destination);
+        await new TargetSchedulerCatalogWriter(destination.Path, Reducer)
+            .ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        // The next pull runs in the other profile.
+        await new TargetSchedulerCatalogWriter(destination.Path, Guid.NewGuid())
+            .ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(ReducerProfile, Scalar(destination, "SELECT profileId FROM project"));
+        Assert.Equal(ReducerProfile, Scalar(destination, "SELECT profileId FROM exposureplan"));
+        // The plan's template stays in the plan's profile too.
+        Assert.Equal(
+            ReducerProfile,
+            Scalar(
+                destination,
+                "SELECT t.profileId FROM exposureplan p JOIN exposuretemplate t ON t.Id = p.exposureTemplateId"));
+        Assert.Equal("1", Scalar(destination, "SELECT COUNT(*) FROM exposuretemplate"));
+    }
+
+    [Fact]
+    public async Task PlanningPullMovesRowsAnOlderPluginLeftWaiting()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        var bundle = await WaitingPlanAsync(source);
+        destination.Seed(100);
+        Empty(destination);
+        // A plugin that copies the profile as it arrives.
+        using (var connection = destination.Open())
+        {
+            connection.Execute(
+                $"""
+                INSERT INTO project (Id, profileId, name, guid)
+                VALUES (900, '{TargetSchedulerCatalogWriter.PlacedByPluginProfile}', 'Old', 'project-guid');
+                """);
+        }
+
+        await new TargetSchedulerCatalogWriter(destination.Path, Reducer)
+            .ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(ReducerProfile, Scalar(destination, "SELECT profileId FROM project"));
+    }
+
+    [Fact]
+    public async Task PlanningPullLeavesRowsWithARealProfileAlone()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0);
+        destination.Seed(100);
+        var expected = Scalar(source, "SELECT profileId FROM project");
+        var bundle = await new TargetSchedulerCatalogReader(source.Path, "5.9.6.0")
+            .BuildPlanningBundleAsync(CancellationToken.None);
+
+        await new TargetSchedulerCatalogWriter(destination.Path, Reducer)
+            .ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(expected, Scalar(destination, "SELECT profileId FROM project"));
+    }
+
+    [Fact]
+    public async Task PlanningPullSkipsWaitingRowsWithoutARunningProfile()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        var bundle = await WaitingPlanAsync(source);
+        destination.Seed(100);
+        Empty(destination);
+
+        var result = await new TargetSchedulerCatalogWriter(destination.Path)
+            .ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.True(result.Skipped > 0);
+        Assert.Equal("0", Scalar(destination, "SELECT COUNT(*) FROM project"));
+    }
+
     [Fact]
     public async Task PlanningPullRemapsIdsAndPreservesDestinationProgress()
     {

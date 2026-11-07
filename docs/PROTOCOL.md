@@ -249,6 +249,24 @@ filter cadence. It then handles each standing deletion:
    `psf_guard_director_project`); then `project`. Exposure templates belong
    to the profile and stay.
 
+### Rows waiting for a profile
+
+PSF Guard cannot tell which N.I.N.A. profile is open, so it gives a project it
+adds the profile ID `00000000-0000-4000-8000-505346475244`. No N.I.N.A. profile
+has this ID. It appears on `project`, `exposuretemplate` and `exposureplan` rows
+in planning and merge bundles. The plugin writes those rows as follows:
+
+- A new row goes into the profile the plugin runs in.
+- A waiting template goes into the profile of each plan that uses it. When that
+  profile has a template with the same filter, gain, offset, binning and readout
+  mode, the plan uses it. Otherwise the plugin adds a copy with a new GUID.
+  Templates no plan uses are not written.
+- A row Target Scheduler already holds keeps its profile, so switching profiles
+  between pulls does not move a project. A row an older plugin wrote with the
+  waiting ID moves to the running profile.
+
+Rows with any other profile ID are written as they arrive.
+
 Image-ownership checks use one grouped scan for all candidate projects, not a
 separate capture-history scan per deletion. A frame counts toward both
 projects when its direct project and target ownership differ, but only once

@@ -683,7 +683,9 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         var reader = new TargetSchedulerCatalogReader(
             configuration.TargetSchedulerDatabase,
             configuration.TargetSchedulerVersion);
-        var writer = new TargetSchedulerCatalogWriter(configuration.TargetSchedulerDatabase);
+        var writer = new TargetSchedulerCatalogWriter(
+            configuration.TargetSchedulerDatabase,
+            configuration.ProfileId);
         return new SyncOrchestrator(
             configuration.CatalogId,
             configuration.AutoApplyPushes,
@@ -1567,7 +1569,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
             captureSettings.AutoApplyPushes,
             captureSettings.IncludeThumbnails,
             TargetSchedulerVersion(),
-            destination);
+            destination,
+            captureSettings.ProfileId);
     }
 
     private bool MatchesCurrentConfiguration(SyncConfiguration configuration) =>
@@ -1595,7 +1598,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         bool AutoApplyPushes,
         bool IncludeThumbnails,
         string TargetSchedulerVersion,
-        RemoteQueueDestination QueueDestination);
+        RemoteQueueDestination QueueDestination,
+        Guid ProfileId);
 
     private sealed class CallbackProgress<T>(Action<T> callback) : IProgress<T>
     {

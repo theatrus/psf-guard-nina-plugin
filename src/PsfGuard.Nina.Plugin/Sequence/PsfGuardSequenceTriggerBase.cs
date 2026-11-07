@@ -92,7 +92,8 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
             captureSettings.TargetSchedulerDatabase,
             TargetSchedulerVersion());
         var writer = new TargetSchedulerCatalogWriter(
-            captureSettings.TargetSchedulerDatabase);
+            captureSettings.TargetSchedulerDatabase,
+            captureSettings.ProfileId);
         return new SyncOrchestrator(
             destination.CatalogId,
             captureSettings.AutoApplyPushes,
