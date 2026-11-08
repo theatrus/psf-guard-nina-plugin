@@ -267,6 +267,26 @@ in planning and merge bundles. The plugin writes those rows as follows:
 
 Rows with any other profile ID are written as they arrive.
 
+### Which rows a push carries
+
+Each N.I.N.A. profile pairs with its own PSF Guard catalog, so merge, planning
+and grade bundles carry only the running profile's projects and the projects
+still on the waiting ID. The plugin compares profile IDs without regard to
+case.
+
+- `project` rows match by `profileId`.
+- `target` and `ruleweight` rows follow their project, and `exposureplan` rows
+  follow their target.
+- `acquiredimage` and `imagedata` rows follow the image's project, so a bundle
+  never refers to a project it leaves out.
+- `exposuretemplate` rows match by `profileId`, plus any template a carried
+  plan uses.
+- A current-target reconcile looks for the target only in those projects.
+- A capture bundle carries the captured image's rows whatever their profile.
+
+When the plugin cannot tell which profile is running, a bundle carries every
+row in the file. PSF Guard never deletes rows a bundle leaves out.
+
 Image-ownership checks use one grouped scan for all candidate projects, not a
 separate capture-history scan per deletion. A frame counts toward both
 projects when its direct project and target ownership differ, but only once

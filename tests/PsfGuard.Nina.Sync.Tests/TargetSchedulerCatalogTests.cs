@@ -665,6 +665,123 @@ public sealed class TargetSchedulerCatalogTests
         Assert.Equal("M 31", command.ExecuteScalar());
     }
 
+    [Fact]
+    public async Task FullMergeCarriesOnlyTheRunningProfilesProjects()
+    {
+        using var database = new TestDatabase();
+        SeedTwoProfiles(database);
+        using (var connection = database.Open())
+        {
+            // The reducer plan uses the other profile's template; the bundle
+            // still carries the template so the plan can be matched.
+            connection.Execute("UPDATE exposureplan SET exposureTemplateId = 103 WHERE Id = 4");
+        }
+
+        var bundle = await new TargetSchedulerCatalogReader(database.Path, "5.9.6.0", Reducer)
+            .BuildFullMergeBundleAsync(includeThumbnails: true, CancellationToken.None);
+
+        Assert.True(bundle.VerifyDigest());
+        Assert.Equal([1L, 201L], Ids(bundle.Tables["project"]));
+        Assert.Equal([2L, 202L], Ids(bundle.Tables["target"]));
+        Assert.Equal([6L, 206L], Ids(bundle.Tables["ruleweight"]));
+        Assert.Equal([4L, 204L], Ids(bundle.Tables["exposureplan"]));
+        Assert.Equal([3L, 103L, 203L], Ids(bundle.Tables["exposuretemplate"]));
+        Assert.Equal([5L, 205L], Ids(bundle.Tables["acquiredimage"]));
+        Assert.Equal([7L, 207L], Ids(bundle.Tables["imagedata"]));
+    }
+
+    [Fact]
+    public async Task FullMergeWithoutARunningProfileCarriesEveryProfile()
+    {
+        using var database = new TestDatabase();
+        SeedTwoProfiles(database);
+
+        var bundle = await new TargetSchedulerCatalogReader(database.Path, "5.9.6.0")
+            .BuildFullMergeBundleAsync(includeThumbnails: false, CancellationToken.None);
+
+        Assert.Equal([1L, 101L, 201L], Ids(bundle.Tables["project"]));
+    }
+
+    [Fact]
+    public async Task PlanningAndGradePushesCarryOnlyTheRunningProfilesRows()
+    {
+        using var database = new TestDatabase();
+        SeedTwoProfiles(database, grade: 1);
+        var reader = new TargetSchedulerCatalogReader(database.Path, "5.9.6.0", Reducer);
+
+        var planning = await reader.BuildPlanningBundleAsync(CancellationToken.None);
+        var grades = await reader.BuildGradesBundleAsync(reviewedOnly: true, CancellationToken.None);
+
+        Assert.Equal([1L, 201L], Ids(planning.Tables["project"]));
+        Assert.Equal([4L, 204L], Ids(planning.Tables["exposureplan"]));
+        Assert.Equal([3L, 203L], Ids(planning.Tables["exposuretemplate"]));
+        Assert.Equal(2, grades.Tables["acquiredimage"].Rows.Count);
+    }
+
+    [Fact]
+    public async Task TargetMergeLooksOnlyInTheRunningProfile()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0);
+        database.Seed(100);
+        using (var connection = database.Open())
+        {
+            connection.Execute(
+                $"UPDATE project SET profileId = '{ReducerProfile}' WHERE Id = 1;"
+                + $"UPDATE project SET profileId = '{OtherProfile}' WHERE Id = 101;"
+                + "UPDATE target SET name = 'NGC 7000' WHERE Id = 102;");
+        }
+
+        var reader = new TargetSchedulerCatalogReader(database.Path, "5.9.6.0", Reducer);
+        var bundle = await reader.BuildTargetMergeBundleAsync(
+            "M 31",
+            includeThumbnails: false,
+            CancellationToken.None);
+        var missing = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => reader.BuildTargetMergeBundleAsync(
+                "NGC 7000",
+                includeThumbnails: false,
+                CancellationToken.None));
+
+        Assert.Equal([2L], Ids(bundle.Tables["target"]));
+        Assert.Contains("running N.I.N.A. profile", missing.Message, StringComparison.Ordinal);
+    }
+
+    private const string OtherProfile = "11111111-1111-4111-8111-111111111111";
+
+    /// <summary>
+    /// Rows 1-7 belong to the reducer profile (stored in upper case, as some
+    /// tools write it), rows 101-107 to another profile, and rows 201-207 to
+    /// a project PSF Guard activated before the Sync plugin placed it.
+    /// </summary>
+    private static void SeedTwoProfiles(TestDatabase database, int grade = 0)
+    {
+        database.Seed(0, grade);
+        database.Seed(100, grade);
+        database.Seed(200, grade);
+        using var connection = database.Open();
+        var placed = TargetSchedulerCatalogWriter.PlacedByPluginProfile;
+        foreach (var table in new[] { "project", "exposuretemplate", "exposureplan", "acquiredimage" })
+        {
+            connection.Execute(
+                $"UPDATE {table} SET profileId = '{ReducerProfile.ToUpperInvariant()}' WHERE Id < 100;"
+                + $"UPDATE {table} SET profileId = '{OtherProfile}' WHERE Id BETWEEN 100 AND 199;"
+                + $"UPDATE {table} SET profileId = '{(table == "acquiredimage" ? ReducerProfile : placed)}' WHERE Id >= 200;");
+        }
+    }
+
+    private static long[] Ids(BundleTable table)
+    {
+        var index = table.Columns
+            .Select((item, index) => (item, index))
+            .Single(item => item.item.Name.Equals("Id", StringComparison.OrdinalIgnoreCase))
+            .index;
+        return table.Rows
+            .Select(row => Convert.ToInt64(row.Values[index].ToDatabaseValue()))
+            .Order()
+            .ToArray();
+    }
+
     private const string ReducerProfile = "99999999-9999-4999-8999-999999999999";
 
     private static readonly Guid Reducer = Guid.Parse(ReducerProfile);

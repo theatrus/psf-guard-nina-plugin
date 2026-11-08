@@ -51,7 +51,8 @@ public abstract class PsfGuardSequenceItemBase : SequenceItem, IValidatable
         var destination = captureSettings.RequireQueueDestination();
         var reader = new TargetSchedulerCatalogReader(
             captureSettings.TargetSchedulerDatabase,
-            TargetSchedulerVersion());
+            TargetSchedulerVersion(),
+            captureSettings.ProfileId);
         var writer = new TargetSchedulerCatalogWriter(
             captureSettings.TargetSchedulerDatabase,
             captureSettings.ProfileId);

@@ -37,17 +37,36 @@ public sealed class TargetSchedulerCatalogReader
         "imagedata",
     ];
 
+    // A pushed bundle covers the running profile's projects and the rows
+    // PSF Guard left on its placeholder profile. Each N.I.N.A. profile is a
+    // separate PSF Guard catalog, so other profiles' rows stay out.
+    private const string ScopedProjects =
+        "SELECT Id FROM project WHERE profileId COLLATE NOCASE IN (@scopeProfile, @scopePlaced)";
+
+    private const string ScopedTargets =
+        "SELECT Id FROM target WHERE projectid IN (" + ScopedProjects + ")";
+
     private readonly string databasePath;
     private readonly string productVersion;
     private readonly long maximumThumbnailBytes;
     private readonly Action<string>? tableReadObserver;
+    private readonly string? runningProfile;
 
-    public TargetSchedulerCatalogReader(string databasePath, string productVersion)
+    /// <param name="runningProfile">
+    /// The N.I.N.A. profile the plugin runs in. When set, catalog bundles
+    /// carry only that profile's projects, plus projects PSF Guard has not
+    /// yet placed in a profile. A capture bundle always carries its image.
+    /// </param>
+    public TargetSchedulerCatalogReader(
+        string databasePath,
+        string productVersion,
+        Guid? runningProfile = null)
         : this(
             databasePath,
             productVersion,
             DefaultMaximumThumbnailBytes,
-            tableReadObserver: null)
+            tableReadObserver: null,
+            runningProfile)
     {
     }
 
@@ -55,8 +74,12 @@ public sealed class TargetSchedulerCatalogReader
         string databasePath,
         string productVersion,
         long maximumThumbnailBytes,
-        Action<string>? tableReadObserver = null)
+        Action<string>? tableReadObserver = null,
+        Guid? runningProfile = null)
     {
+        this.runningProfile = runningProfile is { } profile && profile != Guid.Empty
+            ? profile.ToString("D")
+            : null;
         this.databasePath = Path.GetFullPath(
             string.IsNullOrWhiteSpace(databasePath)
                 ? TargetSchedulerPaths.DefaultDatabasePath
@@ -446,14 +469,19 @@ public sealed class TargetSchedulerCatalogReader
                     connection,
                     transaction,
                     "target",
-                    "WHERE name = @targetName COLLATE NOCASE",
-                    [new SQLiteParameter("@targetName", targetName)],
+                    runningProfile is null
+                        ? "WHERE name = @targetName COLLATE NOCASE"
+                        : "WHERE name = @targetName COLLATE NOCASE AND projectid IN ("
+                            + ScopedProjects + ")",
+                    [new SQLiteParameter("@targetName", targetName), .. ScopeParameters()],
                     cancellationToken,
                     progress: progress);
                 if (target.Rows.Count == 0)
                 {
                     throw new InvalidOperationException(
-                        $"Target Scheduler does not contain a target named '{targetName}'.");
+                        runningProfile is null
+                            ? $"Target Scheduler does not contain a target named '{targetName}'."
+                            : $"The running N.I.N.A. profile has no Target Scheduler target named '{targetName}'.");
                 }
 
                 if (target.Rows.Count > 1)
@@ -555,16 +583,18 @@ public sealed class TargetSchedulerCatalogReader
             (connection, transaction, schemaVersion) =>
             {
                 var tables = new SortedDictionary<string, BundleTable>(StringComparer.Ordinal);
+                IReadOnlyCollection<SQLiteParameter> scoped = [.. parameters, .. ScopeParameters()];
                 foreach (var tableName in tableNames)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    var whereClause = ScopeWhere(tableName);
                     if (tableName.Equals("imagedata", StringComparison.OrdinalIgnoreCase))
                     {
                         EnsureThumbnailBudget(
                             connection,
                             transaction,
-                            whereClause: null,
-                            parameters,
+                            whereClause,
+                            scoped,
                             cancellationToken);
                     }
 
@@ -572,8 +602,8 @@ public sealed class TargetSchedulerCatalogReader
                         connection,
                         transaction,
                         tableName,
-                        whereClause: null,
-                        parameters,
+                        whereClause,
+                        scoped,
                         cancellationToken,
                         progress: progress);
                 }
@@ -631,8 +661,8 @@ public sealed class TargetSchedulerCatalogReader
                     connection,
                     transaction,
                     "acquiredimage",
-                    reviewedOnly ? "WHERE gradingStatus <> 0" : null,
-                    [],
+                    GradesWhere(reviewedOnly),
+                    ScopeParameters(),
                     cancellationToken,
                     ["guid", "gradingStatus", "rejectreason"]);
                 return new BundleSnapshot(
@@ -646,6 +676,51 @@ public sealed class TargetSchedulerCatalogReader
 
         return CreateBundle(SyncOperation.PushGrades, snapshot, cancellationToken);
     }
+
+    private SQLiteParameter[] ScopeParameters() =>
+        runningProfile is null
+            ? []
+            : [
+                new SQLiteParameter("@scopeProfile", runningProfile),
+                new SQLiteParameter("@scopePlaced", TargetSchedulerCatalogWriter.PlacedByPluginProfile),
+            ];
+
+    /// <summary>
+    /// The filter that keeps a catalog bundle to the running profile. Rows
+    /// follow their project, so a bundle never refers to a project it leaves
+    /// out.
+    /// </summary>
+    private string? ScopeWhere(string table)
+    {
+        if (runningProfile is null)
+        {
+            return null;
+        }
+
+        return table.ToLowerInvariant() switch
+        {
+            "project" => "WHERE profileId COLLATE NOCASE IN (@scopeProfile, @scopePlaced)",
+            "ruleweight" or "target" => $"WHERE projectid IN ({ScopedProjects})",
+            "exposureplan" => $"WHERE targetid IN ({ScopedTargets})",
+            "exposuretemplate" =>
+                "WHERE profileId COLLATE NOCASE IN (@scopeProfile, @scopePlaced) "
+                + $"OR Id IN (SELECT exposureTemplateId FROM exposureplan WHERE targetid IN ({ScopedTargets}))",
+            "acquiredimage" => $"WHERE projectId IN ({ScopedProjects})",
+            "imagedata" =>
+                $"WHERE acquiredimageid IN (SELECT Id FROM acquiredimage WHERE projectId IN ({ScopedProjects}))",
+            _ => throw new InvalidOperationException(
+                $"No profile scope for Target Scheduler table {table}."),
+        };
+    }
+
+    private string? GradesWhere(bool reviewedOnly) =>
+        (reviewedOnly, runningProfile is null) switch
+        {
+            (true, true) => "WHERE gradingStatus <> 0",
+            (false, true) => null,
+            (true, false) => $"WHERE gradingStatus <> 0 AND projectId IN ({ScopedProjects})",
+            (false, false) => $"WHERE projectId IN ({ScopedProjects})",
+        };
 
     private BundleTable ReadById(
         SQLiteConnection connection,

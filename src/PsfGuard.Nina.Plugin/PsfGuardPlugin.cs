@@ -682,7 +682,8 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
     {
         var reader = new TargetSchedulerCatalogReader(
             configuration.TargetSchedulerDatabase,
-            configuration.TargetSchedulerVersion);
+            configuration.TargetSchedulerVersion,
+            configuration.ProfileId);
         var writer = new TargetSchedulerCatalogWriter(
             configuration.TargetSchedulerDatabase,
             configuration.ProfileId);
