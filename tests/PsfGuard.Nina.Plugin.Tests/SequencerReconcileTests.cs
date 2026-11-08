@@ -77,6 +77,15 @@ public sealed class SequencerReconcileTests
         Assert.DoesNotContain(fixture.Statuses, status => status.StartsWith("PSF Guard preview preview-test applied.", StringComparison.Ordinal));
     }
 
+    /// <summary>Puts every profile-scoped row in <paramref name="profile"/>.</summary>
+    private static void SetProfile(System.Data.SQLite.SQLiteConnection connection, Guid profile)
+    {
+        foreach (var table in new[] { "project", "exposuretemplate", "exposureplan", "acquiredimage" })
+        {
+            connection.Execute($"UPDATE {table} SET profileId = '{profile:D}'");
+        }
+    }
+
     [Fact]
     public async Task RoundTripAppliesThenPullsMergedCatalogWithGlobalApplyOff()
     {
@@ -138,12 +147,16 @@ public sealed class SequencerReconcileTests
         public bool AsyncPreview { get; set; }
         public CatalogBundle? ExportBundle { get; set; }
 
+        /// <summary>The N.I.N.A. profile the test runs in. Its rows carry this ID, as N.I.N.A.'s do.</summary>
+        public Guid ProfileId { get; } = Guid.NewGuid();
+
         public Fixture()
         {
             Database.Seed(0);
             using (var connection = Database.Open())
             {
                 connection.Execute($"UPDATE target SET guid = '{TargetGuid}'");
+                SetProfile(connection, ProfileId);
             }
             using var reservation = new TcpListener(IPAddress.Loopback, 0);
             reservation.Start();
@@ -155,7 +168,7 @@ public sealed class SequencerReconcileTests
 
             var profile = Stub<IProfile>(new()
             {
-                ["get_Id"] = Guid.NewGuid(),
+                ["get_Id"] = ProfileId,
                 ["get_Name"] = "Disposable reconcile test",
                 ["get_PluginSettings"] = new NINA.Profile.PluginSettings(),
             });
