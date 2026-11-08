@@ -17,9 +17,9 @@ Guard server. Do not pair with a server unless you trust its operator.
 | Star-detection settings | The active profile's ID and name, the N.I.N.A. and Hocus Focus versions, N.I.N.A.'s star-detection, autostretch, and autofocus-crop settings, the selected star detector, focal length, pixel size, and Hocus Focus's detection settings. Sent automatically while the profile is paired and **Send star-detection settings to PSF Guard** is on; see the [protocol](PROTOCOL.md#star-detection-settings) for the full list. |
 | Pull or connection check | Paired catalog identifier, requested operation, protocol information, and authentication credential. |
 
-Pushes and reconciles send only the active N.I.N.A. profile's projects, plus
-projects PSF Guard added that no profile has taken yet. Projects of other
-profiles in the same Target Scheduler database stay on this computer.
+Pushes and reconciles send only the active N.I.N.A. profile's projects and
+images. Projects of other profiles in the same Target Scheduler database stay
+on this computer.
 Current-target reconcile narrows the transfer to that target and its related
 records.
 

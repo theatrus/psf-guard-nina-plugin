@@ -37,11 +37,18 @@ public sealed class TargetSchedulerCatalogReader
         "imagedata",
     ];
 
-    // A pushed bundle covers the running profile's projects and the rows
-    // PSF Guard left on its placeholder profile. Each N.I.N.A. profile is a
-    // separate PSF Guard catalog, so other profiles' rows stay out.
+    // A pushed bundle covers the running profile's projects. Each N.I.N.A.
+    // profile is a separate PSF Guard catalog, so other profiles' rows stay
+    // out. So do rows on PSF Guard's waiting ID: this plugin places them as
+    // it pulls, so any left in the file came from an older plugin, perhaps
+    // for another profile's catalog.
     private const string ScopedProjects =
-        "SELECT Id FROM project WHERE profileId COLLATE NOCASE IN (@scopeProfile, @scopePlaced)";
+        "SELECT Id FROM project WHERE profileId = @scopeProfile COLLATE NOCASE";
+
+    // Images match by their own profile as well, so grades of frames whose
+    // project was deleted still go out.
+    private const string ScopedImages =
+        "profileId = @scopeProfile COLLATE NOCASE OR projectId IN (" + ScopedProjects + ")";
 
     private const string ScopedTargets =
         "SELECT Id FROM target WHERE projectid IN (" + ScopedProjects + ")";
@@ -54,8 +61,8 @@ public sealed class TargetSchedulerCatalogReader
 
     /// <param name="runningProfile">
     /// The N.I.N.A. profile the plugin runs in. When set, catalog bundles
-    /// carry only that profile's projects, plus projects PSF Guard has not
-    /// yet placed in a profile. A capture bundle always carries its image.
+    /// carry only that profile's projects and images. A capture bundle always
+    /// carries its image.
     /// </param>
     public TargetSchedulerCatalogReader(
         string databasePath,
@@ -680,10 +687,7 @@ public sealed class TargetSchedulerCatalogReader
     private SQLiteParameter[] ScopeParameters() =>
         runningProfile is null
             ? []
-            : [
-                new SQLiteParameter("@scopeProfile", runningProfile),
-                new SQLiteParameter("@scopePlaced", TargetSchedulerCatalogWriter.PlacedByPluginProfile),
-            ];
+            : [new SQLiteParameter("@scopeProfile", runningProfile)];
 
     /// <summary>
     /// The filter that keeps a catalog bundle to the running profile. Rows
@@ -699,15 +703,15 @@ public sealed class TargetSchedulerCatalogReader
 
         return table.ToLowerInvariant() switch
         {
-            "project" => "WHERE profileId COLLATE NOCASE IN (@scopeProfile, @scopePlaced)",
+            "project" => "WHERE profileId = @scopeProfile COLLATE NOCASE",
             "ruleweight" or "target" => $"WHERE projectid IN ({ScopedProjects})",
             "exposureplan" => $"WHERE targetid IN ({ScopedTargets})",
             "exposuretemplate" =>
-                "WHERE profileId COLLATE NOCASE IN (@scopeProfile, @scopePlaced) "
+                "WHERE profileId = @scopeProfile COLLATE NOCASE "
                 + $"OR Id IN (SELECT exposureTemplateId FROM exposureplan WHERE targetid IN ({ScopedTargets}))",
-            "acquiredimage" => $"WHERE projectId IN ({ScopedProjects})",
+            "acquiredimage" => $"WHERE {ScopedImages}",
             "imagedata" =>
-                $"WHERE acquiredimageid IN (SELECT Id FROM acquiredimage WHERE projectId IN ({ScopedProjects}))",
+                $"WHERE acquiredimageid IN (SELECT Id FROM acquiredimage WHERE {ScopedImages})",
             _ => throw new InvalidOperationException(
                 $"No profile scope for Target Scheduler table {table}."),
         };
@@ -718,8 +722,8 @@ public sealed class TargetSchedulerCatalogReader
         {
             (true, true) => "WHERE gradingStatus <> 0",
             (false, true) => null,
-            (true, false) => $"WHERE gradingStatus <> 0 AND projectId IN ({ScopedProjects})",
-            (false, false) => $"WHERE projectId IN ({ScopedProjects})",
+            (true, false) => $"WHERE gradingStatus <> 0 AND ({ScopedImages})",
+            (false, false) => $"WHERE {ScopedImages}",
         };
 
     private BundleTable ReadById(

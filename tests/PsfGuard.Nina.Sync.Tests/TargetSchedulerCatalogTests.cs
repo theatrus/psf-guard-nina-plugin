@@ -681,13 +681,13 @@ public sealed class TargetSchedulerCatalogTests
             .BuildFullMergeBundleAsync(includeThumbnails: true, CancellationToken.None);
 
         Assert.True(bundle.VerifyDigest());
-        Assert.Equal([1L, 201L], Ids(bundle.Tables["project"]));
-        Assert.Equal([2L, 202L], Ids(bundle.Tables["target"]));
-        Assert.Equal([6L, 206L], Ids(bundle.Tables["ruleweight"]));
-        Assert.Equal([4L, 204L], Ids(bundle.Tables["exposureplan"]));
-        Assert.Equal([3L, 103L, 203L], Ids(bundle.Tables["exposuretemplate"]));
-        Assert.Equal([5L, 205L], Ids(bundle.Tables["acquiredimage"]));
-        Assert.Equal([7L, 207L], Ids(bundle.Tables["imagedata"]));
+        Assert.Equal([1L], Ids(bundle.Tables["project"]));
+        Assert.Equal([2L], Ids(bundle.Tables["target"]));
+        Assert.Equal([6L], Ids(bundle.Tables["ruleweight"]));
+        Assert.Equal([4L], Ids(bundle.Tables["exposureplan"]));
+        Assert.Equal([3L, 103L], Ids(bundle.Tables["exposuretemplate"]));
+        Assert.Equal([5L], Ids(bundle.Tables["acquiredimage"]));
+        Assert.Equal([7L], Ids(bundle.Tables["imagedata"]));
     }
 
     [Fact]
@@ -712,10 +712,28 @@ public sealed class TargetSchedulerCatalogTests
         var planning = await reader.BuildPlanningBundleAsync(CancellationToken.None);
         var grades = await reader.BuildGradesBundleAsync(reviewedOnly: true, CancellationToken.None);
 
-        Assert.Equal([1L, 201L], Ids(planning.Tables["project"]));
-        Assert.Equal([4L, 204L], Ids(planning.Tables["exposureplan"]));
-        Assert.Equal([3L, 203L], Ids(planning.Tables["exposuretemplate"]));
-        Assert.Equal(2, grades.Tables["acquiredimage"].Rows.Count);
+        Assert.Equal([1L], Ids(planning.Tables["project"]));
+        Assert.Equal([4L], Ids(planning.Tables["exposureplan"]));
+        Assert.Equal([3L], Ids(planning.Tables["exposuretemplate"]));
+        Assert.Single(grades.Tables["acquiredimage"].Rows);
+    }
+
+    [Fact]
+    public async Task GradePushKeepsFramesOfADeletedProject()
+    {
+        using var database = new TestDatabase();
+        database.Seed(0, grade: 1);
+        using (var connection = database.Open())
+        {
+            connection.Execute(
+                $"UPDATE acquiredimage SET profileId = '{ReducerProfile}';"
+                + "DELETE FROM exposureplan; DELETE FROM target; DELETE FROM ruleweight; DELETE FROM project;");
+        }
+
+        var grades = await new TargetSchedulerCatalogReader(database.Path, "5.9.6.0", Reducer)
+            .BuildGradesBundleAsync(reviewedOnly: true, CancellationToken.None);
+
+        Assert.Single(grades.Tables["acquiredimage"].Rows);
     }
 
     [Fact]
@@ -752,7 +770,8 @@ public sealed class TargetSchedulerCatalogTests
     /// <summary>
     /// Rows 1-7 belong to the reducer profile (stored in upper case, as some
     /// tools write it), rows 101-107 to another profile, and rows 201-207 to
-    /// a project PSF Guard activated before the Sync plugin placed it.
+    /// a project an older plugin left on PSF Guard's waiting ID, perhaps for
+    /// another profile's catalog.
     /// </summary>
     private static void SeedTwoProfiles(TestDatabase database, int grade = 0)
     {
@@ -766,7 +785,7 @@ public sealed class TargetSchedulerCatalogTests
             connection.Execute(
                 $"UPDATE {table} SET profileId = '{ReducerProfile.ToUpperInvariant()}' WHERE Id < 100;"
                 + $"UPDATE {table} SET profileId = '{OtherProfile}' WHERE Id BETWEEN 100 AND 199;"
-                + $"UPDATE {table} SET profileId = '{(table == "acquiredimage" ? ReducerProfile : placed)}' WHERE Id >= 200;");
+                + $"UPDATE {table} SET profileId = '{placed}' WHERE Id >= 200;");
         }
     }
 
@@ -892,6 +911,138 @@ public sealed class TargetSchedulerCatalogTests
                 destination,
                 "SELECT t.profileId FROM exposureplan p JOIN exposuretemplate t ON t.Id = p.exposureTemplateId"));
         Assert.Equal("1", Scalar(destination, "SELECT COUNT(*) FROM exposuretemplate"));
+    }
+
+    [Fact]
+    public async Task PlanningPullKeepsPsfGuardsTemplateGuidSoLaterEditsArrive()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        var bundle = await WaitingPlanAsync(source);
+        destination.Seed(100);
+        Empty(destination);
+        var writer = new TargetSchedulerCatalogWriter(destination.Path, Reducer);
+        await writer.ApplyPlanningAsync(bundle, CancellationToken.None);
+        Assert.Equal("template-guid", Scalar(destination, "SELECT guid FROM exposuretemplate"));
+
+        // PSF Guard changes the template's gain.
+        using (var connection = source.Open())
+        {
+            connection.Execute("UPDATE exposuretemplate SET gain = 200");
+        }
+
+        var edited = await new TargetSchedulerCatalogReader(source.Path, "5.9.6.0")
+            .BuildPlanningBundleAsync(CancellationToken.None);
+        await writer.ApplyPlanningAsync(edited, CancellationToken.None);
+
+        Assert.Equal("1", Scalar(destination, "SELECT COUNT(*) FROM exposuretemplate"));
+        Assert.Equal("200", Scalar(destination, "SELECT gain FROM exposuretemplate"));
+        Assert.Equal(ReducerProfile, Scalar(destination, "SELECT profileId FROM exposuretemplate"));
+    }
+
+    [Fact]
+    public async Task PlanningPullPutsANewWaitingPlanInItsProjectsProfile()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        var bundle = await WaitingPlanAsync(source);
+        destination.Seed(100);
+        Empty(destination);
+        await new TargetSchedulerCatalogWriter(destination.Path, Reducer)
+            .ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        // PSF Guard adds a second plan to the project, and the next pull runs
+        // in another profile.
+        using (var connection = source.Open())
+        {
+            connection.Execute(
+                $"""
+                INSERT INTO exposureplan
+                    (Id, profileId, exposure, desired, acquired, accepted, targetId, exposureTemplateId, guid)
+                VALUES (40, '{TargetSchedulerCatalogWriter.PlacedByPluginProfile}', 60, 10, 0, 0, 2, 3, 'second-plan');
+                """);
+        }
+
+        var added = await new TargetSchedulerCatalogReader(source.Path, "5.9.6.0")
+            .BuildPlanningBundleAsync(CancellationToken.None);
+        await new TargetSchedulerCatalogWriter(destination.Path, Guid.NewGuid())
+            .ApplyPlanningAsync(added, CancellationToken.None);
+
+        Assert.Equal(
+            ReducerProfile,
+            Scalar(destination, "SELECT profileId FROM exposureplan WHERE guid = 'second-plan'"));
+        Assert.Equal("1", Scalar(destination, "SELECT COUNT(*) FROM exposuretemplate"));
+    }
+
+    [Fact]
+    public async Task PlanningPullMatchesATemplateWhoseProfileIsInAnotherCase()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        var bundle = await WaitingPlanAsync(source);
+        destination.Seed(100);
+        Empty(destination);
+        var filter = Scalar(source, "SELECT filtername FROM exposuretemplate");
+        var gain = Scalar(source, "SELECT gain FROM exposuretemplate");
+        using (var connection = destination.Open())
+        {
+            connection.Execute(
+                $"""
+                INSERT INTO exposuretemplate (Id, profileId, name, filtername, gain, guid)
+                VALUES (500, '{ReducerProfile.ToUpperInvariant()}', 'Mine', '{filter}', {gain}, 'mine-guid');
+                """);
+        }
+
+        await new TargetSchedulerCatalogWriter(destination.Path, Reducer)
+            .ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.Equal("1", Scalar(destination, "SELECT COUNT(*) FROM exposuretemplate"));
+    }
+
+    [Fact]
+    public async Task AnEmptyRunningProfileCountsAsNone()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        var bundle = await WaitingPlanAsync(source);
+        destination.Seed(100);
+        Empty(destination);
+
+        var result = await new TargetSchedulerCatalogWriter(destination.Path, Guid.Empty)
+            .ApplyPlanningAsync(bundle, CancellationToken.None);
+
+        Assert.True(result.Skipped > 0);
+        Assert.Equal("0", Scalar(destination, "SELECT COUNT(*) FROM project"));
+    }
+
+    [Fact]
+    public async Task MergePullGivesAWaitingImageItsProjectsProfile()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0);
+        using (var connection = source.Open())
+        {
+            foreach (var table in new[] { "project", "exposuretemplate", "exposureplan", "acquiredimage" })
+            {
+                connection.Execute(
+                    $"UPDATE {table} SET profileId = '{TargetSchedulerCatalogWriter.PlacedByPluginProfile}'");
+            }
+        }
+
+        var bundle = await new TargetSchedulerCatalogReader(source.Path, "5.9.6.0")
+            .BuildFullMergeBundleAsync(includeThumbnails: false, CancellationToken.None);
+        destination.Seed(100);
+        Empty(destination);
+        using (var connection = destination.Open())
+        {
+            connection.Execute("DELETE FROM imagedata; DELETE FROM acquiredimage;");
+        }
+
+        await new TargetSchedulerCatalogWriter(destination.Path, Reducer)
+            .ApplyMergeAsync(bundle, CancellationToken.None);
+
+        Assert.Equal(ReducerProfile, Scalar(destination, "SELECT profileId FROM acquiredimage"));
     }
 
     [Fact]

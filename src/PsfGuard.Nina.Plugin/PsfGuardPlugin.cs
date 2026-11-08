@@ -1585,7 +1585,9 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         && string.Equals(
             TargetSchedulerDatabase,
             configuration.TargetSchedulerDatabase,
-            StringComparison.OrdinalIgnoreCase);
+            StringComparison.OrdinalIgnoreCase)
+        // The writer places waiting rows in this profile.
+        && profileService.ActiveProfile?.Id == configuration.ProfileId;
 
     private sealed record PendingPreviewContext(
         PushReceipt Receipt,

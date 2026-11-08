@@ -273,14 +273,19 @@ filter cadence. It then handles each standing deletion:
 
 PSF Guard cannot tell which N.I.N.A. profile is open, so it gives a project it
 adds the profile ID `00000000-0000-4000-8000-505346475244`. No N.I.N.A. profile
-has this ID. It appears on `project`, `exposuretemplate` and `exposureplan` rows
-in planning and merge bundles. The plugin writes those rows as follows:
+has this ID. It appears on `project`, `exposuretemplate`, `exposureplan` and
+`acquiredimage` rows in planning and merge bundles. The plugin writes those
+rows as follows:
 
-- A new row goes into the profile the plugin runs in.
+- A new project goes into the profile the plugin runs in.
+- A new plan or image goes into its project's profile, so a project placed
+  before the user switched profiles keeps its plans together. When the project
+  is waiting too, the row goes into the running profile.
 - A waiting template goes into the profile of each plan that uses it. When that
   profile has a template with the same filter, gain, offset, binning and readout
-  mode, the plan uses it. Otherwise the plugin adds a copy with a new GUID.
-  Templates no plan uses are not written.
+  mode, the plan uses it. Otherwise the plugin adds a copy. The first copy keeps
+  PSF Guard's GUID, so later pulls update it in place; a copy in a second
+  profile gets a new GUID. Templates no plan uses are not written.
 - A row Target Scheduler already holds keeps its profile, so switching profiles
   between pulls does not move a project. A row an older plugin wrote with the
   waiting ID moves to the running profile.
@@ -297,15 +302,18 @@ unchanged, and N.I.N.A. hides them until the plugin is updated.
 ### Which rows a push carries
 
 Each N.I.N.A. profile pairs with its own PSF Guard catalog, so merge, planning
-and grade bundles carry only the running profile's projects and the projects
-still on the waiting ID. The plugin compares profile IDs without regard to
-case.
+and grade bundles carry only the running profile's projects. Rows still on the
+waiting ID stay out: the plugin places waiting rows as it pulls, so any left in
+the file came from an older plugin, perhaps for another profile's catalog. The
+next pull from their own catalog places them. The plugin compares profile IDs
+without regard to case.
 
 - `project` rows match by `profileId`.
 - `target` and `ruleweight` rows follow their project, and `exposureplan` rows
   follow their target.
-- `acquiredimage` and `imagedata` rows follow the image's project, so a bundle
-  never refers to a project it leaves out.
+- `acquiredimage` and `imagedata` rows match by the image's `profileId` or
+  follow its project, so grades of frames whose project was deleted still go
+  out.
 - `exposuretemplate` rows match by `profileId`, plus any template a carried
   plan uses.
 - A current-target reconcile looks for the target only in those projects.

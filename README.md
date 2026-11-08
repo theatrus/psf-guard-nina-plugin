@@ -166,8 +166,8 @@ Restart N.I.N.A., open **Plugins > Installed > PSF Guard Sync**, and configure:
 
 Pair each N.I.N.A. profile with its own PSF Guard database, for example one for
 the reducer and one without it. Pushes and reconciles send only the active
-profile's projects, plus projects PSF Guard added that no profile has taken
-yet. Pulls write what the paired database sends into the active profile.
+profile's projects. Pulls write what the paired database sends; new projects
+go into the active profile.
 
 If the saved credential was deleted from Windows Credential Manager, generate a
 **new** one-time code in PSF Guard and pair again. A previously used pairing code
