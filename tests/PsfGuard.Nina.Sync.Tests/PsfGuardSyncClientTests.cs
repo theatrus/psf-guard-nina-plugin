@@ -61,6 +61,45 @@ public sealed class PsfGuardSyncClientTests
     }
 
     [Fact]
+    public async Task EveryRequestCarriesThePluginVersionAndCapabilities()
+    {
+        HttpRequestMessage? captured = null;
+        var handler = new StubHandler(
+            async request =>
+            {
+                captured = await CloneAsync(request);
+                return Json(
+                    """
+                    {
+                      "success": true,
+                      "data": {
+                        "protocol_version": 1,
+                        "product": "PSF Guard",
+                        "product_version": "0.13.0",
+                        "capabilities": ["waiting_profile_v1"],
+                        "catalogs": []
+                      }
+                    }
+                    """);
+            });
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(handler),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        var capabilities = await client.GetCapabilitiesAsync(CancellationToken.None);
+
+        Assert.Equal("0.13.0", capabilities.ProductVersion);
+        Assert.NotNull(captured);
+        Assert.Equal(
+            PsfGuardSyncClient.PluginVersion,
+            captured.Headers.GetValues(PsfGuardSyncClient.PluginVersionHeader).Single());
+        Assert.Equal(
+            "waiting_profile_v1",
+            captured.Headers.GetValues(PsfGuardSyncClient.PluginCapabilitiesHeader).Single());
+    }
+
+    [Fact]
     public async Task PreviewPollsAnAcceptedAsyncJobUntilReady()
     {
         var calls = 0;

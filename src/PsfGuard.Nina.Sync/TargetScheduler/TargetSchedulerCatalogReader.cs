@@ -127,7 +127,7 @@ public sealed class TargetSchedulerCatalogReader
             {
                 throw new TimeoutException(
                     "Target Scheduler did not expose a unique record for saved light "
-                    + $"{Path.GetFileName(imagePath)} within {timeout.TotalSeconds:0} seconds.");
+                    + $"{SavedImagePaths.FileName(imagePath)} within {timeout.TotalSeconds:0} seconds.");
             }
 
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
@@ -289,7 +289,7 @@ public sealed class TargetSchedulerCatalogReader
                     return exactPath;
                 }
 
-                var fileName = Path.GetFileName(normalizedPath);
+                var fileName = SavedImagePaths.FileName(normalizedPath);
                 if (string.IsNullOrWhiteSpace(fileName))
                 {
                     return null;
@@ -1189,7 +1189,7 @@ public sealed class TargetSchedulerCatalogReader
             StringComparison.OrdinalIgnoreCase);
 
     private static string? FileName(string? path) =>
-        string.IsNullOrWhiteSpace(path) ? null : Path.GetFileName(NormalizePath(path));
+        string.IsNullOrWhiteSpace(path) ? null : SavedImagePaths.FileName(NormalizePath(path));
 
     private static CaptureMetadata ReadCaptureMetadata(string? metadata)
     {

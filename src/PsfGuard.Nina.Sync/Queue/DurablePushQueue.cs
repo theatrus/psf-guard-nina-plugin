@@ -469,7 +469,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
                     if (job.ImageUploadDeferred)
                     {
                         ReportStatus(
-                            $"Applied scheduler sync for {Path.GetFileName(job.Capture.ImagePath)}; "
+                            $"Applied scheduler sync for {SavedImagePaths.FileName(job.Capture.ImagePath)}; "
                             + "image upload is deferred.");
                         continue;
                     }
@@ -499,7 +499,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
 
                 job.PrerequisiteAttempts = 0;
                 uploadingImage = true;
-                ReportStatus($"Uploading {Path.GetFileName(uploadPath)} after scheduler sync...");
+                ReportStatus($"Uploading {SavedImagePaths.FileName(uploadPath)} after scheduler sync...");
                 PsfGuardUploadRefusedException? refused = null;
                 using (var client = clientFactory(job.Destination))
                 {
@@ -530,7 +530,7 @@ public sealed class DurablePushQueue : IAsyncDisposable
                         file,
                         receipt,
                         cancellationToken,
-                        Path.GetFileName(uploadPath))
+                        SavedImagePaths.FileName(uploadPath))
                     .ConfigureAwait(false);
             }
             catch (PreviewUnavailableException exception)
@@ -915,12 +915,12 @@ public sealed class DurablePushQueue : IAsyncDisposable
         job.PrerequisiteAttempts = QueueFailurePolicy.IncrementAttempts(
             job.PrerequisiteAttempts);
         job.LastError = "Target Scheduler has not exposed a unique record for saved light "
-            + $"{Path.GetFileName(capture.ImagePath)} yet.";
+            + $"{SavedImagePaths.FileName(capture.ImagePath)} yet.";
         var delay = QueueFailurePolicy.RetryDelay(job.PrerequisiteAttempts);
         job.NextAttemptUtc = DateTimeOffset.UtcNow + delay;
         await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
         ReportStatus(
-            $"Waiting for Target Scheduler to record {Path.GetFileName(capture.ImagePath)}; "
+            $"Waiting for Target Scheduler to record {SavedImagePaths.FileName(capture.ImagePath)}; "
             + $"checking again in {delay.TotalSeconds:0} seconds.");
         return delay;
     }
@@ -933,12 +933,12 @@ public sealed class DurablePushQueue : IAsyncDisposable
             ?? throw new InvalidDataException("Queued sync job has no capture source.");
         job.PrerequisiteAttempts = QueueFailurePolicy.IncrementAttempts(
             job.PrerequisiteAttempts);
-        job.LastError = $"Saved image {Path.GetFileName(capture.ImagePath)} is not available yet.";
+        job.LastError = $"Saved image {SavedImagePaths.FileName(capture.ImagePath)} is not available yet.";
         var delay = QueueFailurePolicy.RetryDelay(job.PrerequisiteAttempts);
         job.NextAttemptUtc = DateTimeOffset.UtcNow + delay;
         await PersistWorkerJobAsync(job, cancellationToken).ConfigureAwait(false);
         ReportStatus(
-            $"Scheduler sync is applied; waiting for {Path.GetFileName(capture.ImagePath)} "
+            $"Scheduler sync is applied; waiting for {SavedImagePaths.FileName(capture.ImagePath)} "
             + $"before upload ({delay.TotalSeconds:0} seconds).");
         return delay;
     }

@@ -27,6 +27,26 @@ Each key identifies exactly one configured database. The same key can
 authenticate database sync and image ingest; image ingest remains separately
 disabled until the database setting enables it.
 
+### Plugin version and capabilities
+
+The plugin sends two headers with every request:
+
+| Header | Value |
+|---|---|
+| `X-PSF-Guard-Plugin-Version` | The release version, such as `0.4.0.20`. A local build sends `0.1.0.0`. |
+| `X-PSF-Guard-Plugin-Capabilities` | What the plugin supports, comma-separated. |
+
+A server matches its behavior to the capability list, not to the version, and
+treats a request without the header as coming from an older plugin. The
+version is for logs. Current plugin capabilities:
+
+- `waiting_profile_v1`: the plugin writes rows on PSF Guard's waiting profile
+  into the profile it runs in. See **Rows waiting for a profile**.
+
+In the other direction, `GET /capabilities` returns the server's
+`product_version` and its own `capabilities` list. The plugin shows the version
+on **Test connection** and gates optional request fields on the list.
+
 ## Capabilities
 
 ```http
@@ -38,7 +58,7 @@ GET /api/sync/v1/capabilities
   "protocol_version": 1,
   "product": "psf-guard",
   "product_version": "0.6.0",
-  "capabilities": ["merge", "push_planning", "push_grades", "preview_apply", "preview_refresh", "async_preview_jobs", "exports", "image_upload", "project_tombstones_v1"],
+  "capabilities": ["merge", "push_planning", "push_grades", "preview_apply", "preview_refresh", "async_preview_jobs", "exports", "image_upload", "project_tombstones_v1", "waiting_profile_v1"],
   "catalogs": [
     {
       "id": "review",
@@ -266,6 +286,13 @@ in planning and merge bundles. The plugin writes those rows as follows:
   waiting ID moves to the running profile.
 
 Rows with any other profile ID are written as they arrive.
+
+A server that may send waiting rows advertises `waiting_profile_v1`. It sends
+them as they are only to a plugin that lists `waiting_profile_v1` in
+`X-PSF-Guard-Plugin-Capabilities`. For any other client, the server first gives
+them a real profile: the one the plugin last reported with its star-detection
+settings, else the catalog's only profile. When it knows neither, it sends them
+unchanged, and N.I.N.A. hides them until the plugin is updated.
 
 ### Which rows a push carries
 
