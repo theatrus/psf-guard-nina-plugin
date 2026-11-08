@@ -761,6 +761,15 @@ public sealed class TargetSchedulerCatalogWriter
             }
 
             var waitingForProfile = WaitsForProfile(values);
+            if (waitingForProfile && waitingTemplates is not null && tableName == "exposuretemplate")
+            {
+                // Even a known GUID may be used by plans in several profiles.
+                // Resolve it after each plan's final profile is known instead
+                // of mapping every plan to the first profile's copy.
+                waitingTemplates.Add(sourceId, values);
+                continue;
+            }
+
             if (matches.Count == 1)
             {
                 var destinationId = matches[0];
@@ -810,13 +819,6 @@ public sealed class TargetSchedulerCatalogWriter
             {
                 if (waitingForProfile)
                 {
-                    if (waitingTemplates is not null && tableName == "exposuretemplate")
-                    {
-                        // Written with the first plan that uses it.
-                        waitingTemplates.Add(sourceId, values);
-                        continue;
-                    }
-
                     if (ProfileForWaitingRow(connection, transaction, tableName, values, runningProfile)
                         is not { } profile)
                     {
@@ -2211,7 +2213,32 @@ public sealed class TargetSchedulerCatalogWriter
             {
                 [ProfileColumn] = profile,
             };
-            if (FindSameTemplate(connection, transaction, values) is { } same)
+            var sourceGuid = values.GetValueOrDefault("guid") as string;
+            var matches = sourceGuid is null
+                ? []
+                : FindIdsByGuid(connection, transaction, "exposuretemplate", sourceGuid);
+            var current = matches.Count == 1
+                ? ReadRowById(connection, transaction, "exposuretemplate", matches[0], values.Keys)
+                : null;
+            if (current is not null
+                && (WaitsForProfile(current)
+                    || string.Equals(current.GetValueOrDefault(ProfileColumn) as string, profile,
+                        StringComparison.OrdinalIgnoreCase)))
+            {
+                // Only the copy in this plan's profile receives GUID-matched
+                // edits. A different profile resolves its own copy below.
+                id = matches[0];
+                if (RowsEqual(current, values))
+                {
+                    result.Unchanged++;
+                }
+                else
+                {
+                    UpdateRow(connection, transaction, "exposuretemplate", id, values);
+                    result.Updated++;
+                }
+            }
+            else if (FindSameTemplate(connection, transaction, values) is { } same)
             {
                 id = same;
                 result.Unchanged++;
@@ -2222,7 +2249,6 @@ public sealed class TargetSchedulerCatalogWriter
                 // and update it in place. Plans in two profiles can share one
                 // PSF Guard template; a copy in a second profile takes a GUID
                 // of its own, since each profile needs its own row.
-                var sourceGuid = values.GetValueOrDefault("guid") as string;
                 values["guid"] = sourceGuid is not null
                     && guidTaken.Add(sourceId)
                     && FindIdsByGuid(connection, transaction, "exposuretemplate", sourceGuid).Count == 0

@@ -285,7 +285,10 @@ rows as follows:
   profile has a template with the same filter, gain, offset, binning and readout
   mode, the plan uses it. Otherwise the plugin adds a copy. The first copy keeps
   PSF Guard's GUID, so later pulls update it in place; a copy in a second
-  profile gets a new GUID. Templates no plan uses are not written.
+  profile gets a new GUID. Every pull resolves the template in its plan's final
+  profile, including when another profile already has the original GUID. An
+  edit matched by GUID updates only the copy in that plan's profile. Templates
+  no plan uses are not written.
 - A row Target Scheduler already holds keeps its profile, so switching profiles
   between pulls does not move a project. A row an older plugin wrote with the
   waiting ID moves to the running profile.
