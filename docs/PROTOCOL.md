@@ -27,6 +27,26 @@ Each key identifies exactly one configured database. The same key can
 authenticate database sync and image ingest; image ingest remains separately
 disabled until the database setting enables it.
 
+### Plugin version and capabilities
+
+The plugin sends two headers with every request:
+
+| Header | Value |
+|---|---|
+| `X-PSF-Guard-Plugin-Version` | The release version, such as `0.4.0.20`. A local build sends `0.1.0.0`. |
+| `X-PSF-Guard-Plugin-Capabilities` | What the plugin supports, comma-separated. |
+
+A server matches its behavior to the capability list, not to the version, and
+treats a request without the header as coming from an older plugin. The
+version is for logs. Current plugin capabilities:
+
+- `waiting_profile_v1`: the plugin writes rows on PSF Guard's waiting profile
+  into the profile it runs in. See **Rows waiting for a profile**.
+
+In the other direction, `GET /capabilities` returns the server's
+`product_version` and its own `capabilities` list. The plugin shows the version
+on **Test connection** and gates optional request fields on the list.
+
 ## Capabilities
 
 ```http
@@ -38,7 +58,7 @@ GET /api/sync/v1/capabilities
   "protocol_version": 1,
   "product": "psf-guard",
   "product_version": "0.6.0",
-  "capabilities": ["merge", "push_planning", "push_grades", "preview_apply", "preview_refresh", "async_preview_jobs", "exports", "image_upload", "project_tombstones_v1"],
+  "capabilities": ["merge", "push_planning", "push_grades", "preview_apply", "preview_refresh", "async_preview_jobs", "exports", "image_upload", "project_tombstones_v1", "waiting_profile_v1"],
   "catalogs": [
     {
       "id": "review",
@@ -248,6 +268,59 @@ filter cadence. It then handles each standing deletion:
    the project's GUID (`psf_guard_director_target`,
    `psf_guard_director_project`); then `project`. Exposure templates belong
    to the profile and stay.
+
+### Rows waiting for a profile
+
+PSF Guard cannot tell which N.I.N.A. profile is open, so it gives a project it
+adds the profile ID `00000000-0000-4000-8000-505346475244`. No N.I.N.A. profile
+has this ID. It appears on `project`, `exposuretemplate`, `exposureplan` and
+`acquiredimage` rows in planning and merge bundles. The plugin writes those
+rows as follows:
+
+- A new project goes into the profile the plugin runs in.
+- A new plan or image goes into its project's profile, so a project placed
+  before the user switched profiles keeps its plans together. When the project
+  is waiting too, the row goes into the running profile.
+- A waiting template goes into the profile of each plan that uses it. When that
+  profile has a template with the same filter, gain, offset, binning and readout
+  mode, the plan uses it. Otherwise the plugin adds a copy. The first copy keeps
+  PSF Guard's GUID, so later pulls update it in place; a copy in a second
+  profile gets a new GUID. Templates no plan uses are not written.
+- A row Target Scheduler already holds keeps its profile, so switching profiles
+  between pulls does not move a project. A row an older plugin wrote with the
+  waiting ID moves to the running profile.
+
+Rows with any other profile ID are written as they arrive.
+
+A server that may send waiting rows advertises `waiting_profile_v1`. It sends
+them as they are only to a plugin that lists `waiting_profile_v1` in
+`X-PSF-Guard-Plugin-Capabilities`. For any other client, the server first gives
+them a real profile: the one the plugin last reported with its star-detection
+settings, else the catalog's only profile. When it knows neither, it sends them
+unchanged, and N.I.N.A. hides them until the plugin is updated.
+
+### Which rows a push carries
+
+Each N.I.N.A. profile pairs with its own PSF Guard catalog, so merge, planning
+and grade bundles carry only the running profile's projects. Rows still on the
+waiting ID stay out: the plugin places waiting rows as it pulls, so any left in
+the file came from an older plugin, perhaps for another profile's catalog. The
+next pull from their own catalog places them. The plugin compares profile IDs
+without regard to case.
+
+- `project` rows match by `profileId`.
+- `target` and `ruleweight` rows follow their project, and `exposureplan` rows
+  follow their target.
+- `acquiredimage` and `imagedata` rows match by the image's `profileId` or
+  follow its project, so grades of frames whose project was deleted still go
+  out.
+- `exposuretemplate` rows match by `profileId`, plus any template a carried
+  plan uses.
+- A current-target reconcile looks for the target only in those projects.
+- A capture bundle carries the captured image's rows whatever their profile.
+
+When the plugin cannot tell which profile is running, a bundle carries every
+row in the file. PSF Guard never deletes rows a bundle leaves out.
 
 Image-ownership checks use one grouped scan for all candidate projects, not a
 separate capture-history scan per deletion. A frame counts toward both

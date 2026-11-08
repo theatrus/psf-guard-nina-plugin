@@ -11,6 +11,30 @@ namespace PsfGuard.Nina.Sync.Client;
 
 public sealed class PsfGuardSyncClient : IDisposable
 {
+    /// <summary>The plugin's release version, sent with every request for the server's logs.</summary>
+    public const string PluginVersionHeader = "X-PSF-Guard-Plugin-Version";
+
+    /// <summary>
+    /// What this plugin supports, comma-separated, sent with every request. The server
+    /// matches its behavior to this list rather than to the version, since a local
+    /// build reports 0.1.0.0.
+    /// </summary>
+    public const string PluginCapabilitiesHeader = "X-PSF-Guard-Plugin-Capabilities";
+
+    /// <summary>
+    /// The plugin writes rows on PSF Guard's waiting profile into the N.I.N.A.
+    /// profile it runs in. A server sends a plugin without it those rows under a
+    /// real profile instead.
+    /// </summary>
+    public const string WaitingProfileCapability = "waiting_profile_v1";
+
+    /// <summary>Everything this plugin lists in <see cref="PluginCapabilitiesHeader"/>.</summary>
+    public static IReadOnlyList<string> PluginCapabilities { get; } = [WaitingProfileCapability];
+
+    /// <summary>The release version, as the release build stamps it on this assembly.</summary>
+    public static string PluginVersion { get; } =
+        typeof(PsfGuardSyncClient).Assembly.GetName().Version?.ToString() ?? "unknown";
+
     private static readonly TimeSpan DefaultExportTimeout = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan DefaultPreviewTimeout = TimeSpan.FromMinutes(10);
     private readonly HttpClient httpClient;
@@ -20,6 +44,13 @@ public sealed class PsfGuardSyncClient : IDisposable
         this.httpClient = httpClient;
         this.httpClient.BaseAddress = NormalizeBaseUri(baseUri);
         this.httpClient.Timeout = TimeSpan.FromMinutes(10);
+        var headers = this.httpClient.DefaultRequestHeaders;
+        headers.Remove(PluginVersionHeader);
+        headers.Remove(PluginCapabilitiesHeader);
+        headers.TryAddWithoutValidation(PluginVersionHeader, PluginVersion);
+        headers.TryAddWithoutValidation(
+            PluginCapabilitiesHeader,
+            string.Join(",", PluginCapabilities));
 
         if (!string.IsNullOrWhiteSpace(apiToken))
         {

@@ -164,6 +164,11 @@ Restart N.I.N.A., open **Plugins > Installed > PSF Guard Sync**, and configure:
 4. Confirm the connection, then select the optional Target Scheduler database.
 5. Choose the automatic capture, image upload, and catalog-reconcile policies.
 
+Pair each N.I.N.A. profile with its own PSF Guard database, for example one for
+the reducer and one without it. Pushes and reconciles send only the active
+profile's projects. Pulls write what the paired database sends; new projects
+go into the active profile.
+
 If the saved credential was deleted from Windows Credential Manager, generate a
 **new** one-time code in PSF Guard and pair again. A previously used pairing code
 cannot be reused. The plugin reports **Credential missing** when it detects the
@@ -233,7 +238,8 @@ Use **Test connection** before enabling automatic work. When direct image
 upload is selected, the check also verifies that the chosen PSF Guard database
 has enabled its separate upload gate.
 
-Use **Reconcile** for an immediate full Target Scheduler snapshot. It waits for
+Use **Reconcile** for an immediate snapshot of the active profile's Target
+Scheduler projects. It waits for
 PSF Guard to create the preview and follows **Apply remote previews
 automatically**; when automatic apply is off, the status reports the preview ID
 left ready for review. The plugin keeps that manual preview available beside the

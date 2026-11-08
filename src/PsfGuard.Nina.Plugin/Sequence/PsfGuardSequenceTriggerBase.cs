@@ -90,9 +90,11 @@ public abstract class PsfGuardSequenceTriggerBase : SequenceTrigger, IValidatabl
         var serverUri = new Uri(destination.ServerUrl, UriKind.Absolute);
         var reader = new TargetSchedulerCatalogReader(
             captureSettings.TargetSchedulerDatabase,
-            TargetSchedulerVersion());
+            TargetSchedulerVersion(),
+            captureSettings.ProfileId);
         var writer = new TargetSchedulerCatalogWriter(
-            captureSettings.TargetSchedulerDatabase);
+            captureSettings.TargetSchedulerDatabase,
+            captureSettings.ProfileId);
         return new SyncOrchestrator(
             destination.CatalogId,
             captureSettings.AutoApplyPushes,

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Data.SQLite;
+using System.Text;
 using PsfGuard.Nina.Sync.Protocol;
 
 namespace PsfGuard.Nina.Sync.TargetScheduler;
@@ -63,10 +64,31 @@ public sealed class TargetSchedulerCatalogWriter
         "psf_guard_director_project",
     ];
 
+    /// <summary>
+    /// The profile PSF Guard gives a row no N.I.N.A. profile has claimed. No
+    /// N.I.N.A. profile has this ID: the writer puts those rows in the profile
+    /// it runs in. PSF Guard holds the same value, so it must not change.
+    /// </summary>
+    internal const string PlacedByPluginProfile = "00000000-0000-4000-8000-505346475244";
+
+    private const string ProfileColumn = "profileId";
+
+    private const string TemplateColumn = "exposureTemplateId";
+
     private readonly string databasePath;
 
-    public TargetSchedulerCatalogWriter(string databasePath)
+    private readonly string? runningProfile;
+
+    /// <param name="databasePath">The Target Scheduler database.</param>
+    /// <param name="runningProfile">
+    /// The N.I.N.A. profile the plugin runs in. Without one, rows waiting for a
+    /// profile are skipped.
+    /// </param>
+    public TargetSchedulerCatalogWriter(string databasePath, Guid? runningProfile = null)
     {
+        this.runningProfile = runningProfile is { } profile && profile != Guid.Empty
+            ? profile.ToString("D")
+            : null;
         this.databasePath = Path.GetFullPath(
             string.IsNullOrWhiteSpace(databasePath)
                 ? TargetSchedulerPaths.DefaultDatabasePath
@@ -274,6 +296,7 @@ public sealed class TargetSchedulerCatalogWriter
             connection,
             transaction,
             bundle,
+            runningProfile,
             result,
             preservePlanProgress: true,
             cancellationToken);
@@ -320,6 +343,7 @@ public sealed class TargetSchedulerCatalogWriter
                 connection,
                 transaction,
                 bundle,
+                runningProfile,
                 result,
                 preservePlanProgress: false,
                 cancellationToken);
@@ -330,6 +354,7 @@ public sealed class TargetSchedulerCatalogWriter
                 bundle.Tables["acquiredimage"],
                 maps,
                 affectedExposurePlans,
+                runningProfile,
                 result,
                 cancellationToken);
 
@@ -373,10 +398,12 @@ public sealed class TargetSchedulerCatalogWriter
         SQLiteConnection connection,
         SQLiteTransaction transaction,
         CatalogBundle bundle,
+        string? runningProfile,
         MutableApplyResult result,
         bool preservePlanProgress,
         CancellationToken cancellationToken)
     {
+        var waitingTemplates = new WaitingTemplates();
         var templateMap = UpsertGuidTable(
             connection,
             transaction,
@@ -384,6 +411,8 @@ public sealed class TargetSchedulerCatalogWriter
             bundle.Tables["exposuretemplate"],
             [],
             [],
+            runningProfile,
+            waitingTemplates,
             result,
             cancellationToken);
         var projectMap = UpsertGuidTable(
@@ -393,6 +422,8 @@ public sealed class TargetSchedulerCatalogWriter
             bundle.Tables["project"],
             [],
             [],
+            runningProfile,
+            null,
             result,
             cancellationToken);
         UpsertRuleWeights(
@@ -409,6 +440,8 @@ public sealed class TargetSchedulerCatalogWriter
             bundle.Tables["target"],
             [new ForeignKeyMap("projectId", projectMap, false)],
             [],
+            runningProfile,
+            null,
             result,
             cancellationToken);
         var exposurePlanMap = UpsertGuidTable(
@@ -421,6 +454,8 @@ public sealed class TargetSchedulerCatalogWriter
                 new ForeignKeyMap("exposureTemplateId", templateMap, false),
             ],
             preservePlanProgress ? ["acquired", "accepted"] : [],
+            runningProfile,
+            waitingTemplates,
             result,
             cancellationToken);
 
@@ -433,6 +468,7 @@ public sealed class TargetSchedulerCatalogWriter
         BundleTable table,
         PlanningMaps maps,
         ISet<long> affectedExposurePlans,
+        string? runningProfile,
         MutableApplyResult result,
         CancellationToken cancellationToken)
     {
@@ -496,8 +532,23 @@ public sealed class TargetSchedulerCatalogWriter
 
             RemapOptionalForeignKey(values, "exposureId", maps.ExposurePlans);
             AddExposurePlan(affectedExposurePlans, DatabaseValue(values, "exposureId"));
+            var destination = destinations.GetValueOrDefault(guid);
+            if (WaitsForProfile(values))
+            {
+                // An image keeps a real profile it has, else takes its project's.
+                var profile = destination is not null && !WaitsForProfile(destination.Values)
+                    ? destination.Values.GetValueOrDefault(ProfileColumn)
+                    : ProfileForWaitingRow(connection, transaction, tableName, values, runningProfile);
+                if (profile is null)
+                {
+                    result.Skipped++;
+                    continue;
+                }
 
-            if (destinations.TryGetValue(guid, out var destination))
+                values[ProfileColumn] = profile;
+            }
+
+            if (destination is not null)
             {
                 idMap[sourceId] = destination.Id;
                 AddExposurePlan(
@@ -633,6 +684,8 @@ public sealed class TargetSchedulerCatalogWriter
         BundleTable table,
         IReadOnlyList<ForeignKeyMap> foreignKeys,
         IReadOnlyCollection<string> preserveProgress,
+        string? runningProfile,
+        WaitingTemplates? waitingTemplates,
         MutableApplyResult result,
         CancellationToken cancellationToken)
     {
@@ -662,6 +715,7 @@ public sealed class TargetSchedulerCatalogWriter
 
             var values = IntersectValues(sourceRow, destinationColumns, excludeId: true);
             var mappingFailed = false;
+            long? deferredTemplate = null;
             foreach (var foreignKey in foreignKeys)
             {
                 if (!values.TryGetValue(foreignKey.Column, out var sourceValue)
@@ -674,6 +728,13 @@ public sealed class TargetSchedulerCatalogWriter
                 if (foreignKey.Map.TryGetValue(sourceForeignId, out var destinationId))
                 {
                     values[foreignKey.Column] = destinationId;
+                }
+                else if (waitingTemplates is not null
+                    && foreignKey.Column == TemplateColumn
+                    && waitingTemplates.Holds(sourceForeignId))
+                {
+                    // Placed below, in the profile this plan ends up in.
+                    deferredTemplate = sourceForeignId;
                 }
                 else if (foreignKey.ZeroWhenMissing)
                 {
@@ -699,6 +760,7 @@ public sealed class TargetSchedulerCatalogWriter
                 continue;
             }
 
+            var waitingForProfile = WaitsForProfile(values);
             if (matches.Count == 1)
             {
                 var destinationId = matches[0];
@@ -709,6 +771,23 @@ public sealed class TargetSchedulerCatalogWriter
                     tableName,
                     destinationId,
                     values.Keys);
+                if (waitingForProfile)
+                {
+                    // A row keeps the profile it was placed in, so switching
+                    // profiles between pulls cannot move a project.
+                    values[ProfileColumn] = WaitsForProfile(current)
+                        ? ProfileForWaitingRow(connection, transaction, tableName, values, runningProfile)
+                            ?? PlacedByPluginProfile
+                        : current.GetValueOrDefault(ProfileColumn);
+                }
+
+                if (!TryPlaceDeferredTemplate(
+                    connection, transaction, values, deferredTemplate, waitingTemplates, result))
+                {
+                    result.Skipped++;
+                    continue;
+                }
+
                 foreach (var column in preserveProgress)
                 {
                     if (current.TryGetValue(column, out var currentValue))
@@ -729,6 +808,32 @@ public sealed class TargetSchedulerCatalogWriter
             }
             else
             {
+                if (waitingForProfile)
+                {
+                    if (waitingTemplates is not null && tableName == "exposuretemplate")
+                    {
+                        // Written with the first plan that uses it.
+                        waitingTemplates.Add(sourceId, values);
+                        continue;
+                    }
+
+                    if (ProfileForWaitingRow(connection, transaction, tableName, values, runningProfile)
+                        is not { } profile)
+                    {
+                        result.Skipped++;
+                        continue;
+                    }
+
+                    values[ProfileColumn] = profile;
+                }
+
+                if (!TryPlaceDeferredTemplate(
+                    connection, transaction, values, deferredTemplate, waitingTemplates, result))
+                {
+                    result.Skipped++;
+                    continue;
+                }
+
                 foreach (var column in preserveProgress)
                 {
                     if (values.ContainsKey(column))
@@ -1558,6 +1663,116 @@ public sealed class TargetSchedulerCatalogWriter
         }
     }
 
+    /// <summary>
+    /// The profile for a row still on PSF Guard's waiting ID. A plan or an
+    /// image goes where its project already is, so a project placed in one
+    /// profile keeps its plans together after the user switches profiles.
+    /// Anything else, or a row whose project is waiting too, goes into the
+    /// running profile. <c>null</c> when neither is known.
+    /// </summary>
+    private static string? ProfileForWaitingRow(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        string tableName,
+        IReadOnlyDictionary<string, object?> values,
+        string? runningProfile)
+    {
+        var sql = tableName switch
+        {
+            "exposureplan" when values.GetValueOrDefault("targetId") is { } target and not DBNull =>
+                ("SELECT p.profileId FROM target t JOIN project p ON p.Id = t.projectId WHERE t.Id = @id", target),
+            "acquiredimage" when values.GetValueOrDefault("projectId") is { } project and not DBNull =>
+                ("SELECT profileId FROM project WHERE Id = @id", project),
+            _ => ((string, object)?)null,
+        };
+        if (sql is { } query)
+        {
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = query.Item1;
+            command.Parameters.AddWithValue("@id", query.Item2);
+            if (command.ExecuteScalar() is string projectProfile
+                && !string.IsNullOrWhiteSpace(projectProfile)
+                && !PlacedByPluginProfile.Equals(projectProfile, StringComparison.OrdinalIgnoreCase))
+            {
+                return projectProfile;
+            }
+        }
+
+        return runningProfile;
+    }
+
+    /// <summary>
+    /// Points a plan at its waiting template, placed in the plan's profile.
+    /// False when the plan has no profile to place it in.
+    /// </summary>
+    private static bool TryPlaceDeferredTemplate(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        Dictionary<string, object?> values,
+        long? deferredTemplate,
+        WaitingTemplates? waitingTemplates,
+        MutableApplyResult result)
+    {
+        if (deferredTemplate is not { } template || waitingTemplates is null)
+        {
+            return true;
+        }
+
+        if (values.GetValueOrDefault(ProfileColumn) is not string planProfile
+            || string.IsNullOrWhiteSpace(planProfile)
+            || WaitsForProfile(values))
+        {
+            return false;
+        }
+
+        values[TemplateColumn] = waitingTemplates.Place(
+            connection,
+            transaction,
+            template,
+            planProfile,
+            result);
+        return true;
+    }
+
+    private static bool WaitsForProfile(IReadOnlyDictionary<string, object?> values) =>
+        values.TryGetValue(ProfileColumn, out var profile)
+        && PlacedByPluginProfile.Equals(profile as string, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The running profile's template with the same filter and camera
+    /// settings, so merging a plan does not repeat a template the profile has.
+    /// </summary>
+    private static long? FindSameTemplate(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        IReadOnlyDictionary<string, object?> values)
+    {
+        if (!values.TryGetValue("filtername", out var filter) || filter is null)
+        {
+            return null;
+        }
+
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        var sql = new StringBuilder(
+            "SELECT Id FROM exposuretemplate WHERE profileId = @profile COLLATE NOCASE "
+            + "AND LOWER(TRIM(filtername)) = LOWER(TRIM(@filter))");
+        command.Parameters.AddWithValue("@profile", values[ProfileColumn]);
+        command.Parameters.AddWithValue("@filter", filter);
+        foreach (var column in new[] { "gain", "offset", "bin", "readoutmode" })
+        {
+            if (values.TryGetValue(column, out var value))
+            {
+                sql.Append($" AND {Quote(column)} IS @{column}");
+                command.Parameters.AddWithValue($"@{column}", value ?? DBNull.Value);
+            }
+        }
+
+        command.CommandText = sql.Append(" ORDER BY Id LIMIT 1").ToString();
+        return command.ExecuteScalar() is { } id and not DBNull ? Convert.ToInt64(id) : null;
+    }
+
     private static List<long> FindIdsByGuid(
         SQLiteConnection connection,
         SQLiteTransaction transaction,
@@ -1960,6 +2175,67 @@ public sealed class TargetSchedulerCatalogWriter
 
     private static string Quote(string identifier) =>
         $"\"{identifier.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+
+    /// <summary>
+    /// New templates waiting for a profile. Each goes into the profile of a
+    /// plan that uses it: the profile's own template with the same settings
+    /// when it has one, else a copy. Templates belong to a profile, so this
+    /// keeps a plan and its template together however many pulls run.
+    /// </summary>
+    private sealed class WaitingTemplates
+    {
+        private readonly Dictionary<long, Dictionary<string, object?>> rows = [];
+
+        private readonly Dictionary<(long Source, string Profile), long> placed = [];
+
+        private readonly HashSet<long> guidTaken = [];
+
+        public void Add(long sourceId, Dictionary<string, object?> values) =>
+            rows[sourceId] = values;
+
+        public bool Holds(long sourceId) => rows.ContainsKey(sourceId);
+
+        public long Place(
+            SQLiteConnection connection,
+            SQLiteTransaction transaction,
+            long sourceId,
+            string profile,
+            MutableApplyResult result)
+        {
+            if (placed.TryGetValue((sourceId, profile), out var id))
+            {
+                return id;
+            }
+
+            var values = new Dictionary<string, object?>(rows[sourceId], StringComparer.OrdinalIgnoreCase)
+            {
+                [ProfileColumn] = profile,
+            };
+            if (FindSameTemplate(connection, transaction, values) is { } same)
+            {
+                id = same;
+                result.Unchanged++;
+            }
+            else
+            {
+                // The first copy keeps PSF Guard's GUID, so later pulls match it
+                // and update it in place. Plans in two profiles can share one
+                // PSF Guard template; a copy in a second profile takes a GUID
+                // of its own, since each profile needs its own row.
+                var sourceGuid = values.GetValueOrDefault("guid") as string;
+                values["guid"] = sourceGuid is not null
+                    && guidTaken.Add(sourceId)
+                    && FindIdsByGuid(connection, transaction, "exposuretemplate", sourceGuid).Count == 0
+                        ? sourceGuid
+                        : Guid.NewGuid().ToString();
+                id = InsertRow(connection, transaction, "exposuretemplate", values);
+                result.Inserted++;
+            }
+
+            placed[(sourceId, profile)] = id;
+            return id;
+        }
+    }
 
     private sealed record ForeignKeyMap(
         string Column,

@@ -37,17 +37,43 @@ public sealed class TargetSchedulerCatalogReader
         "imagedata",
     ];
 
+    // A pushed bundle covers the running profile's projects. Each N.I.N.A.
+    // profile is a separate PSF Guard catalog, so other profiles' rows stay
+    // out. So do rows on PSF Guard's waiting ID: this plugin places them as
+    // it pulls, so any left in the file came from an older plugin, perhaps
+    // for another profile's catalog.
+    private const string ScopedProjects =
+        "SELECT Id FROM project WHERE profileId = @scopeProfile COLLATE NOCASE";
+
+    // Images match by their own profile as well, so grades of frames whose
+    // project was deleted still go out.
+    private const string ScopedImages =
+        "profileId = @scopeProfile COLLATE NOCASE OR projectId IN (" + ScopedProjects + ")";
+
+    private const string ScopedTargets =
+        "SELECT Id FROM target WHERE projectid IN (" + ScopedProjects + ")";
+
     private readonly string databasePath;
     private readonly string productVersion;
     private readonly long maximumThumbnailBytes;
     private readonly Action<string>? tableReadObserver;
+    private readonly string? runningProfile;
 
-    public TargetSchedulerCatalogReader(string databasePath, string productVersion)
+    /// <param name="runningProfile">
+    /// The N.I.N.A. profile the plugin runs in. When set, catalog bundles
+    /// carry only that profile's projects and images. A capture bundle always
+    /// carries its image.
+    /// </param>
+    public TargetSchedulerCatalogReader(
+        string databasePath,
+        string productVersion,
+        Guid? runningProfile = null)
         : this(
             databasePath,
             productVersion,
             DefaultMaximumThumbnailBytes,
-            tableReadObserver: null)
+            tableReadObserver: null,
+            runningProfile)
     {
     }
 
@@ -55,8 +81,12 @@ public sealed class TargetSchedulerCatalogReader
         string databasePath,
         string productVersion,
         long maximumThumbnailBytes,
-        Action<string>? tableReadObserver = null)
+        Action<string>? tableReadObserver = null,
+        Guid? runningProfile = null)
     {
+        this.runningProfile = runningProfile is { } profile && profile != Guid.Empty
+            ? profile.ToString("D")
+            : null;
         this.databasePath = Path.GetFullPath(
             string.IsNullOrWhiteSpace(databasePath)
                 ? TargetSchedulerPaths.DefaultDatabasePath
@@ -104,7 +134,7 @@ public sealed class TargetSchedulerCatalogReader
             {
                 throw new TimeoutException(
                     "Target Scheduler did not expose a unique record for saved light "
-                    + $"{Path.GetFileName(imagePath)} within {timeout.TotalSeconds:0} seconds.");
+                    + $"{SavedImagePaths.FileName(imagePath)} within {timeout.TotalSeconds:0} seconds.");
             }
 
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
@@ -266,7 +296,7 @@ public sealed class TargetSchedulerCatalogReader
                     return exactPath;
                 }
 
-                var fileName = Path.GetFileName(normalizedPath);
+                var fileName = SavedImagePaths.FileName(normalizedPath);
                 if (string.IsNullOrWhiteSpace(fileName))
                 {
                     return null;
@@ -446,14 +476,19 @@ public sealed class TargetSchedulerCatalogReader
                     connection,
                     transaction,
                     "target",
-                    "WHERE name = @targetName COLLATE NOCASE",
-                    [new SQLiteParameter("@targetName", targetName)],
+                    runningProfile is null
+                        ? "WHERE name = @targetName COLLATE NOCASE"
+                        : "WHERE name = @targetName COLLATE NOCASE AND projectid IN ("
+                            + ScopedProjects + ")",
+                    [new SQLiteParameter("@targetName", targetName), .. ScopeParameters()],
                     cancellationToken,
                     progress: progress);
                 if (target.Rows.Count == 0)
                 {
                     throw new InvalidOperationException(
-                        $"Target Scheduler does not contain a target named '{targetName}'.");
+                        runningProfile is null
+                            ? $"Target Scheduler does not contain a target named '{targetName}'."
+                            : $"The running N.I.N.A. profile has no Target Scheduler target named '{targetName}'.");
                 }
 
                 if (target.Rows.Count > 1)
@@ -555,16 +590,18 @@ public sealed class TargetSchedulerCatalogReader
             (connection, transaction, schemaVersion) =>
             {
                 var tables = new SortedDictionary<string, BundleTable>(StringComparer.Ordinal);
+                IReadOnlyCollection<SQLiteParameter> scoped = [.. parameters, .. ScopeParameters()];
                 foreach (var tableName in tableNames)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+                    var whereClause = ScopeWhere(tableName);
                     if (tableName.Equals("imagedata", StringComparison.OrdinalIgnoreCase))
                     {
                         EnsureThumbnailBudget(
                             connection,
                             transaction,
-                            whereClause: null,
-                            parameters,
+                            whereClause,
+                            scoped,
                             cancellationToken);
                     }
 
@@ -572,8 +609,8 @@ public sealed class TargetSchedulerCatalogReader
                         connection,
                         transaction,
                         tableName,
-                        whereClause: null,
-                        parameters,
+                        whereClause,
+                        scoped,
                         cancellationToken,
                         progress: progress);
                 }
@@ -631,8 +668,8 @@ public sealed class TargetSchedulerCatalogReader
                     connection,
                     transaction,
                     "acquiredimage",
-                    reviewedOnly ? "WHERE gradingStatus <> 0" : null,
-                    [],
+                    GradesWhere(reviewedOnly),
+                    ScopeParameters(),
                     cancellationToken,
                     ["guid", "gradingStatus", "rejectreason"]);
                 return new BundleSnapshot(
@@ -646,6 +683,48 @@ public sealed class TargetSchedulerCatalogReader
 
         return CreateBundle(SyncOperation.PushGrades, snapshot, cancellationToken);
     }
+
+    private SQLiteParameter[] ScopeParameters() =>
+        runningProfile is null
+            ? []
+            : [new SQLiteParameter("@scopeProfile", runningProfile)];
+
+    /// <summary>
+    /// The filter that keeps a catalog bundle to the running profile. Rows
+    /// follow their project, so a bundle never refers to a project it leaves
+    /// out.
+    /// </summary>
+    private string? ScopeWhere(string table)
+    {
+        if (runningProfile is null)
+        {
+            return null;
+        }
+
+        return table.ToLowerInvariant() switch
+        {
+            "project" => "WHERE profileId = @scopeProfile COLLATE NOCASE",
+            "ruleweight" or "target" => $"WHERE projectid IN ({ScopedProjects})",
+            "exposureplan" => $"WHERE targetid IN ({ScopedTargets})",
+            "exposuretemplate" =>
+                "WHERE profileId = @scopeProfile COLLATE NOCASE "
+                + $"OR Id IN (SELECT exposureTemplateId FROM exposureplan WHERE targetid IN ({ScopedTargets}))",
+            "acquiredimage" => $"WHERE {ScopedImages}",
+            "imagedata" =>
+                $"WHERE acquiredimageid IN (SELECT Id FROM acquiredimage WHERE {ScopedImages})",
+            _ => throw new InvalidOperationException(
+                $"No profile scope for Target Scheduler table {table}."),
+        };
+    }
+
+    private string? GradesWhere(bool reviewedOnly) =>
+        (reviewedOnly, runningProfile is null) switch
+        {
+            (true, true) => "WHERE gradingStatus <> 0",
+            (false, true) => null,
+            (true, false) => $"WHERE gradingStatus <> 0 AND ({ScopedImages})",
+            (false, false) => $"WHERE {ScopedImages}",
+        };
 
     private BundleTable ReadById(
         SQLiteConnection connection,
@@ -1114,7 +1193,7 @@ public sealed class TargetSchedulerCatalogReader
             StringComparison.OrdinalIgnoreCase);
 
     private static string? FileName(string? path) =>
-        string.IsNullOrWhiteSpace(path) ? null : Path.GetFileName(NormalizePath(path));
+        string.IsNullOrWhiteSpace(path) ? null : SavedImagePaths.FileName(NormalizePath(path));
 
     private static CaptureMetadata ReadCaptureMetadata(string? metadata)
     {
