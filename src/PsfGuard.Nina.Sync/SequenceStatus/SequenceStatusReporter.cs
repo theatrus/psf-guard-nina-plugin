@@ -78,6 +78,7 @@ public sealed class SequenceStatusReporter
     private bool lastRunning;
     private string? session;
     private long sessionStartMs;
+    private long? attemptedReportMs;
     private object? activityIdentity;
     private long activityStartedMs;
     private long? activityUntilMs;
@@ -238,6 +239,11 @@ public sealed class SequenceStatusReporter
             }
         }
 
+        if (Volatile.Read(ref recheckRequested) != 0)
+        {
+            return SequenceStatusTickResult.Idle;
+        }
+
         if (capability == Capability.Unsupported || session is null)
         {
             DropSession();
@@ -247,7 +253,7 @@ public sealed class SequenceStatusReporter
         var report = new SequenceStatusReport
         {
             SessionId = session,
-            ReportedAtMs = observedAtMs,
+            ReportedAtMs = Math.Max(observedAtMs, attemptedReportMs ?? observedAtMs),
             Running = observation.Running,
             Operation = observation.Running ? observation.Operation : null,
             Activity = activity,
@@ -265,9 +271,14 @@ public sealed class SequenceStatusReporter
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(requestTimeout);
             // WaitAsync bounds the wait even if the call ignores its token.
-            await send(currentDestination, report, timeout.Token)
+            attemptedReportMs = report.ReportedAtMs;
+            var response = await send(currentDestination, report, timeout.Token)
                 .WaitAsync(timeout.Token)
                 .ConfigureAwait(false);
+            if (!response.Accepted)
+            {
+                throw new InvalidOperationException("PSF Guard did not accept the sequence activity report.");
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -391,6 +402,7 @@ public sealed class SequenceStatusReporter
     {
         session = null;
         sent = null;
+        attemptedReportMs = null;
         activityIdentity = null;
         activityUntilMs = null;
     }

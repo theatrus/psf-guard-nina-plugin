@@ -4,6 +4,7 @@ using NINA.Core.Utility;
 using NINA.Equipment.Interfaces.Mediator;
 using NINA.Sequencer.Interfaces.Mediator;
 using PsfGuard.Nina.Plugin.SequenceActivity;
+using PsfGuard.Nina.Sync.Client;
 using PsfGuard.Nina.Sync.Queue;
 using PsfGuard.Nina.Sync.SequenceStatus;
 
@@ -32,16 +33,37 @@ public sealed partial class PsfGuardPlugin
     private SequenceStatusReporter CreateSequenceStatusReporter() => new(
         async (destination, token) =>
         {
-            using var client = CreateQueuedClient(destination);
+            using var client = await CreateSequenceClientAsync(destination, token).ConfigureAwait(false);
             return await client.SupportsSequenceStatusAsync(token).ConfigureAwait(false);
         },
         async (destination, report, token) =>
         {
-            using var client = CreateQueuedClient(destination);
+            using var client = await CreateSequenceClientAsync(destination, token).ConfigureAwait(false);
             return await client.SendSequenceStatusAsync(report, token).ConfigureAwait(false);
         },
         sequenceEventLog,
         message => Logger.Info($"PSF Guard Sync: {message}"));
+
+    private async Task<PsfGuardSyncClient> CreateSequenceClientAsync(
+        RemoteQueueDestination destination,
+        CancellationToken token)
+    {
+        // A queued capture keeps its original destination. Live status must
+        // still belong to the active pairing when each request starts.
+        var dispatcher = Application.Current?.Dispatcher;
+        var current = dispatcher is null || dispatcher.CheckAccess()
+            ? SequenceReportDestination()
+            : await dispatcher.InvokeAsync(SequenceReportDestination, DispatcherPriority.Background, token)
+                .Task.ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        if (destination != current)
+        {
+            sequenceStatusReporter.RequestRecheck();
+            throw new OperationCanceledException("Sequence reporting settings changed.");
+        }
+
+        return CreateQueuedClient(destination);
+    }
 
     /// <summary>
     /// The paired server and catalog to report to, or null when reporting is
@@ -81,7 +103,15 @@ public sealed partial class PsfGuardPlugin
 
         try
         {
-            sequenceEvents.Start();
+            try
+            {
+                sequenceEvents.Start();
+            }
+            catch (Exception exception)
+            {
+                Logger.Info($"PSF Guard Sync: Some recent sequence events are unavailable ({exception.GetType().Name}).");
+            }
+
             var cancellation = new CancellationTokenSource();
             sequenceReporting = cancellation;
             var mediator = sequenceMediator;
@@ -184,7 +214,7 @@ public sealed partial class PsfGuardPlugin
                     if (!failureLogged)
                     {
                         failureLogged = true;
-                        Logger.Info($"PSF Guard Sync could not read the Advanced Sequencer for activity reports: {exception.Message}");
+                        Logger.Info($"PSF Guard Sync could not read the Advanced Sequencer for activity reports: {exception.GetType().Name}");
                     }
                 }
             }

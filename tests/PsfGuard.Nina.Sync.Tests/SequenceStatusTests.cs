@@ -410,6 +410,45 @@ public sealed class SequenceStatusTests
         Assert.Equal(session, harness.Sent[^1].SessionId);
     }
 
+    [Fact]
+    public async Task AClockCorrectionAndRejectedStopKeepTheSessionUntilTheServerAcceptsIt()
+    {
+        var harness = new Harness();
+        Assert.Equal(SequenceStatusTickResult.Sent, await harness.TickAsync(Destination, Running(Exposure())));
+        var running = harness.Sent[^1];
+
+        harness.Clock.SetUtcNow(harness.Clock.GetUtcNow().AddHours(-1));
+        harness.Accepted = false;
+        Assert.Equal(SequenceStatusTickResult.Failed, await harness.TickAsync(Destination, Stopped()));
+        Assert.Equal(running.ReportedAtMs, harness.Sent[^1].ReportedAtMs);
+        Assert.Equal(running.SessionId, harness.Reporter.SessionId);
+
+        harness.Accepted = true;
+        harness.Advance(TimeSpan.FromSeconds(15));
+        Assert.Equal(SequenceStatusTickResult.Sent, await harness.TickAsync(Destination, Stopped()));
+        Assert.False(harness.Sent[^1].Running);
+        Assert.Equal(running.SessionId, harness.Sent[^1].SessionId);
+        Assert.Null(harness.Reporter.SessionId);
+    }
+
+    [Fact]
+    public async Task PairingChangeDuringCapabilityCheckDiscardsTheOldObservation()
+    {
+        var harness = new Harness();
+        harness.CapabilityFailure = _ =>
+        {
+            harness.Reporter.RequestRecheck();
+            return Task.CompletedTask;
+        };
+        Assert.Equal(SequenceStatusTickResult.Idle, await harness.TickAsync(Destination, Running(Exposure())));
+        Assert.Empty(harness.Sent);
+
+        harness.CapabilityFailure = null;
+        var replacement = Destination with { CatalogId = "replacement" };
+        Assert.Equal(SequenceStatusTickResult.Sent, await harness.TickAsync(replacement, Running(Exposure())));
+        Assert.Equal(replacement, Assert.Single(harness.Destinations));
+    }
+
     public static TheoryData<string> UnusableCapabilityAnswers() => ["unreadable", "no list", "404", "405"];
 
     [Theory]
@@ -667,7 +706,7 @@ public sealed class SequenceStatusTests
 
                     Sent.Add(report);
                     Destinations.Add(destination);
-                    return new SequenceStatusResponse { Accepted = true };
+                    return new SequenceStatusResponse { Accepted = Accepted };
                 },
                 Events,
                 Log.Add,
@@ -688,6 +727,8 @@ public sealed class SequenceStatusTests
         public SequenceStatusReporter Reporter { get; }
 
         public bool Supported { get; set; } = true;
+
+        public bool Accepted { get; set; } = true;
 
         public HttpStatusCode SendStatus { get; set; } = HttpStatusCode.OK;
 
@@ -719,9 +760,17 @@ public sealed class SequenceStatusTests
 
         public override long TimestampFrequency => TimeSpan.TicksPerSecond;
 
-        public override long GetTimestamp() => now.UtcTicks;
+        private long timestamp;
 
-        public void Advance(TimeSpan by) => now += by;
+        public override long GetTimestamp() => timestamp;
+
+        public void SetUtcNow(DateTimeOffset value) => now = value;
+
+        public void Advance(TimeSpan by)
+        {
+            now += by;
+            timestamp += by.Ticks;
+        }
     }
 
     private sealed class StubHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> send)

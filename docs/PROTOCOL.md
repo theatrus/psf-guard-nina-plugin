@@ -714,6 +714,9 @@ message text or file paths.
 
 The plugin reads the sequencer once a second. It sends a report when anything
 but `reported_at_ms` changes, and every 15 seconds while the sequence runs.
+A clock correction cannot move `reported_at_ms` backwards within a session.
+The plugin checks the active pairing before each request and keeps a final
+report pending until the server accepts it.
 After a failed request that does not turn reports off, it waits 15 seconds
 before the next one and logs only the first failure. Each request times out after 10 seconds. Reports
 run on their own background loop and HTTP connections, and read N.I.N.A.'s

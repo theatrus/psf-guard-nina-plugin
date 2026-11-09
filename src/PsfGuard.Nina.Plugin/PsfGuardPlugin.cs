@@ -511,7 +511,9 @@ public sealed partial class PsfGuardPlugin : PluginBase, INotifyPropertyChanged,
         get => settings.ReportSequenceActivity;
         set
         {
+            if (value == settings.ReportSequenceActivity) return;
             settings.ReportSequenceActivity = value;
+            sequenceStatusReporter.RequestRecheck();
             RaisePropertyChanged();
         }
     }
