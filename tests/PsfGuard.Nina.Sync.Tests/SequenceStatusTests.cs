@@ -410,20 +410,20 @@ public sealed class SequenceStatusTests
         Assert.Equal(session, harness.Sent[^1].SessionId);
     }
 
-    public static TheoryData<string> CapabilityFailures() => ["network", "unreadable", "timeout", "credential"];
+    public static TheoryData<string> UnusableCapabilityAnswers() => ["unreadable", "no list", "404", "405"];
 
     [Theory]
-    [MemberData(nameof(CapabilityFailures))]
-    public async Task AFailedCapabilityCheckTurnsReportingOffUntilPairingChanges(string failure)
+    [MemberData(nameof(UnusableCapabilityAnswers))]
+    public async Task AnUnusableCapabilityAnswerTurnsReportingOffUntilPairingChanges(string failure)
     {
-        var harness = new Harness(requestTimeout: TimeSpan.FromMilliseconds(50))
+        var harness = new Harness
         {
             CapabilityFailure = failure switch
             {
-                "network" => _ => throw new HttpRequestException("connection refused"),
                 "unreadable" => _ => throw new JsonException("not JSON"),
-                "timeout" => _ => new TaskCompletionSource().Task,
-                _ => _ => throw new InvalidOperationException("credential missing"),
+                "no list" => _ => throw new InvalidDataException("no capabilities list"),
+                "404" => _ => throw new HttpRequestException("gone", null, HttpStatusCode.NotFound),
+                _ => _ => throw new HttpRequestException("gone", null, HttpStatusCode.MethodNotAllowed),
             },
         };
 
@@ -445,6 +445,72 @@ public sealed class SequenceStatusTests
         harness.Reporter.RequestRecheck();
         Assert.Equal(SequenceStatusTickResult.Sent, await harness.TickAsync(Destination, Running(Exposure())));
         Assert.Equal(2, harness.CapabilityChecks);
+    }
+
+    public static TheoryData<string> PassingCapabilityFailures() =>
+        ["timeout", "no status", "503", "401", "403", "credential"];
+
+    [Theory]
+    [MemberData(nameof(PassingCapabilityFailures))]
+    public async Task APassingCapabilityFailureIsRetriedAfterTheWait(string failure)
+    {
+        var harness = new Harness(requestTimeout: TimeSpan.FromMilliseconds(50))
+        {
+            CapabilityFailure = failure switch
+            {
+                "timeout" => _ => new TaskCompletionSource().Task,
+                "no status" => _ => throw new HttpRequestException("connection refused"),
+                "503" => _ => throw new HttpRequestException("restarting", null, HttpStatusCode.ServiceUnavailable),
+                "401" => _ => throw new HttpRequestException("unauthorized", null, HttpStatusCode.Unauthorized),
+                "403" => _ => throw new HttpRequestException("forbidden", null, HttpStatusCode.Forbidden),
+                _ => _ => throw new InvalidOperationException("credential missing"),
+            },
+        };
+
+        Assert.Equal(SequenceStatusTickResult.Failed, await harness.TickAsync(Destination, Running(Exposure())));
+        harness.Advance(TimeSpan.FromSeconds(14));
+        Assert.Equal(SequenceStatusTickResult.Waiting, await harness.TickAsync(Destination, Running(Exposure())));
+        harness.Advance(TimeSpan.FromSeconds(1));
+        Assert.Equal(SequenceStatusTickResult.Failed, await harness.TickAsync(Destination, Running(Exposure())));
+        harness.Advance(TimeSpan.FromSeconds(15));
+        Assert.Equal(SequenceStatusTickResult.Failed, await harness.TickAsync(Destination, Running(Exposure())));
+        Assert.Equal(3, harness.CapabilityChecks);
+        Assert.Equal(0, harness.Attempts);
+        var line = Assert.Single(harness.Log);
+        Assert.DoesNotContain("are off", line);
+        if (failure is "401" or "403" or "503")
+        {
+            Assert.Contains($"HTTP {failure}", line);
+        }
+
+        // The link comes back: the next check succeeds and reports flow.
+        harness.CapabilityFailure = null;
+        harness.Advance(TimeSpan.FromSeconds(15));
+        Assert.Equal(SequenceStatusTickResult.Sent, await harness.TickAsync(Destination, Running(Exposure())));
+        Assert.Equal(4, harness.CapabilityChecks);
+        harness.Advance(TimeSpan.FromSeconds(1));
+        Assert.Equal(SequenceStatusTickResult.Sent, await harness.TickAsync(Destination, Running(Exposure(completed: 2))));
+        Assert.Equal(4, harness.CapabilityChecks);
+        Assert.Single(harness.Log);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.Forbidden)]
+    [InlineData(HttpStatusCode.BadRequest)]
+    public async Task APassingSendFailureIsRetriedAfterTheWait(HttpStatusCode status)
+    {
+        var harness = new Harness { SendStatus = status };
+
+        Assert.Equal(SequenceStatusTickResult.Failed, await harness.TickAsync(Destination, Running(Exposure())));
+        harness.Advance(TimeSpan.FromSeconds(15));
+        Assert.Equal(SequenceStatusTickResult.Failed, await harness.TickAsync(Destination, Running(Exposure())));
+        harness.SendStatus = HttpStatusCode.OK;
+        harness.Advance(TimeSpan.FromSeconds(15));
+        Assert.Equal(SequenceStatusTickResult.Sent, await harness.TickAsync(Destination, Running(Exposure())));
+        Assert.Equal(1, harness.CapabilityChecks);
+        Assert.Single(harness.Log);
     }
 
     [Theory]

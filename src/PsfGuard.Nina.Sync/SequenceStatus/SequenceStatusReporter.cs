@@ -25,9 +25,9 @@ public enum SequenceStatusTickResult
     Failed,
 
     /// <summary>
-    /// The server cannot take reports: the capabilities check failed, or the
-    /// route answered 404, 405 or a body the plugin cannot read. Reporting
-    /// stays off until the pairing or the server changes, or N.I.N.A. restarts.
+    /// The server cannot take reports: the capabilities check or the route
+    /// answered 404, 405 or a body the plugin cannot read. Reporting stays off
+    /// until the pairing or the server changes, or N.I.N.A. restarts.
     /// </summary>
     Disabled,
 }
@@ -44,10 +44,12 @@ public enum SequenceStatusTickResult
 /// It sends nothing until the server lists <c>sequence_status_v1</c>, so an
 /// older server never sees a report. It reads the capabilities once per
 /// destination, and again when a new sequence starts on a server that did not
-/// list the capability. When the capabilities cannot be read, or the route
-/// answers 404, 405 or an unreadable body, it stops reporting to that
+/// list the capability. When the capabilities check or a report answers 404,
+/// 405 or a body the plugin cannot read, it stops reporting to that
 /// destination until <see cref="RequestRecheck"/>, a new destination, or a
-/// new reporter. It logs each of these at most once per destination.
+/// new reporter. Any other failure, such as a timeout, a dropped link, 5xx,
+/// 401 or 403, waits 15 seconds and tries again. It logs each of these at most
+/// once per destination.
 /// </para>
 /// <para>
 /// Call <see cref="TickAsync"/> from one loop at a time. Each request has a
@@ -217,9 +219,16 @@ public sealed class SequenceStatusReporter
             {
                 throw;
             }
+            catch (Exception exception) when (IsRouteUnavailable(exception))
+            {
+                return Disable("PSF Guard's capabilities answer could not be used", exception);
+            }
             catch (Exception exception)
             {
-                return Disable("could not read PSF Guard's capabilities", exception);
+                // A dropped link, a timeout, a restarting server, 401 or 403:
+                // the capability stays unknown and the check runs again later.
+                Fail(exception);
+                return SequenceStatusTickResult.Failed;
             }
 
             if (capability == Capability.Unsupported && !unsupportedLogged)

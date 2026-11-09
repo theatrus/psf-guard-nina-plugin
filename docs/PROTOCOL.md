@@ -609,10 +609,11 @@ is not a string, and treats an answer without that list as unreadable.
 
 - The list lacks `sequence_status_v1`: the plugin sends nothing and asks again
   when the next sequence starts.
-- The check fails, times out, or returns a body the plugin cannot read: the
-  plugin turns reports off for that server and catalog.
-- A report gets `404`, `405`, or an answer the plugin cannot read: the plugin
-  turns reports off in the same way.
+- The check or a report gets `404`, `405`, or a body the plugin cannot read:
+  the plugin turns reports off for that server and catalog.
+- The check or a report times out, loses its connection, or gets `5xx`, `401`,
+  `403` or `400`: the plugin waits 15 seconds and tries again, so a link that
+  drops while a sequence starts does not stop reports for the night.
 
 Reports stay off until you pair again, change the server or profile, or
 restart N.I.N.A. The plugin logs this once, at info level, and shows no error
@@ -713,8 +714,8 @@ message text or file paths.
 
 The plugin reads the sequencer once a second. It sends a report when anything
 but `reported_at_ms` changes, and every 15 seconds while the sequence runs.
-After any other failed request, it waits 15 seconds before the next one and
-logs only the first failure. Each request times out after 10 seconds. Reports
+After a failed request that does not turn reports off, it waits 15 seconds
+before the next one and logs only the first failure. Each request times out after 10 seconds. Reports
 run on their own background loop and HTTP connections, and read N.I.N.A.'s
 UI thread only to take the snapshot. A slow or failed report never blocks,
 delays or fails a sequencer instruction, upload, push, pull or reconcile.
@@ -730,8 +731,7 @@ The server answers in its standard envelope:
 session; the plugin carries on. An answer without `accepted` counts as a
 failure that turns reports off. `400` means a malformed body, and `401` or
 `403` mean what they mean for other Sync routes; the plugin retries each after
-15 seconds. As on every
-Sync route, the database must allow scheduler sync.
+15 seconds. As on every Sync route, the database must allow scheduler sync.
 
 **Report sequence activity to PSF Guard**, in the plugin's Connection
 settings, controls this exchange. It is on by default and does not depend on
