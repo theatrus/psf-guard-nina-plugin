@@ -751,7 +751,10 @@ public sealed partial class PsfGuardPlugin : PluginBase, INotifyPropertyChanged,
     private static PsfGuardSyncClient CreateClient(Uri serverUri, string apiToken) =>
         new(new HttpClient(), serverUri, apiToken);
 
-    private PsfGuardSyncClient CreateQueuedClient(RemoteQueueDestination destination)
+    private PsfGuardSyncClient CreateQueuedClient(RemoteQueueDestination destination) =>
+        CreatePairedClient(destination, allowRedirect: true);
+
+    private static PsfGuardSyncClient CreatePairedClient(RemoteQueueDestination destination, bool allowRedirect)
     {
         destination.Validate();
         var apiToken = WindowsCredentialStore.Read(destination.CredentialReference);
@@ -762,7 +765,7 @@ public sealed partial class PsfGuardPlugin : PluginBase, INotifyPropertyChanged,
         }
 
         return new PsfGuardSyncClient(
-            new HttpClient(),
+            new HttpClient(new HttpClientHandler { AllowAutoRedirect = allowRedirect }),
             new Uri(destination.ServerUrl, UriKind.Absolute),
             apiToken);
     }

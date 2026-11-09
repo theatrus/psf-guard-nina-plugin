@@ -62,7 +62,7 @@ public sealed partial class PsfGuardPlugin
             throw new OperationCanceledException("Sequence reporting settings changed.");
         }
 
-        return CreateQueuedClient(destination);
+        return CreatePairedClient(destination, allowRedirect: false);
     }
 
     /// <summary>
