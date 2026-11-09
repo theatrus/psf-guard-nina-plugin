@@ -9,10 +9,13 @@ using System.Windows;
 using System.Windows.Input;
 using NINA.Core.Utility;
 using NINA.Core.Utility.Notification;
+using NINA.Equipment.Interfaces.Mediator;
 using NINA.Plugin;
 using NINA.Plugin.Interfaces;
 using NINA.Profile.Interfaces;
+using NINA.Sequencer.Interfaces.Mediator;
 using NINA.WPF.Base.Interfaces.Mediator;
+using PsfGuard.Nina.Plugin.SequenceActivity;
 using PsfGuard.Nina.Sync;
 using PsfGuard.Nina.Sync.Client;
 using PsfGuard.Nina.Sync.Protocol;
@@ -25,7 +28,7 @@ namespace PsfGuard.Nina.Plugin;
 [Export(typeof(IPluginManifest))]
 [Export(typeof(IDeferredUploadController))]
 [PartCreationPolicy(CreationPolicy.Shared)]
-public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferredUploadController
+public sealed partial class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferredUploadController
 {
     private readonly IProfileService profileService;
     private readonly IImageSaveMediator imageSaveMediator;
@@ -60,8 +63,22 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
     [ImportingConstructor]
     public PsfGuardPlugin(
         IProfileService profileService,
-        IImageSaveMediator imageSaveMediator)
-        : this(profileService, imageSaveMediator, new PluginSettings(profileService))
+        IImageSaveMediator imageSaveMediator,
+        ISequenceMediator sequenceMediator,
+        IGuiderMediator guiderMediator,
+        ITelescopeMediator telescopeMediator,
+        IFocuserMediator focuserMediator,
+        IFilterWheelMediator filterWheelMediator)
+        : this(
+            profileService,
+            imageSaveMediator,
+            new PluginSettings(profileService),
+            sequenceSources: new NinaSequenceSources(
+                sequenceMediator,
+                guiderMediator,
+                telescopeMediator,
+                focuserMediator,
+                filterWheelMediator))
     {
     }
 
@@ -70,11 +87,21 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         IImageSaveMediator imageSaveMediator,
         PluginSettings settings,
         Action<string>? notifySuccess = null,
-        Action<string>? notifyError = null)
+        Action<string>? notifyError = null,
+        NinaSequenceSources? sequenceSources = null)
     {
         this.profileService = profileService;
         this.imageSaveMediator = imageSaveMediator;
         this.settings = settings;
+        sequenceMediator = sequenceSources?.Sequence;
+        filterWheelMediator = sequenceSources?.FilterWheel;
+        sequenceEvents = new NinaSequenceEvents(
+            sequenceEventLog,
+            sequenceSources is null ? null : imageSaveMediator,
+            sequenceSources?.Guider,
+            sequenceSources?.Telescope,
+            sequenceSources?.Focuser);
+        sequenceStatusReporter = CreateSequenceStatusReporter();
         this.notifySuccess = notifySuccess ?? Notification.ShowSuccess;
         this.notifyError = notifyError ?? Notification.ShowError;
         queue = new DurablePushQueue(
@@ -471,6 +498,20 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         }
     }
 
+    /// <summary>
+    /// Send what the Advanced Sequencer is doing to the paired server. On by
+    /// default and independent of <see cref="Enabled"/>.
+    /// </summary>
+    public bool ReportSequenceActivity
+    {
+        get => settings.ReportSequenceActivity;
+        set
+        {
+            settings.ReportSequenceActivity = value;
+            RaisePropertyChanged();
+        }
+    }
+
     public bool AutoApplyPushes
     {
         get => settings.AutoApplyPushes;
@@ -548,6 +589,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         starDetectionReporter.Start();
         _ = RefreshRefusedUploadCountAsync();
         captureWorker = Task.Run(ProcessCaptureWorkAsync);
+        StartSequenceReporting();
         SetBackgroundStatus(
             Enabled ? "Profile automation is active." : "Profile automation is disabled.");
         return base.Initialize();
@@ -560,6 +602,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
         WatchStarDetectionSettings(null);
         queue.RefusedUploadsChanged -= QueueRefusedUploadsChanged;
         imageUploadQueue.RefusedUploadsChanged -= QueueRefusedUploadsChanged;
+        await StopSequenceReportingAsync().ConfigureAwait(false);
         lifetime.Cancel();
         captureWork.Writer.TryComplete();
 
@@ -1160,6 +1203,7 @@ public sealed class PsfGuardPlugin : PluginBase, INotifyPropertyChanged, IDeferr
             nameof(UploadCalibrationImages),
             nameof(DeferImageUploads),
             nameof(SendStarDetectionSettings),
+            nameof(ReportSequenceActivity),
             nameof(AutoApplyPushes),
             nameof(IncludeThumbnails),
             nameof(RoundTripReconcile),

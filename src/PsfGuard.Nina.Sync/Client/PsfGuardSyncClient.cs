@@ -225,6 +225,34 @@ public sealed class PsfGuardSyncClient : IDisposable
         return response;
     }
 
+    /// <summary>The capability a server advertises when it accepts sequence status reports.</summary>
+    public const string SequenceStatusCapability = "sequence_status_v1";
+
+    /// <summary>True when the server lists <see cref="SequenceStatusCapability"/>.</summary>
+    public async Task<bool> SupportsSequenceStatusAsync(CancellationToken cancellationToken)
+    {
+        var capabilities = await GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
+        return capabilities.Capabilities.Contains(SequenceStatusCapability, StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// Send what the Advanced Sequencer is doing. The caller checks
+    /// <see cref="SupportsSequenceStatusAsync"/> first; this method does not.
+    /// A failed request throws <see cref="HttpRequestException"/> with the
+    /// response status, when there is one.
+    /// </summary>
+    public async Task<SequenceStatusResponse> SendSequenceStatusAsync(
+        SequenceStatusReport report,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "api/sync/v1/sequence-status")
+        {
+            Content = JsonContent.Create(report, options: ProtocolJson.Options),
+        };
+        return await SendAsync<SequenceStatusResponse>(request, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// True when a star-detection send failed because the server cannot take
     /// it: it lacks <see cref="StarDetectionProfileCapability"/>, or an older
