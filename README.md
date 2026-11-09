@@ -53,6 +53,10 @@ expose arbitrary SQL.
 - Sends the active profile's N.I.N.A. and Hocus Focus star-detection settings
   to the paired catalog, so PSF Guard measures stars the way this rig's
   N.I.N.A. does. **Send star-detection settings to PSF Guard** turns it off.
+- Reports what the Advanced Sequencer is doing to the paired catalog, so
+  PSF Guard's Live page shows the running instruction, target and exposure
+  progress. It sends no coordinates. **Report sequence activity to PSF Guard**
+  turns it off.
 - Background preview jobs for catalogs whose merge planning outlives an HTTP
   proxy timeout.
 

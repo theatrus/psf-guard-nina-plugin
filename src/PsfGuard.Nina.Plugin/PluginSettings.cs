@@ -116,6 +116,16 @@ internal sealed class PluginSettings
         set => options.SetValueBoolean(nameof(SendStarDetectionSettings), value);
     }
 
+    /// <summary>
+    /// Send what the Advanced Sequencer is doing to the paired catalog.
+    /// On by default and independent of <see cref="Enabled"/>.
+    /// </summary>
+    public bool ReportSequenceActivity
+    {
+        get => options.GetValueBoolean(nameof(ReportSequenceActivity), true);
+        set => options.SetValueBoolean(nameof(ReportSequenceActivity), value);
+    }
+
     public bool HasPairingCredential =>
         GetPairingAvailability(ServerUrl) == PairingAvailability.Ready;
 

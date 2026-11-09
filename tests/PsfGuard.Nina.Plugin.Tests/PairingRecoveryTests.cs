@@ -32,6 +32,10 @@ public sealed class PairingRecoveryTests
         Assert.True(fixture.Settings.SendStarDetectionSettings);
         fixture.Settings.SendStarDetectionSettings = false;
         Assert.False(fixture.Settings.SendStarDetectionSettings);
+        // So do sequence activity reports.
+        Assert.True(fixture.Settings.ReportSequenceActivity);
+        fixture.Settings.ReportSequenceActivity = false;
+        Assert.False(fixture.Settings.ReportSequenceActivity);
         Assert.False(fixture.Settings.Enabled);
 
         void AssertAutomationOff()

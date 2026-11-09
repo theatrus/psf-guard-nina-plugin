@@ -15,6 +15,7 @@ Guard server. Do not pair with a server unless you trust its operator.
 | Flat coverage sync | Scheduler flat-history records, target identifiers, capture settings, dates, and a persistent local origin identifier. |
 | Image upload | The complete saved FITS or XISF file, without removing or anonymizing its headers. Headers may contain observer names, site coordinates, equipment information, and other private information. |
 | Star-detection settings | The active profile's ID and name, the N.I.N.A. and Hocus Focus versions, N.I.N.A.'s star-detection, autostretch, and autofocus-crop settings, the selected star detector, focal length, pixel size, and Hocus Focus's detection settings. Sent automatically while the profile is paired and **Send star-detection settings to PSF Guard** is on; see the [protocol](PROTOCOL.md#star-detection-settings) for the full list. |
+| Sequence activity | While N.I.N.A.'s Advanced Sequencer runs: a random session ID, the running instructions' and containers' names, the current instruction's kind and start time, the target's name, the exposure's filter, length and counts, a cooling target temperature, the expected end of a time or altitude wait, and the times of the latest image save, dither, autofocus run and meridian flip. No coordinates, `Wait Until` expressions, `Break` reasons, message text or file paths. Sent automatically while the profile is paired, the server accepts it, and **Report sequence activity to PSF Guard** is on; see the [protocol](PROTOCOL.md#sequence-status). |
 | Pull or connection check | Paired catalog identifier, requested operation, protocol information, and authentication credential. |
 
 Pushes and reconciles send only the active N.I.N.A. profile's projects and
@@ -46,6 +47,13 @@ off, and it does not depend on profile automation. With it on, the plugin
 sends the settings once paired and again whenever they change. With it off,
 the plugin neither reads nor sends them. Turning it back on sends the current
 settings once.
+
+Pairing also starts sequence activity reports, if the server accepts them.
+While the Advanced Sequencer runs, the plugin tells PSF Guard which
+instruction runs, for which target, and the exposure progress.
+**Report sequence activity to PSF Guard**, under Connection, controls it. The
+option is on for every profile until you turn it off, and it does not depend
+on profile automation. With it off, the plugin sends no reports.
 
 Manual commands are explicit requests even when capture automation is off.
 Sequencer instructions and triggers run only when you add and execute them in

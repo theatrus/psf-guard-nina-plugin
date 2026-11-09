@@ -43,6 +43,9 @@ version is for logs. Current plugin capabilities:
 - `waiting_profile_v1`: the plugin writes rows on PSF Guard's waiting profile
   into the profile it runs in. See **Rows waiting for a profile**.
 
+The plugin does not list a capability for sequence status. It sends reports
+only to a server that lists `sequence_status_v1`; see **Sequence Status**.
+
 In the other direction, `GET /capabilities` returns the server's
 `product_version` and its own `capabilities` list. The plugin shows the version
 on **Test connection** and gates optional request fields on the list.
@@ -590,6 +593,152 @@ server without `star_detection_profile_v1`, or one that answers `404` or
 `405`, does not accept these settings. The plugin then waits six hours before asking
 that catalog again, or until the option is turned off and on. The sender runs
 in the background and never blocks or fails an exposure.
+
+## Sequence Status
+
+The plugin reports what N.I.N.A.'s Advanced Sequencer is doing, so PSF
+Guard's Live page can show it. The PSF Guard Director plugin sends a simpler
+form of this report to its own route.
+
+Servers advertise `sequence_status_v1` when they accept reports. The plugin
+sends no report to a server that does not list it, so an older server never
+sees this route. The plugin reads `/api/sync/v1/capabilities` before its first
+report to each server and catalog, and again after pairing or a server change.
+It reads only the `capabilities` list, ignores other fields and any entry that
+is not a string, and treats an answer without that list as unreadable.
+
+- The list lacks `sequence_status_v1`: the plugin sends nothing and asks again
+  when the next sequence starts.
+- The check or a report gets `404`, `405`, or a body the plugin cannot read:
+  the plugin turns reports off for that server and catalog.
+- The check or a report times out, loses its connection, or gets `5xx`, `401`,
+  `403` or `400`: the plugin waits 15 seconds and tries again, so a link that
+  drops while a sequence starts does not stop reports for the night.
+
+Reports stay off until you pair again, change the server or profile, or
+restart N.I.N.A. The plugin logs this once, at info level, and shows no error
+or notification.
+
+```http
+POST /api/sync/v1/sequence-status
+Authorization: Bearer <per-database remote API key>
+Content-Type: application/json
+```
+
+```json
+{
+  "session_id": "0f0c6f1e-6a43-4f43-9f0e-3b8c3b8f2a11",
+  "reported_at_ms": 1800000000000,
+  "running": true,
+  "fresh_for_ms": 45000,
+  "operation": "M 31 › Imaging › Smart Exposure",
+  "activity": {
+    "kind": "exposing",
+    "name": "Smart Exposure",
+    "started_ms": 1799999880000,
+    "until_ms": null,
+    "target_name": "M 31",
+    "filter": "L",
+    "exposure_seconds": 300,
+    "completed": 12,
+    "total": 30,
+    "target_temperature_c": null
+  },
+  "recent": {
+    "image_saved_ms": 1799999870000,
+    "dither_ms": 1799999600000,
+    "autofocus_ms": 1799990000000,
+    "meridian_flip_ms": null
+  }
+}
+```
+
+The body carries no catalog ID; the key identifies the database.
+
+- `session_id` is a new UUID in `D` format when the plugin first sees a
+  sequence running. The plugin keeps it while the sequence runs, sends one
+  last report with `running: false`, and then drops it.
+- `reported_at_ms` is the plugin's wall clock when it read the sequencer, in
+  Unix milliseconds. All `*_ms` times use the same clock.
+- `fresh_for_ms` is 45000. The server shows a report as stale after this long
+  without another.
+- `operation` lists the running instructions' paths, built as the Director
+  plugin builds them: up to four paths, each of up to four names joined with
+  ` › `, paths joined with ` · `, and ` · More instructions running` when
+  there are more. Names lose control characters, are cut to 80 characters,
+  and are trimmed. It is null when the sequence is not running.
+- `activity` is the most specific running instruction, or null:
+  - A running trigger comes first, since the sequence waits for it.
+  - Otherwise the plugin picks an instruction that is not a container, then
+    the deepest, then the first N.I.N.A. lists. An instruction inside a Smart
+    Exposure or Take Many Exposures reports as that instruction.
+  - `kind` comes from the instruction's type name, or its base types' names:
+
+    | `kind` | Instructions | Triggers |
+    | --- | --- | --- |
+    | `exposing` | Take Exposure, Take Many Exposures, Smart Exposure, Take Subframe Exposure | |
+    | `autofocus` | Run Autofocus | Autofocus after … |
+    | `dithering` | Dither | Dither after exposures |
+    | `guiding` | Start Guiding | Restore guiding |
+    | `meridian_flip` | | Meridian flip |
+    | `mount_slew` | Slew to Ra/Dec, Slew to Alt/Az | |
+    | `mount_center` | Center, Center and Rotate | Center after drift |
+    | `plate_solve` | Solve and Sync, Solve and Rotate | |
+    | `camera_cooling` | Cool Camera | |
+    | `camera_warming` | Warm Camera | |
+    | `time_wait` | Wait for Time, Wait for Time Span | |
+    | `astronomical_wait` | Wait for Altitude, Moon Altitude, Sun Altitude, Wait until Above Horizon | |
+    | `safety_wait` | Wait until Safe | |
+    | `condition_wait` | Wait Until (expression) | |
+    | `manual_wait` | Wait Indefinitely, Break, Message Box | |
+    | `other` | anything else | anything else |
+
+  - `name` is the instruction's name, cleaned as in `operation`.
+  - `started_ms` is when the plugin first saw this instruction running.
+  - `until_ms` is the expected end of a `time_wait` or `astronomical_wait`
+    when N.I.N.A. knows it. The plugin keeps the earlier value when a new
+    estimate moves by less than two seconds.
+  - `target_name` is the nearest enclosing target's name, including Target
+    Scheduler's current target.
+  - `filter`, `exposure_seconds`, `completed` and `total` appear only for
+    `exposing`. `completed` and `total` are the instruction's own exposure
+    counts; a single Take Exposure has no `total`. `filter` is the Smart
+    Exposure's filter, or else the filter wheel's current filter.
+  - `target_temperature_c` appears only for `camera_cooling`.
+- `recent` holds the times of the latest image save, dither, finished
+  autofocus run and finished meridian flip since the session started. Each is
+  null until it happens.
+
+The plugin sends no coordinates, `Wait Until` expressions, `Break` reasons,
+message text or file paths.
+
+The plugin reads the sequencer once a second. It sends a report when anything
+but `reported_at_ms` changes, and every 15 seconds while the sequence runs.
+A clock correction cannot move `reported_at_ms` backwards within a session.
+The plugin checks the active pairing before each request, refuses redirects,
+and keeps a final report pending until the server accepts it.
+After a failed request that does not turn reports off, it waits 15 seconds
+before the next one and logs only the first failure. Each request times out after 10 seconds. Reports
+run on their own background loop and HTTP connections, and read N.I.N.A.'s
+UI thread only to take the snapshot. A slow or failed report never blocks,
+delays or fails a sequencer instruction, upload, push, pull or reconcile.
+Nothing else in the plugin depends on `sequence_status_v1`.
+
+The server answers in its standard envelope:
+
+```json
+{"success": true, "data": {"accepted": true, "received_at_ms": 1800000000250}, "error": null}
+```
+
+`accepted` is false when the server holds a newer report for the same
+session; the plugin carries on. An answer without `accepted` counts as a
+failure that turns reports off. `400` means a malformed body, and `401` or
+`403` mean what they mean for other Sync routes; the plugin retries each after
+15 seconds. As on every Sync route, the database must allow scheduler sync.
+
+**Report sequence activity to PSF Guard**, in the plugin's Connection
+settings, controls this exchange. It is on by default and does not depend on
+profile automation. While it is off, the plugin sends no reports.
 
 ## Merge Rules
 

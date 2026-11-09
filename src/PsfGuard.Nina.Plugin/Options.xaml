@@ -118,6 +118,14 @@
             Style="{StaticResource OptionStyle}" />
           <TextBlock TextWrapping="Wrap"
             Text="PSF Guard uses them to count stars and measure HFR as N.I.N.A. does." />
+
+          <CheckBox
+            Margin="0,12,0,4"
+            Content="Report sequence activity to PSF Guard"
+            IsChecked="{Binding ReportSequenceActivity}"
+            Style="{StaticResource OptionStyle}" />
+          <TextBlock TextWrapping="Wrap"
+            Text="While the Advanced Sequencer runs, PSF Guard's Live page shows the current instruction, target, and exposure progress. The plugin sends no coordinates." />
         </StackPanel>
       </GroupBox>
 

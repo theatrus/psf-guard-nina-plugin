@@ -225,6 +225,50 @@ public sealed class PsfGuardSyncClient : IDisposable
         return response;
     }
 
+    /// <summary>The capability a server advertises when it accepts sequence status reports.</summary>
+    public const string SequenceStatusCapability = "sequence_status_v1";
+
+    /// <summary>
+    /// True when the server lists <see cref="SequenceStatusCapability"/>. It
+    /// reads only the <c>capabilities</c> list and ignores every other field
+    /// and any entry that is not a string, so older and newer servers'
+    /// answers parse. A body without that list throws
+    /// <see cref="InvalidDataException"/>.
+    /// </summary>
+    public async Task<bool> SupportsSequenceStatusAsync(CancellationToken cancellationToken)
+    {
+        var body = await GetAsync<JsonElement>("api/sync/v1/capabilities", cancellationToken)
+            .ConfigureAwait(false);
+        if (body.ValueKind != JsonValueKind.Object
+            || !body.TryGetProperty("capabilities", out var capabilities)
+            || capabilities.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException("PSF Guard's capabilities answer has no capabilities list.");
+        }
+
+        return capabilities.EnumerateArray().Any(entry =>
+            entry.ValueKind == JsonValueKind.String
+            && string.Equals(entry.GetString(), SequenceStatusCapability, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Send what the Advanced Sequencer is doing. The caller checks
+    /// <see cref="SupportsSequenceStatusAsync"/> first; this method does not.
+    /// A failed request throws <see cref="HttpRequestException"/> with the
+    /// response status, when there is one.
+    /// </summary>
+    public async Task<SequenceStatusResponse> SendSequenceStatusAsync(
+        SequenceStatusReport report,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "api/sync/v1/sequence-status")
+        {
+            Content = JsonContent.Create(report, options: ProtocolJson.Options),
+        };
+        return await SendAsync<SequenceStatusResponse>(request, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// True when a star-detection send failed because the server cannot take
     /// it: it lacks <see cref="StarDetectionProfileCapability"/>, or an older
