@@ -601,10 +601,22 @@ Guard's Live page can show it. The PSF Guard Director plugin sends a simpler
 form of this report to its own route.
 
 Servers advertise `sequence_status_v1` when they accept reports. The plugin
-reads `/api/sync/v1/capabilities` before its first report to each server and
-catalog, so pairing with another catalog or changing the server checks again.
-When the list lacks the capability, the plugin sends nothing and asks again
-when the next sequence starts.
+sends no report to a server that does not list it, so an older server never
+sees this route. The plugin reads `/api/sync/v1/capabilities` before its first
+report to each server and catalog, and again after pairing or a server change.
+It reads only the `capabilities` list, ignores other fields and any entry that
+is not a string, and treats an answer without that list as unreadable.
+
+- The list lacks `sequence_status_v1`: the plugin sends nothing and asks again
+  when the next sequence starts.
+- The check fails, times out, or returns a body the plugin cannot read: the
+  plugin turns reports off for that server and catalog.
+- A report gets `404`, `405`, or an answer the plugin cannot read: the plugin
+  turns reports off in the same way.
+
+Reports stay off until you pair again, change the server or profile, or
+restart N.I.N.A. The plugin logs this once, at info level, and shows no error
+or notification.
 
 ```http
 POST /api/sync/v1/sequence-status
@@ -701,9 +713,12 @@ message text or file paths.
 
 The plugin reads the sequencer once a second. It sends a report when anything
 but `reported_at_ms` changes, and every 15 seconds while the sequence runs.
-After a failed request, it waits 15 seconds before the next one. It logs the
-first failure and the first success after it, not every retry. Reports run
-in the background and never block or fail an instruction.
+After any other failed request, it waits 15 seconds before the next one and
+logs only the first failure. Each request times out after 10 seconds. Reports
+run on their own background loop and HTTP connections, and read N.I.N.A.'s
+UI thread only to take the snapshot. A slow or failed report never blocks,
+delays or fails a sequencer instruction, upload, push, pull or reconcile.
+Nothing else in the plugin depends on `sequence_status_v1`.
 
 The server answers in its standard envelope:
 
@@ -713,8 +728,9 @@ The server answers in its standard envelope:
 
 `accepted` is false when the server holds a newer report for the same
 session; the plugin carries on. An answer without `accepted` counts as a
-failure. `400` means a malformed body, and `401` or `403` mean what they mean
-for other Sync routes; the plugin retries each after 15 seconds. As on every
+failure that turns reports off. `400` means a malformed body, and `401` or
+`403` mean what they mean for other Sync routes; the plugin retries each after
+15 seconds. As on every
 Sync route, the database must allow scheduler sync.
 
 **Report sequence activity to PSF Guard**, in the plugin's Connection

@@ -79,14 +79,33 @@ public sealed partial class PsfGuardPlugin
             return;
         }
 
-        sequenceEvents.Start();
-        sequenceReporting = new CancellationTokenSource();
-        sequenceReportingTask = ReportSequenceAsync(sequenceMediator, sequenceReporting.Token);
+        try
+        {
+            sequenceEvents.Start();
+            var cancellation = new CancellationTokenSource();
+            sequenceReporting = cancellation;
+            var mediator = sequenceMediator;
+            var dispatcher = Application.Current?.Dispatcher;
+            sequenceReportingTask = Task.Run(() => ReportSequenceAsync(mediator, dispatcher, cancellation.Token));
+        }
+        catch (Exception exception)
+        {
+            // Sequence activity is optional; never let it stop the plugin.
+            Logger.Info($"PSF Guard Sync: sequence activity reports are off ({exception.GetType().Name}).");
+        }
     }
 
     private async Task StopSequenceReportingAsync()
     {
-        sequenceEvents.Stop();
+        try
+        {
+            sequenceEvents.Stop();
+        }
+        catch (Exception exception)
+        {
+            Logger.Error(exception);
+        }
+
         if (sequenceReporting is not { } cancellation)
         {
             return;
@@ -114,13 +133,18 @@ public sealed partial class PsfGuardPlugin
 
     /// <summary>
     /// Reads the sequencer once a second on N.I.N.A.'s UI thread, at
-    /// background priority, and passes the reading to the reporter. Network
-    /// work runs off the UI thread and never blocks the sequence.
+    /// background priority, and passes the reading to the reporter on a pool
+    /// thread. Only the reading runs on the UI thread. The loop has its own
+    /// HTTP clients and shares no queue, lock or connection with sync,
+    /// uploads or sequencer instructions, so a slow or failed report delays
+    /// only the next report.
     /// </summary>
-    private async Task ReportSequenceAsync(ISequenceMediator mediator, CancellationToken token)
+    private async Task ReportSequenceAsync(
+        ISequenceMediator mediator,
+        Dispatcher? dispatcher,
+        CancellationToken token)
     {
-        var dispatcher = Application.Current?.Dispatcher;
-        var readFailureLogged = false;
+        var failureLogged = false;
         string? CurrentFilter() => filterWheelMediator?.GetInfo() is { Connected: true } info
             ? info.SelectedFilter?.Name
             : null;
@@ -146,7 +170,6 @@ public sealed partial class PsfGuardPlugin
                         ? Capture()
                         : await dispatcher.InvokeAsync(Capture, DispatcherPriority.Background, token)
                             .Task.ConfigureAwait(false);
-                    readFailureLogged = false;
                     await sequenceStatusReporter
                         .TickAsync(destination, observation, observedAt, token)
                         .ConfigureAwait(false);
@@ -157,10 +180,11 @@ public sealed partial class PsfGuardPlugin
                 }
                 catch (Exception exception)
                 {
-                    if (!readFailureLogged)
+                    // Once per N.I.N.A. session, at info level: this is optional.
+                    if (!failureLogged)
                     {
-                        readFailureLogged = true;
-                        Logger.Warning($"PSF Guard Sync could not read the Advanced Sequencer: {exception.Message}");
+                        failureLogged = true;
+                        Logger.Info($"PSF Guard Sync could not read the Advanced Sequencer for activity reports: {exception.Message}");
                     }
                 }
             }

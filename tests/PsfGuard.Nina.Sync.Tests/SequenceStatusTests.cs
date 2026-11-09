@@ -386,7 +386,10 @@ public sealed class SequenceStatusTests
         harness.SendStatus = HttpStatusCode.OK;
         harness.Advance(TimeSpan.FromSeconds(15));
         Assert.Equal(SequenceStatusTickResult.Sent, await harness.TickAsync(Destination, Running(Exposure(completed: 2))));
-        Assert.Equal(2, harness.Log.Count);
+        harness.SendStatus = HttpStatusCode.BadGateway;
+        harness.Advance(TimeSpan.FromSeconds(1));
+        Assert.Equal(SequenceStatusTickResult.Failed, await harness.TickAsync(Destination, Running(Exposure(completed: 3))));
+        Assert.Single(harness.Log);
     }
 
     [Fact]
@@ -405,6 +408,131 @@ public sealed class SequenceStatusTests
         Assert.Equal(SequenceStatusTickResult.Sent, await harness.TickAsync(Destination, Stopped()));
         Assert.False(harness.Sent[^1].Running);
         Assert.Equal(session, harness.Sent[^1].SessionId);
+    }
+
+    public static TheoryData<string> CapabilityFailures() => ["network", "unreadable", "timeout", "credential"];
+
+    [Theory]
+    [MemberData(nameof(CapabilityFailures))]
+    public async Task AFailedCapabilityCheckTurnsReportingOffUntilPairingChanges(string failure)
+    {
+        var harness = new Harness(requestTimeout: TimeSpan.FromMilliseconds(50))
+        {
+            CapabilityFailure = failure switch
+            {
+                "network" => _ => throw new HttpRequestException("connection refused"),
+                "unreadable" => _ => throw new JsonException("not JSON"),
+                "timeout" => _ => new TaskCompletionSource().Task,
+                _ => _ => throw new InvalidOperationException("credential missing"),
+            },
+        };
+
+        Assert.Equal(SequenceStatusTickResult.Disabled, await harness.TickAsync(Destination, Running(Exposure())));
+        for (var tick = 0; tick < 5; tick++)
+        {
+            harness.Advance(TimeSpan.FromMinutes(1));
+            Assert.Equal(SequenceStatusTickResult.Disabled, await harness.TickAsync(Destination, Running(Exposure(completed: tick))));
+        }
+
+        // A new sequence does not ask again either.
+        Assert.Equal(SequenceStatusTickResult.Disabled, await harness.TickAsync(Destination, Stopped()));
+        Assert.Equal(SequenceStatusTickResult.Disabled, await harness.TickAsync(Destination, Running(Exposure())));
+        Assert.Equal(1, harness.CapabilityChecks);
+        Assert.Equal(0, harness.Attempts);
+        Assert.Contains("are off", Assert.Single(harness.Log));
+
+        harness.CapabilityFailure = null;
+        harness.Reporter.RequestRecheck();
+        Assert.Equal(SequenceStatusTickResult.Sent, await harness.TickAsync(Destination, Running(Exposure())));
+        Assert.Equal(2, harness.CapabilityChecks);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.NotFound)]
+    [InlineData(HttpStatusCode.MethodNotAllowed)]
+    public async Task ARouteThatAnswers404Or405TurnsReportingOffForThatDestination(HttpStatusCode status)
+    {
+        var harness = new Harness { SendStatus = status };
+
+        Assert.Equal(SequenceStatusTickResult.Disabled, await harness.TickAsync(Destination, Running(Exposure())));
+        harness.Advance(TimeSpan.FromMinutes(5));
+        Assert.Equal(SequenceStatusTickResult.Disabled, await harness.TickAsync(Destination, Running(Exposure(completed: 2))));
+        Assert.Equal(SequenceStatusTickResult.Disabled, await harness.TickAsync(Destination, Stopped()));
+        Assert.Equal(1, harness.Attempts);
+        Assert.Contains($"HTTP {(int)status}", Assert.Single(harness.Log));
+
+        // Another server or catalog starts fresh.
+        harness.SendStatus = HttpStatusCode.OK;
+        Assert.Equal(SequenceStatusTickResult.Sent, await harness.TickAsync(Destination with { CatalogId = "other" }, Running(Exposure())));
+    }
+
+    [Fact]
+    public async Task AnUnreadableAnswerTurnsReportingOff()
+    {
+        var harness = new Harness { SendFailure = _ => throw new JsonException("missing accepted") };
+
+        Assert.Equal(SequenceStatusTickResult.Disabled, await harness.TickAsync(Destination, Running(Exposure())));
+        harness.Advance(TimeSpan.FromMinutes(1));
+        Assert.Equal(SequenceStatusTickResult.Disabled, await harness.TickAsync(Destination, Running(Exposure(completed: 2))));
+        Assert.Equal(1, harness.Attempts);
+    }
+
+    [Fact]
+    public async Task ASlowReportTimesOutAndIsRetriedLater()
+    {
+        var harness = new Harness(requestTimeout: TimeSpan.FromMilliseconds(50))
+        {
+            // Ignores its token, so only the reporter's own bound ends the wait.
+            SendFailure = _ => new TaskCompletionSource().Task,
+        };
+
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        Assert.Equal(SequenceStatusTickResult.Failed, await harness.TickAsync(Destination, Running(Exposure())));
+        Assert.True(started.Elapsed < TimeSpan.FromSeconds(5));
+
+        harness.SendFailure = null;
+        harness.Advance(TimeSpan.FromSeconds(15));
+        Assert.Equal(SequenceStatusTickResult.Sent, await harness.TickAsync(Destination, Running(Exposure())));
+    }
+
+    [Fact]
+    public async Task OnlyTheCallersCancellationEscapes()
+    {
+        var harness = new Harness { SendFailure = token => Task.Delay(Timeout.Infinite, token) };
+        using var stop = new CancellationTokenSource();
+        var tick = harness.Reporter.TickAsync(Destination, Running(Exposure()), harness.Clock.GetUtcNow(), stop.Token);
+        stop.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => tick);
+    }
+
+    [Theory]
+    [InlineData("""{"capabilities":["sequence_status_v1"]}""", true)]
+    [InlineData("""{"success":true,"data":{"capabilities":[1,null,{"x":1},"sequence_status_v1"],"future_field":{"a":[1]}}}""", true)]
+    [InlineData("""{"protocol_version":1,"capabilities":["merge"],"catalogs":"not a list"}""", false)]
+    public async Task TheCapabilityCheckReadsOnlyTheCapabilitiesList(string body, bool expected)
+    {
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(new StubHandler(_ => Task.FromResult(Json(body)))),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        Assert.Equal(expected, await client.SupportsSequenceStatusAsync(CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData("""{"protocol_version":1,"catalogs":[]}""", typeof(InvalidDataException))]
+    [InlineData("""{"capabilities":"sequence_status_v1"}""", typeof(InvalidDataException))]
+    [InlineData("""<html>Not Found</html>""", typeof(JsonException))]
+    public async Task ACapabilitiesAnswerWithoutAListIsUnreadable(string body, Type expected)
+    {
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(new StubHandler(_ => Task.FromResult(Json(body)))),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        var exception = await Record.ExceptionAsync(() => client.SupportsSequenceStatusAsync(CancellationToken.None));
+        Assert.IsAssignableFrom(expected, exception);
+        Assert.True(SequenceStatusReporter.IsRouteUnavailable(exception!));
     }
 
     private static SequenceActivityObservation Exposure(int completed = 1) => new(
@@ -431,17 +559,27 @@ public sealed class SequenceStatusTests
 
     private sealed class Harness
     {
-        public Harness()
+        public Harness(TimeSpan? requestTimeout = null)
         {
             Reporter = new SequenceStatusReporter(
-                (destination, _) =>
+                async (destination, token) =>
                 {
                     CapabilityChecks++;
-                    return Task.FromResult(Supported);
+                    if (CapabilityFailure is { } failure)
+                    {
+                        await failure(token);
+                    }
+
+                    return Supported;
                 },
-                (destination, report, _) =>
+                async (destination, report, token) =>
                 {
                     Attempts++;
+                    if (SendFailure is { } failure)
+                    {
+                        await failure(token);
+                    }
+
                     if (SendStatus != HttpStatusCode.OK)
                     {
                         throw new HttpRequestException("refused", null, SendStatus);
@@ -449,12 +587,19 @@ public sealed class SequenceStatusTests
 
                     Sent.Add(report);
                     Destinations.Add(destination);
-                    return Task.FromResult(new SequenceStatusResponse { Accepted = true });
+                    return new SequenceStatusResponse { Accepted = true };
                 },
                 Events,
                 Log.Add,
-                Clock);
+                Clock,
+                requestTimeout ?? SequenceStatusReporter.RequestTimeout);
         }
+
+        /// <summary>Runs before the capability answer; throw or hang to simulate a failure.</summary>
+        public Func<CancellationToken, Task>? CapabilityFailure { get; set; }
+
+        /// <summary>Runs before the send; throw or hang to simulate a failure.</summary>
+        public Func<CancellationToken, Task>? SendFailure { get; set; }
 
         public FakeClock Clock { get; } = new();
 

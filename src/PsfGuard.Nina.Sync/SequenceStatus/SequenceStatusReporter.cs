@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using PsfGuard.Nina.Sync.Protocol;
 using PsfGuard.Nina.Sync.Queue;
 
@@ -20,7 +21,15 @@ public enum SequenceStatusTickResult
 
     Sent,
 
+    /// <summary>The request failed; the reporter tries again after 15 seconds.</summary>
     Failed,
+
+    /// <summary>
+    /// The server cannot take reports: the capabilities check failed, or the
+    /// route answered 404, 405 or a body the plugin cannot read. Reporting
+    /// stays off until the pairing or the server changes, or N.I.N.A. restarts.
+    /// </summary>
+    Disabled,
 }
 
 /// <summary>
@@ -28,13 +37,23 @@ public enum SequenceStatusTickResult
 /// reports. It starts a session when it first sees a sequence running, sends
 /// when the report changes or every 15 seconds while the sequence runs, and
 /// sends one last report with <c>running: false</c> before it drops the
-/// session. After a failure it waits 15 seconds. It reads the server's
-/// capabilities once per destination, and again when a new sequence starts
-/// on a server that did not list <c>sequence_status_v1</c>.
+/// session. After a failed report it waits 15 seconds.
 /// </summary>
 /// <remarks>
-/// Call <see cref="TickAsync"/> from one loop at a time. It never throws,
-/// except to stop when its token is cancelled.
+/// <para>
+/// It sends nothing until the server lists <c>sequence_status_v1</c>, so an
+/// older server never sees a report. It reads the capabilities once per
+/// destination, and again when a new sequence starts on a server that did not
+/// list the capability. When the capabilities cannot be read, or the route
+/// answers 404, 405 or an unreadable body, it stops reporting to that
+/// destination until <see cref="RequestRecheck"/>, a new destination, or a
+/// new reporter. It logs each of these at most once per destination.
+/// </para>
+/// <para>
+/// Call <see cref="TickAsync"/> from one loop at a time. Each request has a
+/// 10 second timeout. It never throws, except to stop when its token is
+/// cancelled.
+/// </para>
 /// </remarks>
 public sealed class SequenceStatusReporter
 {
@@ -50,6 +69,7 @@ public sealed class SequenceStatusReporter
     private readonly SequenceEventLog events;
     private readonly Action<string> log;
     private readonly TimeProvider time;
+    private readonly TimeSpan requestTimeout;
 
     private RemoteQueueDestination? destination;
     private Capability capability;
@@ -63,6 +83,8 @@ public sealed class SequenceStatusReporter
     private long sentAt;
     private long? failedAt;
     private bool failureLogged;
+    private bool unsupportedLogged;
+    private int recheckRequested;
 
     /// <param name="supportsStatus">True when the server lists <c>sequence_status_v1</c>.</param>
     /// <param name="send">Sends one report and returns the server's answer.</param>
@@ -74,12 +96,24 @@ public sealed class SequenceStatusReporter
         SequenceEventLog events,
         Action<string> log,
         TimeProvider? time = null)
+        : this(supportsStatus, send, events, log, time, RequestTimeout)
+    {
+    }
+
+    internal SequenceStatusReporter(
+        Func<RemoteQueueDestination, CancellationToken, Task<bool>> supportsStatus,
+        Func<RemoteQueueDestination, SequenceStatusReport, CancellationToken, Task<SequenceStatusResponse>> send,
+        SequenceEventLog events,
+        Action<string> log,
+        TimeProvider? time,
+        TimeSpan requestTimeout)
     {
         this.supportsStatus = supportsStatus;
         this.send = send;
         this.events = events;
         this.log = log;
         this.time = time ?? TimeProvider.System;
+        this.requestTimeout = requestTimeout;
     }
 
     private enum Capability
@@ -87,10 +121,18 @@ public sealed class SequenceStatusReporter
         Unknown,
         Supported,
         Unsupported,
+        Disabled,
     }
 
     /// <summary>The current session's ID, or null between sequences.</summary>
     public string? SessionId => session;
+
+    /// <summary>
+    /// Forget what the reporter learned about the server, so the next
+    /// reading checks its capabilities again. Call it after pairing. Safe to
+    /// call from any thread.
+    /// </summary>
+    public void RequestRecheck() => Interlocked.Exchange(ref recheckRequested, 1);
 
     /// <param name="currentDestination">
     /// The paired server and catalog, or null when the profile is not paired
@@ -104,12 +146,13 @@ public sealed class SequenceStatusReporter
         DateTimeOffset observedAt,
         CancellationToken cancellationToken)
     {
-        if (currentDestination != destination)
+        if (Interlocked.Exchange(ref recheckRequested, 0) == 1 || currentDestination != destination)
         {
             destination = currentDestination;
             capability = Capability.Unknown;
             failedAt = null;
             failureLogged = false;
+            unsupportedLogged = false;
             DropSession();
         }
 
@@ -118,6 +161,12 @@ public sealed class SequenceStatusReporter
             lastRunning = false;
             DropSession();
             return SequenceStatusTickResult.Idle;
+        }
+
+        if (capability == Capability.Disabled)
+        {
+            lastRunning = observation.Running;
+            return SequenceStatusTickResult.Disabled;
         }
 
         var observedAtMs = observedAt.ToUnixTimeMilliseconds();
@@ -157,8 +206,10 @@ public sealed class SequenceStatusReporter
             try
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeout.CancelAfter(RequestTimeout);
-                capability = await supportsStatus(currentDestination, timeout.Token).ConfigureAwait(false)
+                timeout.CancelAfter(requestTimeout);
+                capability = await supportsStatus(currentDestination, timeout.Token)
+                    .WaitAsync(timeout.Token)
+                    .ConfigureAwait(false)
                     ? Capability.Supported
                     : Capability.Unsupported;
             }
@@ -168,13 +219,13 @@ public sealed class SequenceStatusReporter
             }
             catch (Exception exception)
             {
-                Fail("Could not read PSF Guard's capabilities for sequence activity", exception);
-                return SequenceStatusTickResult.Failed;
+                return Disable("could not read PSF Guard's capabilities", exception);
             }
 
-            if (capability == Capability.Unsupported)
+            if (capability == Capability.Unsupported && !unsupportedLogged)
             {
-                log("PSF Guard does not accept sequence status reports. The plugin asks again when the next sequence starts.");
+                unsupportedLogged = true;
+                log("PSF Guard does not accept sequence activity reports. The plugin asks again when the next sequence starts.");
             }
         }
 
@@ -203,27 +254,29 @@ public sealed class SequenceStatusReporter
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(RequestTimeout);
-            await send(currentDestination, report, timeout.Token).ConfigureAwait(false);
+            timeout.CancelAfter(requestTimeout);
+            // WaitAsync bounds the wait even if the call ignores its token.
+            await send(currentDestination, report, timeout.Token)
+                .WaitAsync(timeout.Token)
+                .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
+        catch (Exception exception) when (IsRouteUnavailable(exception))
+        {
+            return Disable("PSF Guard cannot take sequence activity reports", exception);
+        }
         catch (Exception exception)
         {
-            Fail("Could not report sequence activity to PSF Guard", exception);
+            Fail(exception);
             return SequenceStatusTickResult.Failed;
         }
 
         sent = report;
         sentAt = time.GetTimestamp();
         failedAt = null;
-        if (failureLogged)
-        {
-            failureLogged = false;
-            log("Sequence activity reports reach PSF Guard again.");
-        }
 
         if (!observation.Running)
         {
@@ -288,7 +341,17 @@ public sealed class SequenceStatusReporter
         };
     }
 
-    private void Fail(string message, Exception exception)
+    /// <summary>
+    /// True when the server shows it has no usable route: 404 or 405, or an
+    /// answer the plugin cannot read.
+    /// </summary>
+    internal static bool IsRouteUnavailable(Exception exception) =>
+        exception is HttpRequestException { StatusCode: HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed }
+            or JsonException
+            or InvalidDataException;
+
+    /// <summary>A failure that may pass: wait, then try again. Logged once per destination.</summary>
+    private void Fail(Exception exception)
     {
         failedAt = time.GetTimestamp();
         if (failureLogged)
@@ -297,11 +360,23 @@ public sealed class SequenceStatusReporter
         }
 
         failureLogged = true;
-        var reason = exception is HttpRequestException { StatusCode: HttpStatusCode status }
+        log($"Could not report sequence activity to PSF Guard ({Reason(exception)}). "
+            + $"The plugin tries again every {FailureWait.TotalSeconds:0} seconds and does not log further failures.");
+    }
+
+    private SequenceStatusTickResult Disable(string message, Exception exception)
+    {
+        capability = Capability.Disabled;
+        DropSession();
+        log($"Sequence activity reports are off: {message} ({Reason(exception)}). "
+            + "They resume after pairing, a server change or a N.I.N.A. restart.");
+        return SequenceStatusTickResult.Disabled;
+    }
+
+    private static string Reason(Exception exception) =>
+        exception is HttpRequestException { StatusCode: HttpStatusCode status }
             ? $"HTTP {(int)status}"
             : exception.GetType().Name;
-        log($"{message} ({reason}). The plugin tries again every {FailureWait.TotalSeconds:0} seconds.");
-    }
 
     private void DropSession()
     {

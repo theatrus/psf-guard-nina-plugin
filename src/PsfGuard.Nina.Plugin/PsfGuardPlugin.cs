@@ -64,11 +64,13 @@ public sealed partial class PsfGuardPlugin : PluginBase, INotifyPropertyChanged,
     public PsfGuardPlugin(
         IProfileService profileService,
         IImageSaveMediator imageSaveMediator,
-        ISequenceMediator sequenceMediator,
-        IGuiderMediator guiderMediator,
-        ITelescopeMediator telescopeMediator,
-        IFocuserMediator focuserMediator,
-        IFilterWheelMediator filterWheelMediator)
+        // Optional, so the plugin loads even where N.I.N.A. lacks one; only
+        // sequence activity reports read them.
+        [Import(AllowDefault = true)] ISequenceMediator? sequenceMediator,
+        [Import(AllowDefault = true)] IGuiderMediator? guiderMediator,
+        [Import(AllowDefault = true)] ITelescopeMediator? telescopeMediator,
+        [Import(AllowDefault = true)] IFocuserMediator? focuserMediator,
+        [Import(AllowDefault = true)] IFilterWheelMediator? filterWheelMediator)
         : this(
             profileService,
             imageSaveMediator,
@@ -139,6 +141,7 @@ public sealed partial class PsfGuardPlugin : PluginBase, INotifyPropertyChanged,
                 _ =>
                 {
                     settings.ResetPairing();
+                    sequenceStatusReporter.RequestRecheck();
                     ClearPairingCode();
                     SetPendingPreview(null);
                     RaisePropertyChanged(nameof(CatalogId));
@@ -394,6 +397,7 @@ public sealed partial class PsfGuardPlugin : PluginBase, INotifyPropertyChanged,
             }
 
             settings.ServerUrl = value;
+            sequenceStatusReporter.RequestRecheck();
             RaisePropertyChanged();
             RaisePropertyChanged(nameof(HasStoredCredential));
             RaisePropertyChanged(nameof(PairingStatus));
@@ -1190,6 +1194,7 @@ public sealed partial class PsfGuardPlugin : PluginBase, INotifyPropertyChanged,
         SetPendingPreview(null);
         ClearPairingCode();
         settings.EnsurePairingMetadata();
+        sequenceStatusReporter.RequestRecheck();
         foreach (var property in new[]
         {
             nameof(ServerUrl),
@@ -1338,6 +1343,7 @@ public sealed partial class PsfGuardPlugin : PluginBase, INotifyPropertyChanged,
             PairingCode = string.Empty;
             settings.StorePairing(target, paired.CatalogId, paired.Token);
             starDetectionReporter.RequestSend();
+            sequenceStatusReporter.RequestRecheck();
             SetPendingPreview(null);
             RaisePropertyChanged(nameof(CatalogId));
             RaisePropertyChanged(nameof(HasStoredCredential));

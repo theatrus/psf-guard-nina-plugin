@@ -228,11 +228,27 @@ public sealed class PsfGuardSyncClient : IDisposable
     /// <summary>The capability a server advertises when it accepts sequence status reports.</summary>
     public const string SequenceStatusCapability = "sequence_status_v1";
 
-    /// <summary>True when the server lists <see cref="SequenceStatusCapability"/>.</summary>
+    /// <summary>
+    /// True when the server lists <see cref="SequenceStatusCapability"/>. It
+    /// reads only the <c>capabilities</c> list and ignores every other field
+    /// and any entry that is not a string, so older and newer servers'
+    /// answers parse. A body without that list throws
+    /// <see cref="InvalidDataException"/>.
+    /// </summary>
     public async Task<bool> SupportsSequenceStatusAsync(CancellationToken cancellationToken)
     {
-        var capabilities = await GetCapabilitiesAsync(cancellationToken).ConfigureAwait(false);
-        return capabilities.Capabilities.Contains(SequenceStatusCapability, StringComparer.Ordinal);
+        var body = await GetAsync<JsonElement>("api/sync/v1/capabilities", cancellationToken)
+            .ConfigureAwait(false);
+        if (body.ValueKind != JsonValueKind.Object
+            || !body.TryGetProperty("capabilities", out var capabilities)
+            || capabilities.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException("PSF Guard's capabilities answer has no capabilities list.");
+        }
+
+        return capabilities.EnumerateArray().Any(entry =>
+            entry.ValueKind == JsonValueKind.String
+            && string.Equals(entry.GetString(), SequenceStatusCapability, StringComparison.Ordinal));
     }
 
     /// <summary>
