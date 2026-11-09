@@ -494,6 +494,20 @@ public sealed class SequenceStatusTests
         Assert.Single(harness.Log);
     }
 
+    [Fact]
+    public async Task AnUnsuccessfulCapabilitiesEnvelopeIsAPassingFailure()
+    {
+        using var client = new PsfGuardSyncClient(
+            new HttpClient(new StubHandler(_ => Task.FromResult(Json(
+                """{"success":false,"data":null,"error":"scheduler sync is off"}""")))),
+            new Uri("https://psf.example/"),
+            "secret");
+
+        var exception = await Record.ExceptionAsync(() => client.SupportsSequenceStatusAsync(CancellationToken.None));
+        Assert.IsType<InvalidOperationException>(exception);
+        Assert.False(SequenceStatusReporter.IsRouteUnavailable(exception));
+    }
+
     [Theory]
     [InlineData(HttpStatusCode.ServiceUnavailable)]
     [InlineData(HttpStatusCode.Unauthorized)]
