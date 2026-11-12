@@ -1530,6 +1530,7 @@ public sealed partial class PsfGuardPlugin : PluginBase, INotifyPropertyChanged,
         $"{label}: {result.Inserted} inserted, {result.Updated} updated, "
         + $"{result.Unchanged} unchanged, {result.Skipped} skipped."
         + (result.DeletedProjectsSummary is null ? string.Empty : " " + result.DeletedProjectsSummary)
+        + (result.MergedTemplatesSummary is null ? string.Empty : " " + result.MergedTemplatesSummary)
         + (result.FlatHistory is null ? string.Empty : " " + result.FlatHistory.Summary);
 
     private static string FormatReleasedUploads(int count) => count switch

@@ -403,6 +403,9 @@ public sealed class TargetSchedulerCatalogWriter
         bool preservePlanProgress,
         CancellationToken cancellationToken)
     {
+        // Templates this database repeats are merged first, so a template
+        // from PSF Guard finds the one kept.
+        result.TemplatesMerged += MergeRepeatedTemplates(connection, transaction);
         var waitingTemplates = new WaitingTemplates();
         var templateMap = UpsertGuidTable(
             connection,
@@ -695,6 +698,14 @@ public sealed class TargetSchedulerCatalogWriter
         var rows = RowsByColumn(table);
         var duplicateGuids = FindDuplicateGuids(rows);
         var map = new Dictionary<long, long>();
+        // A template keeps its GUID's match only when no other row of the
+        // bundle claims that GUID.
+        var bundleGuids = tableName == "exposuretemplate"
+            ? rows.Select(row => OptionalText(row, "guid"))
+                .OfType<string>()
+                .ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : null;
+        var claimedTwins = new HashSet<long>();
 
         foreach (var sourceRow in rows)
         {
@@ -768,6 +779,32 @@ public sealed class TargetSchedulerCatalogWriter
                 // of mapping every plan to the first profile's copy.
                 waitingTemplates.Add(sourceId, values);
                 continue;
+            }
+
+            if (matches.Count == 0
+                && bundleGuids is not null
+                && FindTwinTemplate(connection, transaction, values) is { } twin)
+            {
+                // The database's own copy of this template under another
+                // GUID: two copies of one database each fill in their own
+                // GUIDs on upgrade. When the bundle has that template's GUID
+                // too, or another row took it in this pull, that row's
+                // settings win and this one only maps to it.
+                if ((twin.Guid is string twinGuid && bundleGuids.Contains(twinGuid))
+                    || !claimedTwins.Add(twin.Id))
+                {
+                    map[sourceId] = twin.Id;
+                    result.Unchanged++;
+                    continue;
+                }
+
+                // Otherwise it keeps its GUID and takes the edits.
+                matches = [twin.Id];
+                foreach (var key in values.Keys.Where(
+                    key => key.Equals("guid", StringComparison.OrdinalIgnoreCase)).ToArray())
+                {
+                    values[key] = twin.Guid;
+                }
             }
 
             if (matches.Count == 1)
@@ -1775,6 +1812,190 @@ public sealed class TargetSchedulerCatalogWriter
         return command.ExecuteScalar() is { } id and not DBNull ? Convert.ToInt64(id) : null;
     }
 
+    /// <summary>
+    /// The template in the row's profile with the same name and filter,
+    /// without case or surrounding spaces, and the same gain, offset,
+    /// binning and readout mode, with a camera default (NULL or below zero)
+    /// read as -1 and a binning below one as one; the oldest first.
+    /// </summary>
+    private static (long Id, object? Guid)? FindTwinTemplate(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        IReadOnlyDictionary<string, object?> values)
+    {
+        if (values.GetValueOrDefault(ProfileColumn) is not string profile
+            || values.GetValueOrDefault("name") is not string name
+            || values.GetValueOrDefault("filtername") is not string filter)
+        {
+            return null;
+        }
+
+        var present = ReadColumnNames(connection, transaction, "exposuretemplate");
+        string Column(string name) =>
+            present.Contains(name, StringComparer.OrdinalIgnoreCase) ? Quote(name) : "NULL";
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            $"SELECT Id, guid, {Column("gain")}, {Column("offset")}, {Column("bin")}, {Column("readoutmode")} "
+            + "FROM exposuretemplate WHERE profileId = @profile COLLATE NOCASE "
+            + "AND LOWER(TRIM(name)) = LOWER(TRIM(@name)) "
+            + "AND LOWER(TRIM(filtername)) = LOWER(TRIM(@filter)) ORDER BY Id";
+        command.Parameters.AddWithValue("@profile", profile);
+        command.Parameters.AddWithValue("@name", name);
+        command.Parameters.AddWithValue("@filter", filter);
+        var wanted = (
+            CameraSetting(values.GetValueOrDefault("gain")),
+            CameraSetting(values.GetValueOrDefault("offset")),
+            Binning(values.GetValueOrDefault("bin")),
+            CameraSetting(values.GetValueOrDefault("readoutmode")));
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            var guid = reader.IsDBNull(1) ? null : reader.GetValue(1);
+            var found = (
+                CameraSetting(reader.GetValue(2)),
+                CameraSetting(reader.GetValue(3)),
+                Binning(reader.GetValue(4)),
+                CameraSetting(reader.GetValue(5)));
+            if (found == wanted)
+            {
+                return (reader.GetInt64(0), guid);
+            }
+        }
+
+        return null;
+    }
+
+    private static long? WholeNumber(object? value) => value switch
+    {
+        long number => number,
+        int number => number,
+        double number when number == Math.Floor(number) => (long)number,
+        _ => null,
+    };
+
+    private static long CameraSetting(object? value) =>
+        WholeNumber(value) is { } number && number >= 0 ? number : -1;
+
+    private static long Binning(object? value) =>
+        WholeNumber(value) is { } number && number >= 1 ? number : 1;
+
+    /// <summary>
+    /// Merges the templates this database repeats: one profile, the same
+    /// name and filter without case or surrounding spaces, and every other
+    /// column but Id and guid equal, camera defaults read as for
+    /// <see cref="FindTwinTemplate"/>. Each copy's exposure plans move to
+    /// the template most plans use, then the oldest, and the copy is
+    /// deleted. Older syncs added such copies when two databases had given
+    /// one template different GUIDs. Returns the copies deleted.
+    /// </summary>
+    private static int MergeRepeatedTemplates(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction)
+    {
+        var columns = ReadColumnNames(connection, transaction, "exposuretemplate").ToArray();
+        var plans = new Dictionary<long, long>();
+        using (var count = connection.CreateCommand())
+        {
+            count.Transaction = transaction;
+            count.CommandText =
+                "SELECT exposureTemplateId, COUNT(*) FROM exposureplan "
+                + "WHERE exposureTemplateId IS NOT NULL GROUP BY exposureTemplateId";
+            using var reader = count.ExecuteReader();
+            while (reader.Read())
+            {
+                if (WholeNumber(reader.GetValue(0)) is { } id)
+                {
+                    plans[id] = plans.GetValueOrDefault(id) + reader.GetInt64(1);
+                }
+            }
+        }
+
+        var groups = new Dictionary<string, List<(long Id, long Plans)>>(StringComparer.Ordinal);
+        using (var read = connection.CreateCommand())
+        {
+            read.Transaction = transaction;
+            read.CommandText =
+                $"SELECT {string.Join(", ", columns.Select(Quote))} FROM exposuretemplate ORDER BY Id";
+            using var reader = read.ExecuteReader();
+            while (reader.Read())
+            {
+                long? id = null;
+                var key = new StringBuilder();
+                for (var index = 0; index < columns.Length; index++)
+                {
+                    var column = columns[index].ToLowerInvariant();
+                    var value = reader.IsDBNull(index) ? null : reader.GetValue(index);
+                    var folded = column switch
+                    {
+                        "id" => null,
+                        "guid" => null,
+                        "profileid" or "name" or "filtername" =>
+                            "T:" + ((value as string) ?? string.Empty).Trim().ToLowerInvariant(),
+                        "gain" or "offset" or "readoutmode" => "I:" + CameraSetting(value),
+                        "bin" => "I:" + Binning(value),
+                        _ => value switch
+                        {
+                            null => "null",
+                            long number => "I:" + number,
+                            int number => "I:" + number,
+                            double number => "R:" + number.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+                            string text => "T:" + text,
+                            byte[] bytes => "B:" + Convert.ToBase64String(bytes),
+                            _ => "O:" + value,
+                        },
+                    };
+                    if (column == "id")
+                    {
+                        id = WholeNumber(value);
+                    }
+
+                    if (folded is not null)
+                    {
+                        key.Append(column).Append('=').Append(folded).Append('\0');
+                    }
+                }
+
+                if (id is not { } templateId)
+                {
+                    continue;
+                }
+
+                var groupKey = key.ToString();
+                if (!groups.TryGetValue(groupKey, out var group))
+                {
+                    groups[groupKey] = group = [];
+                }
+
+                group.Add((templateId, plans.GetValueOrDefault(templateId)));
+            }
+        }
+
+        var merged = 0;
+        foreach (var group in groups.Values.Where(group => group.Count > 1))
+        {
+            var ordered = group.OrderByDescending(row => row.Plans).ThenBy(row => row.Id).ToList();
+            var kept = ordered[0].Id;
+            foreach (var copy in ordered.Skip(1))
+            {
+                using var move = connection.CreateCommand();
+                move.Transaction = transaction;
+                move.CommandText =
+                    "UPDATE exposureplan SET exposureTemplateId = @kept WHERE exposureTemplateId = @copy";
+                move.Parameters.AddWithValue("@kept", kept);
+                move.Parameters.AddWithValue("@copy", copy.Id);
+                move.ExecuteNonQuery();
+                using var delete = connection.CreateCommand();
+                delete.Transaction = transaction;
+                delete.CommandText = "DELETE FROM exposuretemplate WHERE Id = @copy";
+                delete.Parameters.AddWithValue("@copy", copy.Id);
+                merged += delete.ExecuteNonQuery();
+            }
+        }
+
+        return merged;
+    }
+
     private static List<long> FindIdsByGuid(
         SQLiteConnection connection,
         SQLiteTransaction transaction,
@@ -2305,6 +2526,8 @@ public sealed class TargetSchedulerCatalogWriter
 
         public int ProjectRowsSkipped { get; set; }
 
+        public int TemplatesMerged { get; set; }
+
         public List<string> ProjectMessages { get; } = [];
 
         public ApplyResult ToImmutable() => new()
@@ -2316,6 +2539,7 @@ public sealed class TargetSchedulerCatalogWriter
             ProjectsDeleted = ProjectsDeleted,
             ProjectsKept = ProjectsKept,
             ProjectRowsSkipped = ProjectRowsSkipped,
+            TemplatesMerged = TemplatesMerged,
             ProjectMessages = ProjectMessages.ToArray(),
         };
     }

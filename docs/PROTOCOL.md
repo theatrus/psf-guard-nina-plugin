@@ -305,6 +305,27 @@ them a real profile: the one the plugin last reported with its star-detection
 settings, else the catalog's only profile. When it knows neither, it sends them
 unchanged, and N.I.N.A. hides them until the plugin is updated.
 
+### Exposure templates a pull writes
+
+Target Scheduler lists every template a profile has, so a planning or merge
+pull must not add a second copy of a template the file already has.
+
+- Before it writes, the plugin merges the templates the file repeats: one
+  profile, the same name and filter (without case or surrounding spaces), and
+  every other column but `Id` and `guid` equal, with a gain, offset or
+  readout mode that is `NULL` or below zero read as -1 and a binning below one
+  read as one. Each copy's exposure plans move to the template most plans use,
+  then the oldest, and the copy is deleted. Older plugins added such copies
+  when two databases had given one template different GUIDs.
+- A template whose GUID the file lacks takes the file's template in the same
+  profile with the same name, filter, gain, offset, binning and readout mode.
+  That template keeps its own GUID and takes the bundle's settings, unless the
+  bundle also has its GUID or another row took it earlier in the same pull:
+  then that row's settings win and this row only maps to it.
+
+The apply result reports `TemplatesMerged`, and the plugin adds a sentence
+about them to the pull's status line.
+
 ### Which rows a push carries
 
 Each N.I.N.A. profile pairs with its own PSF Guard catalog, so merge, planning
@@ -335,7 +356,7 @@ when both links name the same project. All upserts and deletions commit
 together; a deletion failure rolls back target moves and other updates too.
 
 The apply result reports `ProjectsDeleted`, `ProjectsKept`,
-`ProjectRowsSkipped` and one message per project or skipped-row group, next to
+`ProjectRowsSkipped`, `TemplatesMerged` and one message per project or skipped-row group, next to
 the inserted, updated, unchanged and skipped counts.
 
 ## Refused Uploads
