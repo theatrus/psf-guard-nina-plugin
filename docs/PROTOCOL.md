@@ -310,21 +310,25 @@ unchanged, and N.I.N.A. hides them until the plugin is updated.
 Target Scheduler lists every template a profile has, so a planning or merge
 pull must not add a second copy of a template the file already has.
 
-- Before it writes, the plugin merges the templates the file repeats: one
-  profile, the same name and filter (without case or surrounding spaces), and
-  every other column but `Id` and `guid` equal, with a gain, offset or
-  readout mode that is `NULL` or below zero read as -1 and a binning below one
-  read as one. Each copy's exposure plans move to the template most plans use,
-  then the oldest, and the copy is deleted. Older plugins added such copies
-  when two databases had given one template different GUIDs.
-- A template whose GUID the file lacks takes the file's template in the same
-  profile with the same name, filter, gain, offset, binning and readout mode.
-  One identical to it in every other column comes first. Otherwise it takes
-  the only such template that the bundle has no GUID for and no earlier row
-  of the same pull took; with two or more, it is inserted instead. The
-  template it takes keeps its own GUID and takes the bundle's settings,
-  unless it was claimed: then that row's settings win and this row only maps
-  to it.
+- Before it writes, the plugin merges the running profile's templates that
+  repeat one another: the same name and filter (without case or surrounding
+  spaces) and every other column but `Id` and `guid` equal, with a gain,
+  offset or readout mode that is `NULL` or below zero read as -1 and a
+  binning below one read as one. Each copy's exposure plans move to the
+  template kept, and the copy is deleted. The template kept is one whose
+  GUID the bundle has, then the one most plans use, then the oldest. When
+  the plugin cannot tell which profile is running, it merges every
+  profile's. Older plugins added such copies when two databases had given
+  one template different GUIDs.
+- A template whose GUID the file lacks takes the oldest template in its
+  profile that is identical to it in every other column, read the same
+  way, and gives it the bundle's GUID, so later pulls match it by GUID.
+  When another row of the bundle has that template's GUID, or took it
+  earlier in the same pull, this row only maps to it. A template that
+  differs in any setting is never rewritten: the row is inserted.
+- A waiting template placed in a profile reads camera defaults the same
+  way when it looks for the profile's template with the same filter and
+  settings.
 
 The apply result reports `TemplatesMerged`, and the plugin adds a sentence
 about them to the pull's status line.

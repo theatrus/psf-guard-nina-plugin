@@ -20,8 +20,10 @@
   bundle's optional `psf_guard_removed_project` table lists its GUID with no
   `allowed_back_at`, the bundle's `project` table does not hold it as live,
   and Target Scheduler has no acquired images for it or its targets. That deletion
-  also removes its targets' `flathistory` rows; nothing else in a bundle
-  deletes rows. Request the table only from servers that advertise
+  also removes its targets' `flathistory` rows. The only other deletion is
+  the merge of the running profile's repeated exposure templates (identical
+  in every column but `Id` and `guid`), whose plans move to the copy kept
+  first; see `docs/PROTOCOL.md`. Nothing else in a bundle deletes rows. Request the table only from servers that advertise
   `project_tombstones_v1`.
 - Apply surviving target moves before project deletions so their IDs, flat
   history, exposure order and cadence stay intact. Keep the former project

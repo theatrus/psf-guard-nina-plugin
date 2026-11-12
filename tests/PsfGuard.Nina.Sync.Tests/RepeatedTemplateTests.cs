@@ -31,7 +31,9 @@ public sealed class RepeatedTemplateTests
             await ApplyAsync(writer, await BundleAsync(source, merge), merge);
             using var result = destination.Open();
             Assert.Equal("1", Scalar(result, "SELECT COUNT(*) FROM exposuretemplate"));
-            Assert.Equal("rig-template", Scalar(result, "SELECT guid FROM exposuretemplate"));
+            // The rig's template takes PSF Guard's GUID, so later pulls
+            // match it by GUID.
+            Assert.Equal("template-guid", Scalar(result, "SELECT guid FROM exposuretemplate"));
             Assert.Equal("40", Scalar(result, "SELECT exposureTemplateId FROM exposureplan WHERE guid = 'plan-guid'"));
         }
     }
@@ -181,6 +183,49 @@ public sealed class RepeatedTemplateTests
             Assert.Equal("300", Scalar(database, "SELECT defaultexposure FROM exposuretemplate WHERE Id = 40"));
             Assert.Equal("180", Scalar(database, "SELECT defaultexposure FROM exposuretemplate WHERE Id = 41"));
         }
+    }
+
+    [Fact]
+    public async Task TheMergeKeepsTheCopyWithPsfGuardsGuidAndOnlyInTheRunningProfile()
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0);
+        var running = Guid.NewGuid();
+        using (var connection = source.Open())
+        {
+            connection.Execute($"UPDATE exposuretemplate SET profileId = '{running}'");
+            connection.Execute($"UPDATE exposureplan SET profileId = '{running}'");
+            connection.Execute($"UPDATE project SET profileId = '{running}'");
+        }
+
+        using (var connection = destination.Open())
+        {
+            // #40 has PSF Guard's GUID and no plans; #41 is the rig's own
+            // copy with a plan. Another profile's copies stay.
+            connection.Execute($"""
+                INSERT INTO exposuretemplate (Id, profileId, name, filtername, gain, guid) VALUES
+                    (40, '{running}', 'L 120', 'L', 100, 'template-guid'),
+                    (41, '{running}', 'L 120', 'L', 100, 'rig-copy'),
+                    (50, 'other', 'L 120', 'L', 100, 'other-a'),
+                    (51, 'other', 'L 120', 'L', 100, 'other-b');
+                INSERT INTO project (Id, profileId, name, state, priority, guid)
+                    VALUES (60, '{running}', 'Rig only', 1, 1, 'rig-project');
+                INSERT INTO target (Id, name, active, ra, dec, projectId, guid)
+                    VALUES (61, 'Rig target', 1, 1.0, 2.0, 60, 'rig-target');
+                INSERT INTO exposureplan (Id, profileId, exposure, desired, acquired, accepted, targetId, exposureTemplateId, guid)
+                    VALUES (62, '{running}', 120, 10, 0, 0, 61, 41, 'rig-plan');
+                """);
+        }
+
+        var result = await new TargetSchedulerCatalogWriter(destination.Path, running)
+            .ApplyPlanningAsync(await BundleAsync(source, false), CancellationToken.None);
+        Assert.Equal(1, result.TemplatesMerged);
+        using var database = destination.Open();
+        Assert.Equal("0", Scalar(database, "SELECT COUNT(*) FROM exposuretemplate WHERE Id = 41"));
+        Assert.Equal("40", Scalar(database, "SELECT exposureTemplateId FROM exposureplan WHERE guid = 'rig-plan'"));
+        Assert.Equal("40", Scalar(database, "SELECT exposureTemplateId FROM exposureplan WHERE guid = 'plan-guid'"));
+        Assert.Equal("2", Scalar(database, "SELECT COUNT(*) FROM exposuretemplate WHERE profileId = 'other'"));
     }
 
     private static string? Scalar(System.Data.SQLite.SQLiteConnection connection, string sql)

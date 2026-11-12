@@ -813,7 +813,7 @@ public sealed class ProjectTombstoneTests(Xunit.Abstractions.ITestOutputHelper o
             INSERT INTO target (Id, name, active, ra, dec, projectId, guid)
                 VALUES (@targetId, @name, 1, 0.7, 41.2, @projectId, @targetGuid);
             INSERT INTO exposuretemplate (Id, profileId, name, filtername, gain, guid)
-                VALUES (@templateId, 'profile', 'L 120', 'L', 100, @templateGuid);
+                VALUES (@templateId, 'profile', @templateName, 'L', 100, @templateGuid);
             INSERT INTO exposureplan
                 (Id, profileId, exposure, desired, acquired, accepted, targetId, exposureTemplateId, guid)
                 VALUES (@planId, 'profile', 120, 20, 0, 0, @targetId, @templateId, @planGuid);
@@ -829,6 +829,8 @@ public sealed class ProjectTombstoneTests(Xunit.Abstractions.ITestOutputHelper o
                 ["@projectGuid"] = projectGuid,
                 ["@targetGuid"] = targetGuid,
                 ["@templateGuid"] = $"template-{offset + 1}",
+                // One template per project: identical ones would be merged.
+                ["@templateName"] = $"L 120 #{offset}",
                 ["@planGuid"] = $"plan-{offset + 1}",
             });
         if (withImage)
