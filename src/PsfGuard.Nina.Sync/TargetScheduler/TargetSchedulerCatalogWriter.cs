@@ -783,7 +783,12 @@ public sealed class TargetSchedulerCatalogWriter
 
             if (matches.Count == 0
                 && bundleGuids is not null
-                && FindTwinTemplate(connection, transaction, values) is { } twin)
+                && FindTwinTemplate(
+                    connection,
+                    transaction,
+                    values,
+                    (id, guid) => claimedTwins.Contains(id)
+                        || (guid is string text && bundleGuids.Contains(text))) is { } twin)
             {
                 // The database's own copy of this template under another
                 // GUID: two copies of one database each fill in their own
@@ -1816,12 +1821,16 @@ public sealed class TargetSchedulerCatalogWriter
     /// The template in the row's profile with the same name and filter,
     /// without case or surrounding spaces, and the same gain, offset,
     /// binning and readout mode, with a camera default (NULL or below zero)
-    /// read as -1 and a binning below one as one; the oldest first.
+    /// read as -1 and a binning below one as one. One identical to the row
+    /// in every other column comes first, claimed or not. Otherwise the only
+    /// such template <paramref name="claimed"/> rejects is taken; with two
+    /// or more, none is right, and the row is inserted.
     /// </summary>
     private static (long Id, object? Guid)? FindTwinTemplate(
         SQLiteConnection connection,
         SQLiteTransaction transaction,
-        IReadOnlyDictionary<string, object?> values)
+        IReadOnlyDictionary<string, object?> values,
+        Func<long, object?, bool> claimed)
     {
         if (values.GetValueOrDefault(ProfileColumn) is not string profile
             || values.GetValueOrDefault("name") is not string name
@@ -1833,38 +1842,82 @@ public sealed class TargetSchedulerCatalogWriter
         var present = ReadColumnNames(connection, transaction, "exposuretemplate");
         string Column(string name) =>
             present.Contains(name, StringComparer.OrdinalIgnoreCase) ? Quote(name) : "NULL";
-        using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText =
-            $"SELECT Id, guid, {Column("gain")}, {Column("offset")}, {Column("bin")}, {Column("readoutmode")} "
-            + "FROM exposuretemplate WHERE profileId = @profile COLLATE NOCASE "
-            + "AND LOWER(TRIM(name)) = LOWER(TRIM(@name)) "
-            + "AND LOWER(TRIM(filtername)) = LOWER(TRIM(@filter)) ORDER BY Id";
-        command.Parameters.AddWithValue("@profile", profile);
-        command.Parameters.AddWithValue("@name", name);
-        command.Parameters.AddWithValue("@filter", filter);
-        var wanted = (
-            CameraSetting(values.GetValueOrDefault("gain")),
-            CameraSetting(values.GetValueOrDefault("offset")),
-            Binning(values.GetValueOrDefault("bin")),
-            CameraSetting(values.GetValueOrDefault("readoutmode")));
-        using var reader = command.ExecuteReader();
-        while (reader.Read())
+        var candidates = new List<(long Id, object? Guid)>();
+        using (var command = connection.CreateCommand())
         {
-            var guid = reader.IsDBNull(1) ? null : reader.GetValue(1);
-            var found = (
-                CameraSetting(reader.GetValue(2)),
-                CameraSetting(reader.GetValue(3)),
-                Binning(reader.GetValue(4)),
-                CameraSetting(reader.GetValue(5)));
-            if (found == wanted)
+            command.Transaction = transaction;
+            command.CommandText =
+                $"SELECT Id, guid, {Column("gain")}, {Column("offset")}, {Column("bin")}, {Column("readoutmode")} "
+                + "FROM exposuretemplate WHERE profileId = @profile COLLATE NOCASE "
+                + "AND LOWER(TRIM(name)) = LOWER(TRIM(@name)) "
+                + "AND LOWER(TRIM(filtername)) = LOWER(TRIM(@filter)) ORDER BY Id";
+            command.Parameters.AddWithValue("@profile", profile);
+            command.Parameters.AddWithValue("@name", name);
+            command.Parameters.AddWithValue("@filter", filter);
+            var wanted = (
+                CameraSetting(values.GetValueOrDefault("gain")),
+                CameraSetting(values.GetValueOrDefault("offset")),
+                Binning(values.GetValueOrDefault("bin")),
+                CameraSetting(values.GetValueOrDefault("readoutmode")));
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
             {
-                return (reader.GetInt64(0), guid);
+                var found = (
+                    CameraSetting(reader.GetValue(2)),
+                    CameraSetting(reader.GetValue(3)),
+                    Binning(reader.GetValue(4)),
+                    CameraSetting(reader.GetValue(5)));
+                if (found == wanted)
+                {
+                    candidates.Add((reader.GetInt64(0), reader.IsDBNull(1) ? null : reader.GetValue(1)));
+                }
             }
         }
 
-        return null;
+        var identical = IdenticalKey(values);
+        foreach (var candidate in candidates)
+        {
+            var row = ReadRowById(connection, transaction, "exposuretemplate", candidate.Id, values.Keys);
+            if (IdenticalKey(row) == identical)
+            {
+                return candidate;
+            }
+        }
+
+        var open = candidates.Where(candidate => !claimed(candidate.Id, candidate.Guid)).Take(2).ToList();
+        return open.Count == 1 ? open[0] : null;
     }
+
+    /// <summary>
+    /// Every column but Id and guid, with name, filter and profile folded
+    /// and camera defaults read as for <see cref="FindTwinTemplate"/>: two
+    /// templates with the same key repeat each other.
+    /// </summary>
+    private static string IdenticalKey(IEnumerable<KeyValuePair<string, object?>> row) =>
+        string.Join(
+            '\0',
+            row.Select(pair => (Column: pair.Key.ToLowerInvariant(), pair.Value))
+                .Where(pair => pair.Column is not ("id" or "guid"))
+                .Select(pair => pair.Column + "=" + FoldedValue(pair.Column, pair.Value is DBNull ? null : pair.Value))
+                .OrderBy(entry => entry, StringComparer.Ordinal));
+
+    private static string FoldedValue(string column, object? value) => column switch
+    {
+        "profileid" or "name" or "filtername" =>
+            "T:" + ((value as string) ?? string.Empty).Trim().ToLowerInvariant(),
+        "gain" or "offset" or "readoutmode" => "I:" + CameraSetting(value),
+        "bin" => "I:" + Binning(value),
+        _ => value switch
+        {
+            null => "null",
+            long number => "I:" + number,
+            int number => "I:" + number,
+            double number => "R:" + number.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+            string text => "T:" + text,
+            byte[] bytes => "B:" + Convert.ToBase64String(bytes),
+            _ => "O:" + value,
+        },
+    };
 
     private static long? WholeNumber(object? value) => value switch
     {
@@ -1920,48 +1973,19 @@ public sealed class TargetSchedulerCatalogWriter
             using var reader = read.ExecuteReader();
             while (reader.Read())
             {
-                long? id = null;
-                var key = new StringBuilder();
+                var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
                 for (var index = 0; index < columns.Length; index++)
                 {
-                    var column = columns[index].ToLowerInvariant();
-                    var value = reader.IsDBNull(index) ? null : reader.GetValue(index);
-                    var folded = column switch
-                    {
-                        "id" => null,
-                        "guid" => null,
-                        "profileid" or "name" or "filtername" =>
-                            "T:" + ((value as string) ?? string.Empty).Trim().ToLowerInvariant(),
-                        "gain" or "offset" or "readoutmode" => "I:" + CameraSetting(value),
-                        "bin" => "I:" + Binning(value),
-                        _ => value switch
-                        {
-                            null => "null",
-                            long number => "I:" + number,
-                            int number => "I:" + number,
-                            double number => "R:" + number.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
-                            string text => "T:" + text,
-                            byte[] bytes => "B:" + Convert.ToBase64String(bytes),
-                            _ => "O:" + value,
-                        },
-                    };
-                    if (column == "id")
-                    {
-                        id = WholeNumber(value);
-                    }
-
-                    if (folded is not null)
-                    {
-                        key.Append(column).Append('=').Append(folded).Append('\0');
-                    }
+                    row[columns[index]] = reader.IsDBNull(index) ? null : reader.GetValue(index);
                 }
 
+                var id = WholeNumber(row.GetValueOrDefault("Id"));
                 if (id is not { } templateId)
                 {
                     continue;
                 }
 
-                var groupKey = key.ToString();
+                var groupKey = IdenticalKey(row);
                 if (!groups.TryGetValue(groupKey, out var group))
                 {
                     groups[groupKey] = group = [];

@@ -127,6 +127,62 @@ public sealed class RepeatedTemplateTests
         }
     }
 
+    [Fact]
+    public async Task ATemplateTakesTheIdenticalOneAndNeverRewritesAnother()
+    {
+        using var source = new TestDatabase();
+        source.Seed(0);
+        using (var connection = source.Open())
+        {
+            connection.Execute("""
+                ALTER TABLE exposuretemplate ADD COLUMN defaultexposure REAL;
+                UPDATE exposuretemplate SET defaultexposure = 180;
+                """);
+        }
+
+        TestDatabase Rig()
+        {
+            var rig = new TestDatabase();
+            using var connection = rig.Open();
+            // Same name and camera settings, another default exposure:
+            // neither repeats the other.
+            connection.Execute("""
+                ALTER TABLE exposuretemplate ADD COLUMN defaultexposure REAL;
+                INSERT INTO exposuretemplate (Id, profileId, name, filtername, gain, guid, defaultexposure) VALUES
+                    (40, 'profile', 'L 120', 'L', 100, 'rig-a', 300),
+                    (41, 'profile', 'L 120', 'L', 100, 'rig-b', 180);
+                """);
+            return rig;
+        }
+
+        using (var destination = Rig())
+        {
+            await new TargetSchedulerCatalogWriter(destination.Path, null)
+                .ApplyPlanningAsync(await BundleAsync(source, false), CancellationToken.None);
+            using var database = destination.Open();
+            Assert.Equal("41", Scalar(database, "SELECT exposureTemplateId FROM exposureplan WHERE guid = 'plan-guid'"));
+            Assert.Equal("300", Scalar(database, "SELECT defaultexposure FROM exposuretemplate WHERE Id = 40"));
+            Assert.Equal("2", Scalar(database, "SELECT COUNT(*) FROM exposuretemplate"));
+        }
+
+        // Identical to neither: which one is meant cannot be told, so
+        // neither is rewritten.
+        using (var connection = source.Open())
+        {
+            connection.Execute("UPDATE exposuretemplate SET defaultexposure = 600");
+        }
+
+        using (var destination = Rig())
+        {
+            await new TargetSchedulerCatalogWriter(destination.Path, null)
+                .ApplyPlanningAsync(await BundleAsync(source, false), CancellationToken.None);
+            using var database = destination.Open();
+            Assert.Equal("3", Scalar(database, "SELECT COUNT(*) FROM exposuretemplate"));
+            Assert.Equal("300", Scalar(database, "SELECT defaultexposure FROM exposuretemplate WHERE Id = 40"));
+            Assert.Equal("180", Scalar(database, "SELECT defaultexposure FROM exposuretemplate WHERE Id = 41"));
+        }
+    }
+
     private static string? Scalar(System.Data.SQLite.SQLiteConnection connection, string sql)
     {
         using var command = connection.CreateCommand();

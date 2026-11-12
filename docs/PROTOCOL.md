@@ -319,9 +319,12 @@ pull must not add a second copy of a template the file already has.
   when two databases had given one template different GUIDs.
 - A template whose GUID the file lacks takes the file's template in the same
   profile with the same name, filter, gain, offset, binning and readout mode.
-  That template keeps its own GUID and takes the bundle's settings, unless the
-  bundle also has its GUID or another row took it earlier in the same pull:
-  then that row's settings win and this row only maps to it.
+  One identical to it in every other column comes first. Otherwise it takes
+  the only such template that the bundle has no GUID for and no earlier row
+  of the same pull took; with two or more, it is inserted instead. The
+  template it takes keeps its own GUID and takes the bundle's settings,
+  unless it was claimed: then that row's settings win and this row only maps
+  to it.
 
 The apply result reports `TemplatesMerged`, and the plugin adds a sentence
 about them to the pull's status line.
