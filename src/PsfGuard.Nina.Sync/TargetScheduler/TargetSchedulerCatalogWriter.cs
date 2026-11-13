@@ -403,6 +403,17 @@ public sealed class TargetSchedulerCatalogWriter
         bool preservePlanProgress,
         CancellationToken cancellationToken)
     {
+        // Templates this database repeats are merged first, so a template
+        // from PSF Guard finds the one kept.
+        result.TemplatesMerged += MergeRepeatedTemplates(
+            connection,
+            transaction,
+            runningProfile,
+            RowsByColumn(bundle.Tables["exposuretemplate"])
+                .Select(row => OptionalText(row, "guid"))
+                .OfType<string>()
+                .ToHashSet(StringComparer.Ordinal),
+            cancellationToken);
         var waitingTemplates = new WaitingTemplates();
         var templateMap = UpsertGuidTable(
             connection,
@@ -695,6 +706,14 @@ public sealed class TargetSchedulerCatalogWriter
         var rows = RowsByColumn(table);
         var duplicateGuids = FindDuplicateGuids(rows);
         var map = new Dictionary<long, long>();
+        // A template that another row of the bundle has the GUID of belongs
+        // to that row. Compared exactly, as FindIdsByGuid compares them.
+        var bundleGuids = tableName == "exposuretemplate"
+            ? rows.Select(row => OptionalText(row, "guid"))
+                .OfType<string>()
+                .ToHashSet(StringComparer.Ordinal)
+            : null;
+        var claimedTwins = new HashSet<long>();
 
         foreach (var sourceRow in rows)
         {
@@ -768,6 +787,28 @@ public sealed class TargetSchedulerCatalogWriter
                 // of mapping every plan to the first profile's copy.
                 waitingTemplates.Add(sourceId, values);
                 continue;
+            }
+
+            if (matches.Count == 0
+                && bundleGuids is not null
+                && FindIdenticalTemplate(connection, transaction, values) is { } twin)
+            {
+                // The database's own copy of this template under another
+                // GUID: two copies of one database each fill in their own
+                // GUIDs on upgrade. When another row of the bundle has that
+                // template's GUID, or took it earlier in this pull, that row
+                // writes it and this one only maps to it.
+                if ((twin.Guid is string twinGuid && bundleGuids.Contains(twinGuid))
+                    || !claimedTwins.Add(twin.Id))
+                {
+                    map[sourceId] = twin.Id;
+                    result.Unchanged++;
+                    continue;
+                }
+
+                // Otherwise it takes this row's GUID, so later pulls match
+                // it by GUID.
+                matches = [twin.Id];
             }
 
             if (matches.Count == 1)
@@ -1762,17 +1803,227 @@ public sealed class TargetSchedulerCatalogWriter
             + "AND LOWER(TRIM(filtername)) = LOWER(TRIM(@filter))");
         command.Parameters.AddWithValue("@profile", values[ProfileColumn]);
         command.Parameters.AddWithValue("@filter", filter);
+        // Camera defaults count as equal whether NULL or below zero, as
+        // IdenticalKey reads them, so a placed template does not become a
+        // copy that the next pull's merge deletes.
         foreach (var column in new[] { "gain", "offset", "bin", "readoutmode" })
         {
             if (values.TryGetValue(column, out var value))
             {
-                sql.Append($" AND {Quote(column)} IS @{column}");
-                command.Parameters.AddWithValue($"@{column}", value ?? DBNull.Value);
+                var floor = column == "bin" ? 1 : 0;
+                var unset = column == "bin" ? 1 : -1;
+                sql.Append(
+                    $" AND (CASE WHEN {Quote(column)} IS NULL OR {Quote(column)} < {floor} "
+                    + $"THEN {unset} ELSE {Quote(column)} END) = @{column}");
+                command.Parameters.AddWithValue(
+                    $"@{column}", column == "bin" ? Binning(value) : CameraSetting(value));
             }
         }
 
         command.CommandText = sql.Append(" ORDER BY Id LIMIT 1").ToString();
         return command.ExecuteScalar() is { } id and not DBNull ? Convert.ToInt64(id) : null;
+    }
+
+    /// <summary>
+    /// The oldest template in the row's profile that is identical to it in
+    /// every column but Id and guid, as <see cref="IdenticalKey"/> compares
+    /// them. A template that differs in any setting is never taken, so it
+    /// is never rewritten.
+    /// </summary>
+    private static (long Id, object? Guid)? FindIdenticalTemplate(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        IReadOnlyDictionary<string, object?> values)
+    {
+        if (values.GetValueOrDefault(ProfileColumn) is not string profile
+            || values.GetValueOrDefault("name") is not string name
+            || values.GetValueOrDefault("filtername") is not string filter)
+        {
+            return null;
+        }
+
+        var candidates = new List<(long Id, object? Guid)>();
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText =
+                "SELECT Id, guid FROM exposuretemplate WHERE profileId = @profile COLLATE NOCASE "
+                + "AND LOWER(TRIM(name)) = LOWER(TRIM(@name)) "
+                + "AND LOWER(TRIM(filtername)) = LOWER(TRIM(@filter)) ORDER BY Id";
+            command.Parameters.AddWithValue("@profile", profile);
+            command.Parameters.AddWithValue("@name", name);
+            command.Parameters.AddWithValue("@filter", filter);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                candidates.Add((reader.GetInt64(0), reader.IsDBNull(1) ? null : reader.GetValue(1)));
+            }
+        }
+
+        var identical = IdenticalKey(values);
+        foreach (var candidate in candidates)
+        {
+            var row = ReadRowById(connection, transaction, "exposuretemplate", candidate.Id, values.Keys);
+            if (IdenticalKey(row) == identical)
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Every column but Id and guid, with name, filter and profile folded
+    /// without case or surrounding spaces, a gain, offset or readout mode
+    /// that is NULL or below zero read as -1, and a binning below one read
+    /// as one: two templates with the same key repeat each other.
+    /// </summary>
+    private static string IdenticalKey(IEnumerable<KeyValuePair<string, object?>> row) =>
+        string.Join(
+            '\0',
+            row.Select(pair => (Column: pair.Key.ToLowerInvariant(), pair.Value))
+                .Where(pair => pair.Column is not ("id" or "guid"))
+                .Select(pair => pair.Column + "=" + FoldedValue(pair.Column, pair.Value is DBNull ? null : pair.Value))
+                .OrderBy(entry => entry, StringComparer.Ordinal));
+
+    private static string FoldedValue(string column, object? value) => column switch
+    {
+        "profileid" or "name" or "filtername" =>
+            "T:" + ((value as string) ?? string.Empty).Trim().ToLowerInvariant(),
+        "gain" or "offset" or "readoutmode" => "I:" + CameraSetting(value),
+        "bin" => "I:" + Binning(value),
+        _ => value switch
+        {
+            null => "null",
+            long number => "I:" + number,
+            int number => "I:" + number,
+            double number => "R:" + number.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
+            string text => "T:" + text,
+            byte[] bytes => "B:" + Convert.ToBase64String(bytes),
+            _ => "O:" + value,
+        },
+    };
+
+    private static long? WholeNumber(object? value) => value switch
+    {
+        long number => number,
+        int number => number,
+        double number when number == Math.Floor(number) => (long)number,
+        _ => null,
+    };
+
+    private static long CameraSetting(object? value) =>
+        WholeNumber(value) is { } number && number >= 0 ? number : -1;
+
+    private static long Binning(object? value) =>
+        WholeNumber(value) is { } number && number >= 1 ? number : 1;
+
+    /// <summary>
+    /// Merges the templates this database repeats, as <see cref="IdenticalKey"/>
+    /// compares them. Each copy's exposure plans move to the template kept,
+    /// and the copy is deleted: the template kept is one whose GUID the
+    /// bundle has, so it keeps matching by GUID, then the one most plans
+    /// use, then the oldest. Only the running profile's templates are merged
+    /// when it is known, since another profile pairs with its own catalog.
+    /// Older syncs added such copies when two databases had given one
+    /// template different GUIDs. Returns the copies deleted.
+    /// </summary>
+    private static int MergeRepeatedTemplates(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        string? runningProfile,
+        IReadOnlySet<string> preferredGuids,
+        CancellationToken cancellationToken)
+    {
+        var columns = ReadColumnNames(connection, transaction, "exposuretemplate").ToArray();
+        var plans = new Dictionary<long, long>();
+        using (var count = connection.CreateCommand())
+        {
+            count.Transaction = transaction;
+            count.CommandText =
+                "SELECT exposureTemplateId, COUNT(*) FROM exposureplan "
+                + "WHERE exposureTemplateId IS NOT NULL GROUP BY exposureTemplateId";
+            using var reader = count.ExecuteReader();
+            while (reader.Read())
+            {
+                if (WholeNumber(reader.GetValue(0)) is { } id)
+                {
+                    plans[id] = plans.GetValueOrDefault(id) + reader.GetInt64(1);
+                }
+            }
+        }
+
+        var groups = new Dictionary<string, List<(long Id, long Plans, bool Preferred)>>(StringComparer.Ordinal);
+        using (var read = connection.CreateCommand())
+        {
+            read.Transaction = transaction;
+            read.CommandText =
+                $"SELECT {string.Join(", ", columns.Select(Quote))} FROM exposuretemplate ORDER BY Id";
+            using var reader = read.ExecuteReader();
+            while (reader.Read())
+            {
+                var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                for (var index = 0; index < columns.Length; index++)
+                {
+                    row[columns[index]] = reader.IsDBNull(index) ? null : reader.GetValue(index);
+                }
+
+                var id = WholeNumber(row.GetValueOrDefault("Id"));
+                if (runningProfile is not null
+                    && !string.Equals(
+                        row.GetValueOrDefault(ProfileColumn) as string,
+                        runningProfile,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                if (id is not { } templateId)
+                {
+                    continue;
+                }
+
+                var groupKey = IdenticalKey(row);
+                if (!groups.TryGetValue(groupKey, out var group))
+                {
+                    groups[groupKey] = group = [];
+                }
+
+                group.Add((
+                    templateId,
+                    plans.GetValueOrDefault(templateId),
+                    row.GetValueOrDefault("guid") is string guid && preferredGuids.Contains(guid)));
+            }
+        }
+
+        var merged = 0;
+        foreach (var group in groups.Values.Where(group => group.Count > 1))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var ordered = group
+                .OrderByDescending(row => row.Preferred)
+                .ThenByDescending(row => row.Plans)
+                .ThenBy(row => row.Id)
+                .ToList();
+            var kept = ordered[0].Id;
+            foreach (var copy in ordered.Skip(1))
+            {
+                using var move = connection.CreateCommand();
+                move.Transaction = transaction;
+                move.CommandText =
+                    "UPDATE exposureplan SET exposureTemplateId = @kept WHERE exposureTemplateId = @copy";
+                move.Parameters.AddWithValue("@kept", kept);
+                move.Parameters.AddWithValue("@copy", copy.Id);
+                move.ExecuteNonQuery();
+                using var delete = connection.CreateCommand();
+                delete.Transaction = transaction;
+                delete.CommandText = "DELETE FROM exposuretemplate WHERE Id = @copy";
+                delete.Parameters.AddWithValue("@copy", copy.Id);
+                merged += delete.ExecuteNonQuery();
+            }
+        }
+
+        return merged;
     }
 
     private static List<long> FindIdsByGuid(
@@ -2305,6 +2556,8 @@ public sealed class TargetSchedulerCatalogWriter
 
         public int ProjectRowsSkipped { get; set; }
 
+        public int TemplatesMerged { get; set; }
+
         public List<string> ProjectMessages { get; } = [];
 
         public ApplyResult ToImmutable() => new()
@@ -2316,6 +2569,7 @@ public sealed class TargetSchedulerCatalogWriter
             ProjectsDeleted = ProjectsDeleted,
             ProjectsKept = ProjectsKept,
             ProjectRowsSkipped = ProjectRowsSkipped,
+            TemplatesMerged = TemplatesMerged,
             ProjectMessages = ProjectMessages.ToArray(),
         };
     }

@@ -39,6 +39,11 @@ public sealed class PullPsfGuardPlanning : PsfGuardSequenceItemBase
         {
             Report(progress, deletedProjects);
         }
+
+        if (result.MergedTemplatesSummary is { } mergedTemplates)
+        {
+            Report(progress, mergedTemplates);
+        }
     }
 
     public override object Clone() => new PullPsfGuardPlanning(this);

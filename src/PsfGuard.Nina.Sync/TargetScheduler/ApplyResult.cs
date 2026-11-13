@@ -32,6 +32,22 @@ public sealed record ApplyResult
     public int ProjectRowsSkipped { get; init; }
 
     /// <summary>
+    /// Exposure templates deleted because another template in the same
+    /// profile has the same name and settings; their plans use that one now.
+    /// </summary>
+    public int TemplatesMerged { get; init; }
+
+    /// <summary>
+    /// A sentence about merged exposure templates, or null when none were.
+    /// </summary>
+    public string? MergedTemplatesSummary => TemplatesMerged switch
+    {
+        0 => null,
+        1 => "Merged 1 repeated exposure template; its plans use the identical template that stays.",
+        _ => $"Merged {TemplatesMerged:N0} repeated exposure templates; their plans use the identical template that stays.",
+    };
+
+    /// <summary>
     /// One line for each deleted or kept project, with its name and, for a
     /// kept project, the reason it stays.
     /// </summary>

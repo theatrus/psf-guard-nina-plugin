@@ -378,7 +378,8 @@ public sealed class SyncOrchestrator
                 Message = $"Merged PSF Guard into Target Scheduler: {result.Inserted:N0} inserted, "
                     + $"{result.Updated:N0} updated, {result.Unchanged:N0} unchanged, "
                     + $"{result.Skipped:N0} skipped."
-                    + (result.DeletedProjectsSummary is { } deleted ? " " + deleted : string.Empty),
+                    + (result.DeletedProjectsSummary is { } deleted ? " " + deleted : string.Empty)
+                    + (result.MergedTemplatesSummary is { } merged ? " " + merged : string.Empty),
             });
         return result;
     }
