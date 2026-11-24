@@ -61,7 +61,7 @@ GET /api/sync/v1/capabilities
   "protocol_version": 1,
   "product": "psf-guard",
   "product_version": "0.6.0",
-  "capabilities": ["merge", "push_planning", "push_grades", "preview_apply", "preview_refresh", "async_preview_jobs", "exports", "image_upload", "project_tombstones_v1", "waiting_profile_v1"],
+  "capabilities": ["merge", "push_planning", "push_grades", "preview_apply", "preview_refresh", "async_preview_jobs", "exports", "image_upload", "project_tombstones_v1", "template_tombstones_v1", "waiting_profile_v1"],
   "catalogs": [
     {
       "id": "review",
@@ -167,7 +167,8 @@ POST /api/sync/v1/exports
   "operation": "merge",
   "reviewed_only": false,
   "include_thumbnails": false,
-  "include_project_tombstones": true
+  "include_project_tombstones": true,
+  "include_template_tombstones": true
 }
 ```
 
@@ -183,6 +184,13 @@ field out, so a server without the capability never sees it. The plugin reads
 the capabilities once per pull: a merge pull reuses the round-trip check, and
 a planning pull reads them before its export. See
 [Deleted projects](#deleted-projects).
+
+`include_template_tombstones` works the same way for `template_tombstones_v1`:
+it defaults to `false`, and the plugin sends it as `true` on `push_planning`
+and `merge` exports only when the server advertises that capability. The
+plugin asks for each table on its own, so a server may advertise one
+capability without the other. See
+[Deleted exposure templates](#deleted-exposure-templates).
 
 The server may return a ready export immediately:
 
@@ -212,8 +220,10 @@ The plugin accepts these export operations:
 Catalog bundles do not accept remote SQL, table names outside the allowlist,
 or an arbitrary local database path. The only deletes a bundle can cause are
 the deleted-project rule below, limited to projects that its
-`psf_guard_removed_project` table lists. Flat coverage uses the separate
-guarded protocol below, not the GUID-keyed bundle merge.
+`psf_guard_removed_project` table lists, the deleted-template rule, limited to
+templates that its `psf_guard_removed_template` table lists, and the merge of
+repeated templates. Flat coverage uses the separate guarded protocol below,
+not the GUID-keyed bundle merge.
 
 ## Deleted Projects
 
@@ -270,7 +280,55 @@ filter cadence. It then handles each standing deletion:
    `psf_guard_collaboration_plan`, `psf_guard_scheduler_flat_history`) or by
    the project's GUID (`psf_guard_director_target`,
    `psf_guard_director_project`); then `project`. Exposure templates belong
-   to the profile and stay.
+   to the profile and stay, unless the bundle also lists them as deleted
+   templates.
+
+## Deleted Exposure Templates
+
+PSF Guard can delete an exposure template from a catalog. Servers that
+implement this advertise `template_tombstones_v1`.
+
+When the export request sets `include_template_tombstones: true`,
+`push_planning` and `merge` bundles carry an optional table
+`psf_guard_removed_template` with one row per template deleted in that
+catalog:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `template_guid` | TEXT | Target Scheduler GUID of the deleted template; required |
+| `name` | TEXT | Template name, used in messages; required column, may be NULL |
+| `removed_at` | INTEGER | Unix seconds when the template was deleted; optional |
+
+The plugin ignores any other columns. A bundle without the table deletes no
+templates. The plugin never sends this table: Target Scheduler keeps no
+record of deleted templates.
+
+The plugin validates the table before it opens the Target Scheduler database.
+It refuses the whole bundle, and writes nothing, when the `template_guid` or
+`name` column is missing. A row whose `template_guid` is null, not text, or
+not a valid non-empty GUID is skipped; the apply result counts it and reports
+that it was skipped. The other rows still apply.
+
+Inside the planning or merge apply transaction, the plugin handles deleted
+templates last: after the planning rows, the captured images of a merge, and
+any deleted projects. A plan that the bundle moved to another template, or a
+plan of a deleted project, no longer counts against its old template. For each
+row, the plugin:
+
+1. Skips it when the bundle's own `exposuretemplate` table has the GUID. The
+   template is live in PSF Guard.
+2. Matches the GUID against `exposuretemplate.guid` case-insensitively,
+   ignoring surrounding spaces. A GUID that matches no template changes
+   nothing.
+3. Keeps every match, and reports it, when more than one template has the
+   GUID.
+4. Keeps the template, and reports how many exposure plans use it, when any
+   `exposureplan` row has its `Id` in `exposureTemplateId`.
+5. Otherwise deletes the `exposuretemplate` row. No other row changes.
+
+The apply result reports `TemplatesDeleted`, `TemplatesKept`,
+`TemplateRowsSkipped` and one message for each template, and the plugin adds a
+sentence about them to the pull's status line.
 
 ### Rows waiting for a profile
 
@@ -780,6 +838,10 @@ profile automation. While it is off, the plugin sends no reports.
 - Catalog bundles delete destination rows only for a project their optional
   `psf_guard_removed_project` table lists as a standing deletion, only when the
   bundle does not also hold it as live, and only when Target Scheduler has no
-  acquired images for it; see [Deleted projects](#deleted-projects). The
+  acquired images for it; see [Deleted projects](#deleted-projects).
+- Catalog bundles delete an exposure template only when their optional
+  `psf_guard_removed_template` table lists it, the bundle does not also hold
+  it as live, and no exposure plan in Target Scheduler uses it; see
+  [Deleted exposure templates](#deleted-exposure-templates). The
   separate `flat_history_v1` exchange only removes explicitly invalidated,
   unchanged Target Scheduler coverage rows.

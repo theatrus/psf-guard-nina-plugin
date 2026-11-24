@@ -448,8 +448,16 @@ project keep their local IDs, flat history, exposure order and filter cadence.
 An ambiguous move keeps the former project and reports the conflict instead
 of deleting the target. A project with captured images
 stays, and the pull result shows its name and why it was kept; delete it in
-Target Scheduler if you no longer need it. Exposure templates stay. A project
-that was allowed back in PSF Guard is not deleted.
+Target Scheduler if you no longer need it. A project that was allowed back in
+PSF Guard is not deleted.
+
+When you delete an exposure template in PSF Guard, the next planning pull or
+full-catalog pull-back from a PSF Guard version that supports deleted
+templates also deletes it from Target Scheduler, if no exposure plan there
+uses it. A template that exposure plans still use stays, and the pull result
+shows its name and how many plans use it. Move those plans to another
+template, or delete them, and the next pull deletes the template. Deleting a
+project does not delete its templates.
 
 PSF Guard refuses an upload of a file whose project was deleted, or of a file
 it removed as a reject. The status line and N.I.N.A. log show PSF Guard's

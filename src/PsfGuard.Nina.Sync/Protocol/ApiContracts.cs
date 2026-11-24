@@ -88,6 +88,14 @@ public sealed record CreateExportRequest
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? IncludeProjectTombstones { get; init; }
+
+    /// <summary>
+    /// Asks for the <c>psf_guard_removed_template</c> table in planning and
+    /// merge exports. Send it only to a server that advertises
+    /// <c>template_tombstones_v1</c>; null leaves the field out of the request.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? IncludeTemplateTombstones { get; init; }
 }
 
 public sealed record SyncExport

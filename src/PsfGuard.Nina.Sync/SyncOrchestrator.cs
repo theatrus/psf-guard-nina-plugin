@@ -11,6 +11,7 @@ public sealed class SyncOrchestrator
     public const string ExportsCapability = "exports";
     public const string FlatHistoryCapability = "flat_history_v1";
     public const string ProjectTombstonesCapability = "project_tombstones_v1";
+    public const string TemplateTombstonesCapability = "template_tombstones_v1";
 
     private const int MaximumImmediatePreviewAttempts = 3;
     private const int FlatHistoryBatchSize = 1000;
@@ -28,9 +29,11 @@ public sealed class SyncOrchestrator
     private readonly FlatHistoryCatalog? flatHistory;
     private int roundTripSupportConfirmed;
 
-    // 0 until a capabilities response is seen, then 1 when the server
-    // advertises project tombstones and -1 when it does not.
+    // Each is 0 until a capabilities response is seen, then 1 when the server
+    // advertises project (or template) tombstones and -1 when it does not.
+    // Both are written from the same response.
     private int projectTombstonesSupport;
+    private int templateTombstonesSupport;
 
     public SyncOrchestrator(
         string destinationCatalogId,
@@ -225,7 +228,7 @@ public sealed class SyncOrchestrator
 
     public async Task<ApplyResult> PullPlanningAsync(CancellationToken cancellationToken)
     {
-        var includeProjectTombstones = await ProjectTombstonesSupportedAsync(cancellationToken)
+        var tombstones = await TombstoneSupportAsync(cancellationToken)
             .ConfigureAwait(false);
         var bundle = await WithClientAsync(
                 client => client.DownloadExportAsync(
@@ -233,37 +236,45 @@ public sealed class SyncOrchestrator
                     SyncOperation.PushPlanning,
                     reviewedOnly: false,
                     includeThumbnails: null,
-                    includeProjectTombstones,
+                    tombstones.Projects,
+                    tombstones.Templates,
                     cancellationToken))
             .ConfigureAwait(false);
         return await writer.ApplyPlanningAsync(bundle, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Whether the server lists deleted projects in planning and merge
-    /// exports. Uses the capabilities this orchestrator already read, and
-    /// reads them once otherwise.
+    /// Whether the server lists deleted projects and deleted exposure
+    /// templates in planning and merge exports. Uses the capabilities this
+    /// orchestrator already read, and reads them once otherwise.
     /// </summary>
-    private async Task<bool> ProjectTombstonesSupportedAsync(CancellationToken cancellationToken)
+    private async Task<TombstoneSupport> TombstoneSupportAsync(CancellationToken cancellationToken)
     {
-        var known = Volatile.Read(ref projectTombstonesSupport);
-        if (known != 0)
+        var projects = Volatile.Read(ref projectTombstonesSupport);
+        var templates = Volatile.Read(ref templateTombstonesSupport);
+        if (projects != 0 && templates != 0)
         {
-            return known > 0;
+            return new TombstoneSupport(projects > 0, templates > 0);
         }
 
         var capabilities = await TestConnectionAsync(cancellationToken).ConfigureAwait(false);
         return RecordCapabilities(capabilities);
     }
 
-    private bool RecordCapabilities(SyncCapabilities capabilities)
+    private TombstoneSupport RecordCapabilities(SyncCapabilities capabilities)
     {
-        var supported = capabilities.Capabilities.Contains(
+        var projects = capabilities.Capabilities.Contains(
             ProjectTombstonesCapability,
             StringComparer.Ordinal);
-        Volatile.Write(ref projectTombstonesSupport, supported ? 1 : -1);
-        return supported;
+        var templates = capabilities.Capabilities.Contains(
+            TemplateTombstonesCapability,
+            StringComparer.Ordinal);
+        Volatile.Write(ref templateTombstonesSupport, templates ? 1 : -1);
+        Volatile.Write(ref projectTombstonesSupport, projects ? 1 : -1);
+        return new TombstoneSupport(projects, templates);
     }
+
+    private readonly record struct TombstoneSupport(bool Projects, bool Templates);
 
     public Task EnsureRoundTripSupportedAsync(CancellationToken cancellationToken) =>
         EnsureRoundTripSupportedAsync(cancellationToken, progress: null);
@@ -322,7 +333,7 @@ public sealed class SyncOrchestrator
     {
         var activity = TrackProgress(progress);
         await EnsureRoundTripSupportedAsync(cancellationToken, activity).ConfigureAwait(false);
-        var includeProjectTombstones = await ProjectTombstonesSupportedAsync(cancellationToken)
+        var tombstones = await TombstoneSupportAsync(cancellationToken)
             .ConfigureAwait(false);
         SyncProgressReporter.Report(
             activity,
@@ -338,7 +349,8 @@ public sealed class SyncOrchestrator
                         SyncOperation.Merge,
                         reviewedOnly: false,
                         includeThumbnails: false,
-                        includeProjectTombstones,
+                        tombstones.Projects,
+                        tombstones.Templates,
                         cancellationToken,
                         activity),
                     activity,
@@ -379,6 +391,9 @@ public sealed class SyncOrchestrator
                     + $"{result.Updated:N0} updated, {result.Unchanged:N0} unchanged, "
                     + $"{result.Skipped:N0} skipped."
                     + (result.DeletedProjectsSummary is { } deleted ? " " + deleted : string.Empty)
+                    + (result.DeletedTemplatesSummary is { } deletedTemplates
+                        ? " " + deletedTemplates
+                        : string.Empty)
                     + (result.MergedTemplatesSummary is { } merged ? " " + merged : string.Empty),
             });
         return result;

@@ -32,6 +32,41 @@ public sealed record ApplyResult
     public int ProjectRowsSkipped { get; init; }
 
     /// <summary>
+    /// Exposure templates deleted from Target Scheduler because they were
+    /// deleted in PSF Guard. Zero when the bundle listed no deleted templates.
+    /// </summary>
+    public int TemplatesDeleted { get; init; }
+
+    /// <summary>
+    /// Exposure templates deleted in PSF Guard that Target Scheduler keeps:
+    /// exposure plans here still use them, or their GUID is not unique.
+    /// </summary>
+    public int TemplatesKept { get; init; }
+
+    /// <summary>
+    /// Deleted-template entries skipped because their template GUID is
+    /// missing or not a valid GUID.
+    /// </summary>
+    public int TemplateRowsSkipped { get; init; }
+
+    /// <summary>
+    /// One line for each deleted or kept exposure template, with its name and,
+    /// for a kept template, the reason it stays.
+    /// </summary>
+    public IReadOnlyList<string> TemplateMessages { get; init; } = [];
+
+    /// <summary>
+    /// A sentence about exposure templates deleted in PSF Guard, or null when
+    /// the apply neither deleted nor kept any.
+    /// </summary>
+    public string? DeletedTemplatesSummary =>
+        TemplatesDeleted == 0 && TemplatesKept == 0 && TemplateRowsSkipped == 0
+            ? null
+            : $"Exposure templates deleted in PSF Guard: {TemplatesDeleted:N0} deleted from "
+                + $"Target Scheduler, {TemplatesKept:N0} kept. "
+                + string.Join(" ", TemplateMessages);
+
+    /// <summary>
     /// Exposure templates deleted because another template in the same
     /// profile has the same name and settings; their plans use that one now.
     /// </summary>
