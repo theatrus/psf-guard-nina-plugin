@@ -283,53 +283,6 @@ filter cadence. It then handles each standing deletion:
    to the profile and stay, unless the bundle also lists them as deleted
    templates.
 
-## Deleted Exposure Templates
-
-PSF Guard can delete an exposure template from a catalog. Servers that
-implement this advertise `template_tombstones_v1`.
-
-When the export request sets `include_template_tombstones: true`,
-`push_planning` and `merge` bundles carry an optional table
-`psf_guard_removed_template` with one row per template deleted in that
-catalog:
-
-| Column | Type | Meaning |
-|---|---|---|
-| `template_guid` | TEXT | Target Scheduler GUID of the deleted template; required |
-| `name` | TEXT | Template name, used in messages; required column, may be NULL |
-| `removed_at` | INTEGER | Unix seconds when the template was deleted; optional |
-
-The plugin ignores any other columns. A bundle without the table deletes no
-templates. The plugin never sends this table: Target Scheduler keeps no
-record of deleted templates.
-
-The plugin validates the table before it opens the Target Scheduler database.
-It refuses the whole bundle, and writes nothing, when the `template_guid` or
-`name` column is missing. A row whose `template_guid` is null, not text, or
-not a valid non-empty GUID is skipped; the apply result counts it and reports
-that it was skipped. The other rows still apply.
-
-Inside the planning or merge apply transaction, the plugin handles deleted
-templates last: after the planning rows, the captured images of a merge, and
-any deleted projects. A plan that the bundle moved to another template, or a
-plan of a deleted project, no longer counts against its old template. For each
-row, the plugin:
-
-1. Skips it when the bundle's own `exposuretemplate` table has the GUID. The
-   template is live in PSF Guard.
-2. Matches the GUID against `exposuretemplate.guid` case-insensitively,
-   ignoring surrounding spaces. A GUID that matches no template changes
-   nothing.
-3. Keeps every match, and reports it, when more than one template has the
-   GUID.
-4. Keeps the template, and reports how many exposure plans use it, when any
-   `exposureplan` row has its `Id` in `exposureTemplateId`.
-5. Otherwise deletes the `exposuretemplate` row. No other row changes.
-
-The apply result reports `TemplatesDeleted`, `TemplatesKept`,
-`TemplateRowsSkipped` and one message for each template, and the plugin adds a
-sentence about them to the pull's status line.
-
 ### Rows waiting for a profile
 
 PSF Guard cannot tell which N.I.N.A. profile is open, so it gives a project it
@@ -423,6 +376,53 @@ together; a deletion failure rolls back target moves and other updates too.
 The apply result reports `ProjectsDeleted`, `ProjectsKept`,
 `ProjectRowsSkipped`, `TemplatesMerged` and one message per project or skipped-row group, next to
 the inserted, updated, unchanged and skipped counts.
+
+## Deleted Exposure Templates
+
+PSF Guard can delete an exposure template from a catalog. Servers that
+implement this advertise `template_tombstones_v1`.
+
+When the export request sets `include_template_tombstones: true`,
+`push_planning` and `merge` bundles carry an optional table
+`psf_guard_removed_template` with one row per template deleted in that
+catalog:
+
+| Column | Type | Meaning |
+|---|---|---|
+| `template_guid` | TEXT | Target Scheduler GUID of the deleted template; required |
+| `name` | TEXT | Template name, used in messages; required column, may be NULL |
+| `removed_at` | INTEGER | Unix seconds when the template was deleted; optional |
+
+The plugin ignores any other columns. A bundle without the table deletes no
+templates. The plugin never sends this table: Target Scheduler keeps no
+record of deleted templates.
+
+The plugin validates the table before it opens the Target Scheduler database.
+It refuses the whole bundle, and writes nothing, when the `template_guid` or
+`name` column is missing. A row whose `template_guid` is null, not text, or
+not a valid non-empty GUID is skipped; the apply result counts it and reports
+that it was skipped. The other rows still apply.
+
+Inside the planning or merge apply transaction, the plugin handles deleted
+templates last: after the planning rows, the captured images of a merge, and
+any deleted projects. A plan that the bundle moved to another template, or a
+plan of a deleted project, no longer counts against its old template. For each
+row, the plugin:
+
+1. Skips it when the bundle's own `exposuretemplate` table has the GUID. The
+   template is live in PSF Guard.
+2. Matches the GUID against `exposuretemplate.guid` case-insensitively,
+   ignoring surrounding spaces. A GUID that matches no template changes
+   nothing.
+3. Keeps every match, and reports it, when more than one template has the
+   GUID.
+4. Keeps the template, and reports how many exposure plans use it, when any
+   `exposureplan` row has its `Id` in `exposureTemplateId`.
+5. Otherwise deletes the `exposuretemplate` row. No other row changes.
+
+The apply result reports `TemplatesDeleted`, `TemplatesKept`,
+`TemplateRowsSkipped` and one message for each template, and the plugin adds a
+sentence about them to the pull's status line.
 
 ## Refused Uploads
 

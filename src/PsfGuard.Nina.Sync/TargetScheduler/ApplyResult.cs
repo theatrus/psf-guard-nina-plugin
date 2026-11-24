@@ -57,7 +57,7 @@ public sealed record ApplyResult
 
     /// <summary>
     /// A sentence about exposure templates deleted in PSF Guard, or null when
-    /// the apply neither deleted nor kept any.
+    /// the apply deleted none, kept none and skipped no deletion entries.
     /// </summary>
     public string? DeletedTemplatesSummary =>
         TemplatesDeleted == 0 && TemplatesKept == 0 && TemplateRowsSkipped == 0
