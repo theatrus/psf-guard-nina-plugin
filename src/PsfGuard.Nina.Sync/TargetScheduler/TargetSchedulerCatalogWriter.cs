@@ -37,6 +37,12 @@ public sealed class TargetSchedulerCatalogWriter
     /// </summary>
     internal const string RemovedProjectTable = "psf_guard_removed_project";
 
+    /// <summary>
+    /// Optional planning and merge table listing exposure templates deleted
+    /// in PSF Guard. The server sends it only when the export request opts in.
+    /// </summary>
+    internal const string RemovedTemplateTable = "psf_guard_removed_template";
+
     // Rows that belong to each target of a deleted project, child first.
     // Target Scheduler declares no cascades.
     private static readonly (string Table, string Column)[] TargetChildTables =
@@ -287,6 +293,7 @@ public sealed class TargetSchedulerCatalogWriter
         ValidateBundle(bundle, SyncOperation.PushPlanning);
         EnsureBundleTables(bundle, PlanningTables, "Planning");
         var removedProjects = ReadRemovedProjects(bundle);
+        var removedTemplates = ReadRemovedTemplates(bundle);
 
         using var session = OpenReadWrite(cancellationToken);
         var connection = session.Connection;
@@ -304,6 +311,13 @@ public sealed class TargetSchedulerCatalogWriter
             connection,
             transaction,
             removedProjects,
+            bundle,
+            result,
+            cancellationToken);
+        DeleteRemovedTemplates(
+            connection,
+            transaction,
+            removedTemplates,
             bundle,
             result,
             cancellationToken);
@@ -332,6 +346,7 @@ public sealed class TargetSchedulerCatalogWriter
         }
 
         var removedProjects = ReadRemovedProjects(bundle);
+        var removedTemplates = ReadRemovedTemplates(bundle);
         cancellationToken.ThrowIfCancellationRequested();
         using var session = OpenReadWrite(cancellationToken);
         var connection = session.Connection;
@@ -378,6 +393,13 @@ public sealed class TargetSchedulerCatalogWriter
                 connection,
                 transaction,
                 removedProjects,
+                bundle,
+                result,
+                cancellationToken);
+            DeleteRemovedTemplates(
+                connection,
+                transaction,
+                removedTemplates,
                 bundle,
                 result,
                 cancellationToken);
@@ -1344,6 +1366,181 @@ public sealed class TargetSchedulerCatalogWriter
             "DELETE FROM project WHERE Id = @projectId",
             ("@projectId", project.Id));
         return targetCount;
+    }
+
+    /// <summary>
+    /// The deletions in the bundle's optional
+    /// <c>psf_guard_removed_template</c> table, one per GUID. Empty when the
+    /// table is absent, as it is from servers without
+    /// <c>template_tombstones_v1</c>. A row whose GUID is not usable is
+    /// counted and skipped; other columns are ignored.
+    /// </summary>
+    private static RemovedTemplates ReadRemovedTemplates(CatalogBundle bundle)
+    {
+        if (!bundle.Tables.TryGetValue(RemovedTemplateTable, out var table))
+        {
+            return new RemovedTemplates([], 0);
+        }
+
+        EnsureRequiredColumns(table, "template_guid", "name");
+        var templates = new List<RemovedTemplate>();
+        var seen = new HashSet<Guid>();
+        var invalidRows = 0;
+        foreach (var row in RowsByColumn(table))
+        {
+            if (!TryParseGuid(DatabaseValue(row, "template_guid"), out var guid))
+            {
+                invalidRows++;
+                continue;
+            }
+
+            if (seen.Add(guid))
+            {
+                var name = (DatabaseValue(row, "name") as string)?.Trim();
+                templates.Add(new RemovedTemplate(guid, string.IsNullOrEmpty(name) ? null : name));
+            }
+        }
+
+        return new RemovedTemplates(templates, invalidRows);
+    }
+
+    /// <summary>
+    /// Delete each listed exposure template that Target Scheduler has once,
+    /// that the bundle does not hold as live, and that no exposure plan here
+    /// uses. Other listed templates stay, and the result reports each one it
+    /// finds. Runs after the bundle's plans are written and after deleted
+    /// projects are removed, in the same transaction, so the plan count is
+    /// current. Deletes only <c>exposuretemplate</c> rows.
+    /// </summary>
+    private static void DeleteRemovedTemplates(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction,
+        RemovedTemplates removedTemplates,
+        CatalogBundle bundle,
+        MutableApplyResult result,
+        CancellationToken cancellationToken)
+    {
+        if (removedTemplates.InvalidRows > 0)
+        {
+            result.TemplateRowsSkipped += removedTemplates.InvalidRows;
+            result.TemplateMessages.Add(
+                $"Skipped {removedTemplates.InvalidRows:N0} deleted-template "
+                + (removedTemplates.InvalidRows == 1 ? "entry" : "entries")
+                + " from PSF Guard without a valid template GUID.");
+        }
+
+        if (removedTemplates.Templates.Count == 0)
+        {
+            return;
+        }
+
+        var liveTemplates = new HashSet<Guid>();
+        foreach (var row in RowsByColumn(bundle.Tables["exposuretemplate"]))
+        {
+            if (TryParseGuid(DatabaseValue(row, "guid"), out var guid))
+            {
+                liveTemplates.Add(guid);
+            }
+        }
+
+        var localTemplates = ReadLocalTemplates(connection, transaction);
+        if (localTemplates.Count == 0)
+        {
+            return;
+        }
+
+        var planCounts = ReadTemplatePlanCounts(connection, transaction);
+        foreach (var removed in removedTemplates.Templates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (liveTemplates.Contains(removed.Guid)
+                || !localTemplates.TryGetValue(removed.Guid, out var matches))
+            {
+                continue;
+            }
+
+            var name = matches[0].Name ?? removed.Name ?? removed.Guid.ToString("D");
+            if (matches.Count > 1)
+            {
+                result.TemplatesKept++;
+                result.TemplateMessages.Add(
+                    $"Kept exposure template \"{name}\" because more than one Target Scheduler "
+                    + "template has its GUID.");
+                continue;
+            }
+
+            var template = matches[0];
+            var plans = planCounts.GetValueOrDefault(template.Id);
+            if (plans > 0)
+            {
+                result.TemplatesKept++;
+                result.TemplateMessages.Add(
+                    $"Kept exposure template \"{name}\" because {plans:N0} Target Scheduler "
+                    + (plans == 1 ? "exposure plan uses it." : "exposure plans use it."));
+                continue;
+            }
+
+            Execute(
+                connection,
+                transaction,
+                "DELETE FROM exposuretemplate WHERE Id = @templateId",
+                ("@templateId", template.Id));
+            result.TemplatesDeleted++;
+            result.TemplateMessages.Add($"Deleted exposure template \"{name}\".");
+        }
+    }
+
+    private static Dictionary<Guid, List<LocalTemplate>> ReadLocalTemplates(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT Id, guid, name FROM exposuretemplate";
+        using var reader = command.ExecuteReader();
+        var templates = new Dictionary<Guid, List<LocalTemplate>>();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(1)
+                || !TryParseGuid(reader.GetValue(1), out var guid))
+            {
+                continue;
+            }
+
+            var template = new LocalTemplate(
+                reader.GetInt64(0),
+                reader.IsDBNull(2) ? null : Convert.ToString(reader.GetValue(2))?.Trim());
+            if (!templates.TryGetValue(guid, out var list))
+            {
+                templates[guid] = list = [];
+            }
+
+            list.Add(template);
+        }
+
+        return templates;
+    }
+
+    private static Dictionary<long, long> ReadTemplatePlanCounts(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            "SELECT exposureTemplateId, COUNT(*) FROM exposureplan "
+            + "WHERE exposureTemplateId IS NOT NULL GROUP BY exposureTemplateId";
+        using var reader = command.ExecuteReader();
+        var counts = new Dictionary<long, long>();
+        while (reader.Read())
+        {
+            if (WholeNumber(reader.GetValue(0)) is { } id)
+            {
+                counts[id] = counts.GetValueOrDefault(id) + reader.GetInt64(1);
+            }
+        }
+
+        return counts;
     }
 
     private static bool HasColumn(
@@ -2538,6 +2735,14 @@ public sealed class TargetSchedulerCatalogWriter
 
     private sealed record LocalProject(long Id, string Guid, string? Name);
 
+    private sealed record RemovedTemplate(Guid Guid, string? Name);
+
+    private sealed record RemovedTemplates(
+        IReadOnlyList<RemovedTemplate> Templates,
+        int InvalidRows);
+
+    private sealed record LocalTemplate(long Id, string? Name);
+
     private readonly record struct ExposurePlanCounts(long Acquired, long Accepted);
 
     private sealed class MutableApplyResult
@@ -2560,6 +2765,14 @@ public sealed class TargetSchedulerCatalogWriter
 
         public List<string> ProjectMessages { get; } = [];
 
+        public int TemplatesDeleted { get; set; }
+
+        public int TemplatesKept { get; set; }
+
+        public int TemplateRowsSkipped { get; set; }
+
+        public List<string> TemplateMessages { get; } = [];
+
         public ApplyResult ToImmutable() => new()
         {
             Inserted = Inserted,
@@ -2571,6 +2784,10 @@ public sealed class TargetSchedulerCatalogWriter
             ProjectRowsSkipped = ProjectRowsSkipped,
             TemplatesMerged = TemplatesMerged,
             ProjectMessages = ProjectMessages.ToArray(),
+            TemplatesDeleted = TemplatesDeleted,
+            TemplatesKept = TemplatesKept,
+            TemplateRowsSkipped = TemplateRowsSkipped,
+            TemplateMessages = TemplateMessages.ToArray(),
         };
     }
 }

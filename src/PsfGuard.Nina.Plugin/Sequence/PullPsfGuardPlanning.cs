@@ -40,6 +40,11 @@ public sealed class PullPsfGuardPlanning : PsfGuardSequenceItemBase
             Report(progress, deletedProjects);
         }
 
+        if (result.DeletedTemplatesSummary is { } deletedTemplates)
+        {
+            Report(progress, deletedTemplates);
+        }
+
         if (result.MergedTemplatesSummary is { } mergedTemplates)
         {
             Report(progress, mergedTemplates);

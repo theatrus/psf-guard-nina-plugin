@@ -477,6 +477,7 @@ public sealed class PsfGuardSyncClient : IDisposable
             reviewedOnly,
             includeThumbnails: null,
             includeProjectTombstones: false,
+            includeTemplateTombstones: false,
             cancellationToken: cancellationToken,
             progress: null);
 
@@ -494,6 +495,7 @@ public sealed class PsfGuardSyncClient : IDisposable
                 reviewedOnly,
                 includeThumbnails,
                 includeProjectTombstones: false,
+                includeTemplateTombstones: false,
                 cancellationToken,
                 progress)
             .ConfigureAwait(false);
@@ -520,6 +522,38 @@ public sealed class PsfGuardSyncClient : IDisposable
                 reviewedOnly,
                 includeThumbnails,
                 includeProjectTombstones,
+                includeTemplateTombstones: false,
+                cancellationToken,
+                progress)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Download an export. <paramref name="includeProjectTombstones"/> and
+    /// <paramref name="includeTemplateTombstones"/> add
+    /// <c>include_project_tombstones: true</c> and
+    /// <c>include_template_tombstones: true</c> to the request; pass each
+    /// true only when the server advertises <c>project_tombstones_v1</c> or
+    /// <c>template_tombstones_v1</c>. When false the request leaves that
+    /// field out, as older clients do.
+    /// </summary>
+    public async Task<CatalogBundle> DownloadExportAsync(
+        string catalogId,
+        SyncOperation operation,
+        bool reviewedOnly,
+        bool? includeThumbnails,
+        bool includeProjectTombstones,
+        bool includeTemplateTombstones,
+        CancellationToken cancellationToken,
+        IProgress<SyncProgress>? progress = null)
+    {
+        return await DownloadExportCoreAsync(
+                catalogId,
+                operation,
+                reviewedOnly,
+                includeThumbnails,
+                includeProjectTombstones,
+                includeTemplateTombstones,
                 cancellationToken,
                 progress)
             .ConfigureAwait(false);
@@ -531,6 +565,7 @@ public sealed class PsfGuardSyncClient : IDisposable
         bool reviewedOnly,
         bool? includeThumbnails,
         bool includeProjectTombstones,
+        bool includeTemplateTombstones,
         CancellationToken cancellationToken,
         IProgress<SyncProgress>? progress)
     {
@@ -541,6 +576,7 @@ public sealed class PsfGuardSyncClient : IDisposable
             ReviewedOnly = reviewedOnly,
             IncludeThumbnails = includeThumbnails,
             IncludeProjectTombstones = includeProjectTombstones ? true : null,
+            IncludeTemplateTombstones = includeTemplateTombstones ? true : null,
         };
         using var request = new HttpRequestMessage(HttpMethod.Post, "api/sync/v1/exports")
         {
