@@ -321,8 +321,8 @@ unchanged, and N.I.N.A. hides them until the plugin is updated.
 Target Scheduler lists every template a profile has, so a planning or merge
 pull must not add a second copy of a template the file already has.
 
-- Before it writes, the plugin merges the running profile's templates that
-  repeat one another: the same name and filter (without case or surrounding
+- After applying incoming template edits, the plugin merges the running
+  profile's templates that repeat one another: the same name and filter (without case or surrounding
   spaces) and every other column but `Id` and `guid` equal, with a gain,
   offset or readout mode that is `NULL` or below zero read as -1 and a
   binning below one read as one. Each copy's exposure plans move to the
@@ -330,13 +330,19 @@ pull must not add a second copy of a template the file already has.
   GUID the bundle has, then the one most plans use, then the oldest. When
   the plugin cannot tell which profile is running, it merges every
   profile's. Older plugins added such copies when two databases had given
-  one template different GUIDs.
+  one template different GUIDs. GUIDs shared by multiple local templates are
+  left ambiguous, even when their settings match; merging cannot make them
+  eligible for a deletion record. Incoming plan references are remapped to
+  the surviving template in the same transaction.
 - A template whose GUID the file lacks takes the oldest template in its
   profile that is identical to it in every other column, read the same
   way, and gives it the bundle's GUID, so later pulls match it by GUID.
   When another row of the bundle has that template's GUID, or took it
   earlier in the same pull, this row only maps to it. A template that
-  differs in any setting is never rewritten: the row is inserted.
+  differs in any setting is never rewritten: the row is inserted. Existing
+  GUIDs are updated before twin matching, so bundle row order cannot match
+  stale settings. A bundle missing a destination template setting cannot
+  prove an identical twin and therefore does not take over that row.
 - A waiting template placed in a profile reads camera defaults the same
   way when it looks for the profile's template with the same filter and
   settings.

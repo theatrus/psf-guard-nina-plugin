@@ -425,17 +425,6 @@ public sealed class TargetSchedulerCatalogWriter
         bool preservePlanProgress,
         CancellationToken cancellationToken)
     {
-        // Templates this database repeats are merged first, so a template
-        // from PSF Guard finds the one kept.
-        result.TemplatesMerged += MergeRepeatedTemplates(
-            connection,
-            transaction,
-            runningProfile,
-            RowsByColumn(bundle.Tables["exposuretemplate"])
-                .Select(row => OptionalText(row, "guid"))
-                .OfType<string>()
-                .ToHashSet(StringComparer.Ordinal),
-            cancellationToken);
         var waitingTemplates = new WaitingTemplates();
         var templateMap = UpsertGuidTable(
             connection,
@@ -447,6 +436,18 @@ public sealed class TargetSchedulerCatalogWriter
             runningProfile,
             waitingTemplates,
             result,
+            cancellationToken);
+        // Compare final settings, after incoming edits. Merging beforehand
+        // could move a rig-only plan to a template this pull then changes.
+        result.TemplatesMerged += MergeRepeatedTemplates(
+            connection,
+            transaction,
+            runningProfile,
+            RowsByColumn(bundle.Tables["exposuretemplate"])
+                .Select(row => OptionalText(row, "guid"))
+                .OfType<string>()
+                .ToHashSet(StringComparer.Ordinal),
+            templateMap,
             cancellationToken);
         var projectMap = UpsertGuidTable(
             connection,
@@ -736,6 +737,14 @@ public sealed class TargetSchedulerCatalogWriter
                 .ToHashSet(StringComparer.Ordinal)
             : null;
         var claimedTwins = new HashSet<long>();
+        var templateGuidCounts = bundleGuids is null ? null : ReadTemplateGuidCounts(connection, transaction);
+        if (templateGuidCounts is not null)
+        {
+            // Apply GUID-owned edits before matching new GUIDs to their twins.
+            // Otherwise an earlier row can alias a template's stale settings.
+            rows = rows.OrderByDescending(row => templateGuidCounts.ContainsKey(
+                TemplateGuidKey(DatabaseValue(row, "guid")) ?? string.Empty)).ToList();
+        }
 
         foreach (var sourceRow in rows)
         {
@@ -748,7 +757,8 @@ public sealed class TargetSchedulerCatalogWriter
                 continue;
             }
 
-            if (duplicateGuids.Contains(guid))
+            if (duplicateGuids.Contains(guid)
+                || templateGuidCounts?.GetValueOrDefault(TemplateGuidKey(guid)!) > 1)
             {
                 result.Skipped++;
                 continue;
@@ -813,7 +823,7 @@ public sealed class TargetSchedulerCatalogWriter
 
             if (matches.Count == 0
                 && bundleGuids is not null
-                && FindIdenticalTemplate(connection, transaction, values) is { } twin)
+                && FindIdenticalTemplate(connection, transaction, values, destinationColumns, templateGuidCounts!) is { } twin)
             {
                 // The database's own copy of this template under another
                 // GUID: two copies of one database each fill in their own
@@ -2030,9 +2040,13 @@ public sealed class TargetSchedulerCatalogWriter
     private static (long Id, object? Guid)? FindIdenticalTemplate(
         SQLiteConnection connection,
         SQLiteTransaction transaction,
-        IReadOnlyDictionary<string, object?> values)
+        IReadOnlyDictionary<string, object?> values,
+        IReadOnlyCollection<string> destinationColumns,
+        IReadOnlyDictionary<string, int> guidCounts)
     {
-        if (values.GetValueOrDefault(ProfileColumn) is not string profile
+        if (destinationColumns.Any(column => !column.Equals("Id", StringComparison.OrdinalIgnoreCase)
+                && !column.Equals("guid", StringComparison.OrdinalIgnoreCase) && !values.ContainsKey(column))
+            || values.GetValueOrDefault(ProfileColumn) is not string profile
             || values.GetValueOrDefault("name") is not string name
             || values.GetValueOrDefault("filtername") is not string filter)
         {
@@ -2060,6 +2074,10 @@ public sealed class TargetSchedulerCatalogWriter
         var identical = IdenticalKey(values);
         foreach (var candidate in candidates)
         {
+            if (guidCounts.GetValueOrDefault(TemplateGuidKey(candidate.Guid) ?? string.Empty) > 1)
+            {
+                continue;
+            }
             var row = ReadRowById(connection, transaction, "exposuretemplate", candidate.Id, values.Keys);
             if (IdenticalKey(row) == identical)
             {
@@ -2116,6 +2134,28 @@ public sealed class TargetSchedulerCatalogWriter
     private static long Binning(object? value) =>
         WholeNumber(value) is { } number && number >= 1 ? number : 1;
 
+    private static string? TemplateGuidKey(object? value) =>
+        TryParseGuid(value, out var guid) ? guid.ToString("D") : (value as string)?.Trim();
+
+    private static Dictionary<string, int> ReadTemplateGuidCounts(
+        SQLiteConnection connection,
+        SQLiteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT guid FROM exposuretemplate";
+        using var reader = command.ExecuteReader();
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        while (reader.Read())
+        {
+            if (TemplateGuidKey(reader.GetValue(0)) is { } key)
+            {
+                counts[key] = counts.GetValueOrDefault(key) + 1;
+            }
+        }
+        return counts;
+    }
+
     /// <summary>
     /// Merges the templates this database repeats, as <see cref="IdenticalKey"/>
     /// compares them. Each copy's exposure plans move to the template kept,
@@ -2131,9 +2171,11 @@ public sealed class TargetSchedulerCatalogWriter
         SQLiteTransaction transaction,
         string? runningProfile,
         IReadOnlySet<string> preferredGuids,
+        Dictionary<long, long> templateMap,
         CancellationToken cancellationToken)
     {
         var columns = ReadColumnNames(connection, transaction, "exposuretemplate").ToArray();
+        var guidCounts = ReadTemplateGuidCounts(connection, transaction);
         var plans = new Dictionary<long, long>();
         using (var count = connection.CreateCommand())
         {
@@ -2179,6 +2221,12 @@ public sealed class TargetSchedulerCatalogWriter
                 {
                     continue;
                 }
+                // Preserve ambiguity for both GUID updates and tombstones.
+                // Identical settings do not prove which duplicate was deleted.
+                if (guidCounts.GetValueOrDefault(TemplateGuidKey(row.GetValueOrDefault("guid")) ?? string.Empty) > 1)
+                {
+                    continue;
+                }
 
                 var groupKey = IdenticalKey(row);
                 if (!groups.TryGetValue(groupKey, out var group))
@@ -2194,6 +2242,7 @@ public sealed class TargetSchedulerCatalogWriter
         }
 
         var merged = 0;
+        var redirects = new Dictionary<long, long>();
         foreach (var group in groups.Values.Where(group => group.Count > 1))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -2217,6 +2266,15 @@ public sealed class TargetSchedulerCatalogWriter
                 delete.CommandText = "DELETE FROM exposuretemplate WHERE Id = @copy";
                 delete.Parameters.AddWithValue("@copy", copy.Id);
                 merged += delete.ExecuteNonQuery();
+                redirects[copy.Id] = kept;
+            }
+        }
+
+        foreach (var sourceId in templateMap.Keys.ToArray())
+        {
+            if (redirects.TryGetValue(templateMap[sourceId], out var kept))
+            {
+                templateMap[sourceId] = kept;
             }
         }
 

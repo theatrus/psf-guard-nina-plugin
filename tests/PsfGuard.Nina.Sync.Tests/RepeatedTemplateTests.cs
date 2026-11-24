@@ -228,6 +228,89 @@ public sealed class RepeatedTemplateTests
         Assert.Equal("2", Scalar(database, "SELECT COUNT(*) FROM exposuretemplate WHERE profileId = 'other'"));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task IncomingEditDoesNotChangePlansUsingAnotherLocalTemplate(bool merge)
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0);
+        destination.Seed(0);
+        using (var database = source.Open())
+        {
+            database.Execute("UPDATE exposuretemplate SET gain = 200");
+        }
+        using (var database = destination.Open())
+        {
+            database.Execute("""
+                INSERT INTO exposuretemplate (Id, profileId, name, filtername, gain, guid)
+                VALUES (40, 'profile', 'L 120', 'L', 100, 'rig-copy');
+                INSERT INTO exposureplan (Id, profileId, exposure, desired, acquired, accepted, targetId, exposureTemplateId, guid)
+                VALUES (50, 'profile', 120, 10, 6, 5, 2, 40, 'rig-only-plan');
+                """);
+        }
+
+        await ApplyAsync(new TargetSchedulerCatalogWriter(destination.Path), await BundleAsync(source, merge), merge);
+        using var result = destination.Open();
+        Assert.Equal("100", Scalar(result, "SELECT t.gain FROM exposureplan p JOIN exposuretemplate t ON t.Id = p.exposureTemplateId WHERE p.guid = 'rig-only-plan'"));
+        Assert.Equal("200", Scalar(result, "SELECT t.gain FROM exposureplan p JOIN exposuretemplate t ON t.Id = p.exposureTemplateId WHERE p.guid = 'plan-guid'"));
+        Assert.Equal("6|5", Scalar(result, "SELECT acquired || '|' || accepted FROM exposureplan WHERE guid = 'rig-only-plan'"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TwinMatchUsesFinalIncomingSettingsRegardlessOfRowOrder(bool merge)
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0);
+        destination.Seed(0);
+        using (var database = source.Open())
+        {
+            database.Execute("""
+                UPDATE exposuretemplate SET gain = 200;
+                INSERT INTO exposuretemplate (Id, profileId, name, filtername, gain, guid)
+                VALUES (1, 'profile', 'L 120', 'L', 100, 'new-template');
+                INSERT INTO exposureplan (Id, profileId, exposure, desired, acquired, accepted, targetId, exposureTemplateId, guid)
+                VALUES (14, 'profile', 120, 10, 0, 0, 2, 1, 'new-plan');
+                """);
+        }
+
+        for (var pull = 0; pull < 2; pull++)
+        {
+            await ApplyAsync(new TargetSchedulerCatalogWriter(destination.Path), await BundleAsync(source, merge), merge);
+            using var result = destination.Open();
+            Assert.Equal("100", Scalar(result, "SELECT t.gain FROM exposureplan p JOIN exposuretemplate t ON t.Id = p.exposureTemplateId WHERE p.guid = 'new-plan'"));
+            Assert.Equal("200", Scalar(result, "SELECT t.gain FROM exposureplan p JOIN exposuretemplate t ON t.Id = p.exposureTemplateId WHERE p.guid = 'plan-guid'"));
+            Assert.Equal("2", Scalar(result, "SELECT COUNT(*) FROM exposuretemplate"));
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MissingTemplateSettingCannotProveAnIdenticalTwin(bool merge)
+    {
+        using var source = new TestDatabase();
+        using var destination = new TestDatabase();
+        source.Seed(0);
+        using (var database = destination.Open())
+        {
+            database.Execute("""
+                ALTER TABLE exposuretemplate ADD COLUMN defaultexposure REAL;
+                INSERT INTO exposuretemplate (Id, profileId, name, filtername, gain, guid, defaultexposure)
+                VALUES (40, 'profile', 'L 120', 'L', 100, 'rig-template', 300);
+                """);
+        }
+
+        await ApplyAsync(new TargetSchedulerCatalogWriter(destination.Path), await BundleAsync(source, merge), merge);
+        using var result = destination.Open();
+        Assert.Equal("rig-template", Scalar(result, "SELECT guid FROM exposuretemplate WHERE Id = 40"));
+        Assert.NotEqual("40", Scalar(result, "SELECT exposureTemplateId FROM exposureplan WHERE guid = 'plan-guid'"));
+    }
+
     private static string? Scalar(System.Data.SQLite.SQLiteConnection connection, string sql)
     {
         using var command = connection.CreateCommand();

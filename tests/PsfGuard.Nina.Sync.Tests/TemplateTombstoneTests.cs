@@ -343,21 +343,27 @@ public sealed class TemplateTombstoneTests
         Assert.Equal(0, CountWhere(connection, "project", "guid", ProjectGuid));
     }
 
-    [Fact]
-    public async Task TemplateWhoseGuidIsNotUniqueIsKept()
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task TemplateWhoseGuidIsNotUniqueIsKept(bool merge, bool identical)
     {
         using var source = new TestDatabase();
         using var destination = new TestDatabase();
         SeedProject(source, 400, ProjectGuid, TargetGuid, "NGC 7000");
         SeedTemplate(destination, 501, "Ha 300", "Ha", UnusedTemplateGuid);
-        SeedTemplate(destination, 502, "Ha 300 copy", "Ha", UnusedTemplateGuid.ToUpperInvariant());
+        SeedTemplate(destination, 502, identical ? "Ha 300" : "Ha 300 copy", "Ha", UnusedTemplateGuid.ToUpperInvariant());
 
-        var bundle = await BuildBundleAsync(source, merge: false);
+        var bundle = await BuildBundleAsync(source, merge);
         bundle.Tables[TargetSchedulerCatalogWriter.RemovedTemplateTable] =
             RemovedTemplates((UnusedTemplateGuid, "Ha 300"));
 
-        var result = await new TargetSchedulerCatalogWriter(destination.Path)
-            .ApplyPlanningAsync(bundle, CancellationToken.None);
+        var writer = new TargetSchedulerCatalogWriter(destination.Path);
+        var result = merge
+            ? await writer.ApplyMergeAsync(bundle, CancellationToken.None)
+            : await writer.ApplyPlanningAsync(bundle, CancellationToken.None);
 
         Assert.Equal(0, result.TemplatesDeleted);
         Assert.Equal(1, result.TemplatesKept);
